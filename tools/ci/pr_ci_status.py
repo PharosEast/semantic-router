@@ -12,7 +12,13 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlencode
 
-from manual_ci import PAGE_SIZE, GitHubClient, ManualCIError, read_artifact
+from manual_ci import (
+    PAGE_SIZE,
+    GitHubClient,
+    ManualCIError,
+    http_error_status,
+    read_artifact,
+)
 
 CHECK = "PR Gate"
 MARKER = "<!-- semantic-router-ci-status:v1 -->"
@@ -27,7 +33,9 @@ COMMENT_ITEM_LIMIT = 30
 
 
 class StatusClient(GitHubClient):
-    def write(self, endpoint: str, payload: dict, *, method="POST"):
+    def write(
+        self, endpoint: str, payload: dict, *, method="POST", operation: str = "write"
+    ):
         result = subprocess.run(
             ["gh", "api", endpoint, "--method", method, "--input", "-"],
             input=json.dumps(payload),
@@ -37,8 +45,12 @@ class StatusClient(GitHubClient):
             check=False,
         )
         if result.returncode:
+            status = http_error_status(result.stderr)
+            detail = f"; HTTP {status}" if status else ""
             raise ManualCIError(
-                "Could not publish CI status; check workflow permissions."
+                f"Could not publish CI status ({operation}{detail}); "
+                "check workflow permissions.",
+                http_status=status,
             )
         return json.loads(result.stdout) if result.stdout.strip() else None
 
@@ -413,9 +425,12 @@ def publish(
                 }",
                 update,
                 method="PATCH",
+                operation="check-run update",
             )
         else:
-            client.write(f"repos/{repo}/check-runs", payload)
+            client.write(
+                f"repos/{repo}/check-runs", payload, operation="check-run create"
+            )
     if result["comment"]:
         if owned:
             comment = max(owned, key=lambda item: item["id"])
@@ -424,10 +439,13 @@ def publish(
                     f"repos/{repo}/issues/comments/{comment['id']}",
                     {"body": comment_body},
                     method="PATCH",
+                    operation="guidance-comment update",
                 )
         else:
             client.write(
-                f"repos/{repo}/issues/{pull['number']}/comments", {"body": comment_body}
+                f"repos/{repo}/issues/{pull['number']}/comments",
+                {"body": comment_body},
+                operation="guidance-comment create",
             )
     return result
 

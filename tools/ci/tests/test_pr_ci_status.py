@@ -4,6 +4,7 @@ import copy
 import hashlib
 import io
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -12,11 +13,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from manual_ci import ManualCIError
 from pr_ci_status import (
     APP_ID,
     CAPABILITIES,
     MARKER,
     PREFIX,
+    StatusClient,
     main,
     reconcile,
 )
@@ -543,3 +546,47 @@ class PRStatusTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class WriteErrorDetailTest(unittest.TestCase):
+    """A failed publisher write names its operation and the sanitized HTTP status."""
+
+    def failed(self, stderr):
+        return subprocess.CompletedProcess(
+            args=["gh", "api"], returncode=1, stdout="", stderr=stderr
+        )
+
+    def test_write_failure_names_operation_and_http_status(self):
+        from pr_ci_status import StatusClient
+
+        failed = self.failed(
+            'gh: {"message": "API rate limit exceeded"} (HTTP 403)\n'
+        )
+        with patch("pr_ci_status.subprocess.run", return_value=failed):
+            with self.assertRaises(ManualCIError) as caught:
+                StatusClient().write(
+                    "repos/example/router/check-runs",
+                    {},
+                    operation="check-run create",
+                )
+        message = str(caught.exception)
+        self.assertIn("check-run create", message)
+        self.assertIn("HTTP 403", message)
+        # the API response text stays out of the credential-free error
+        self.assertNotIn("rate limit", message)
+
+    def test_write_failure_without_a_status_stays_operation_only(self):
+        from pr_ci_status import StatusClient
+
+        failed = self.failed("gh: unexpected transport failure\n")
+        with patch("pr_ci_status.subprocess.run", return_value=failed):
+            with self.assertRaises(ManualCIError) as caught:
+                StatusClient().write(
+                    "repos/example/router/issues/3/comments",
+                    {},
+                    operation="guidance-comment create",
+                )
+        message = str(caught.exception)
+        self.assertIn("guidance-comment create", message)
+        self.assertNotIn("HTTP", message)
+        self.assertNotIn("transport failure", message)
