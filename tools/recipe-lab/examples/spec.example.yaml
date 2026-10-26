@@ -1,0 +1,28 @@
+api_version: recipe-lab/v1alpha1
+objective:
+  metric_key: capability.score
+  direction: maximize
+  min_improvement_pct: 1.0
+workload:
+  manifest: datasets/dev-mmlu-pro.yaml
+  content_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  profile: quick
+attribution:
+  oracle_policy:
+    math: local/model-math
+    code: local/model-code
+    reasoning: local/model-large
+gates:
+  - name: pii-recall-floor
+    metric: guard.pii.recall
+    floor: baseline
+budget:
+  rounds: 5
+  max_minutes_per_trial: 60
+stack:
+  mode: external
+  endpoint: http://127.0.0.1:8899
+  baseline_ref: config-revision@main
+evaluation:
+  search_tier: replay
+  final_tier: live
