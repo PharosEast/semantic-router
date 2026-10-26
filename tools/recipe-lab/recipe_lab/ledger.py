@@ -1,0 +1,219 @@
+"""Append-only evidence ledger (JSONL).
+
+One record per evaluated candidate. Two tiers with isolated verdict types
+(recipe-lab design §5.3):
+
+- tier "replay": verdict must be RANKED (sort-only; an unverified number must
+  never look like a conclusion);
+- tier "live":   verdict must be PASS / FAIL / INCONCLUSIVE, and live records
+  must additionally carry `gates` (guard-floor results) and `bench_refs`
+  (sr-bench run/compare IDs) so that reports and provenance manifests can be
+  replayed from the ledger alone.
+
+The ledger is append-only: there is no update or delete API by design.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Iterator
+
+from .contract import LIVE_VERDICTS, REPLAY_VERDICTS, TIERS, ContractError
+
+COMMON_REQUIRED = ("round", "ts", "candidate", "tier", "baseline_ref", "metrics", "verdict", "dataset_hash")
+
+
+@dataclass(frozen=True)
+class LedgerRecord:
+    round: int
+    ts: str
+    candidate: dict
+    tier: str
+    baseline_ref: str
+    metrics: dict
+    verdict: str
+    dataset_hash: str
+    reasons: list[str] = field(default_factory=list)
+    gates: dict | None = None
+    bench_refs: list[str] = field(default_factory=list)
+    attribution_delta: dict | None = None
+    attribution_ref: str | None = None
+    coverage_warning: bool = False
+    notes: str = ""
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {
+            "round": self.round,
+            "ts": self.ts,
+            "candidate": self.candidate,
+            "tier": self.tier,
+            "baseline_ref": self.baseline_ref,
+            "metrics": self.metrics,
+            "verdict": self.verdict,
+            "dataset_hash": self.dataset_hash,
+            "reasons": list(self.reasons),
+        }
+        if self.gates is not None:
+            out["gates"] = dict(self.gates)
+        if self.bench_refs:
+            out["bench_refs"] = list(self.bench_refs)
+        if self.attribution_delta is not None:
+            out["attribution_delta"] = dict(self.attribution_delta)
+        if self.attribution_ref:
+            out["attribution_ref"] = self.attribution_ref
+        if self.coverage_warning:
+            out["coverage_warning"] = True
+        if self.notes:
+            out["notes"] = self.notes
+        return out
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> "LedgerRecord":
+        validate_record(raw)
+        return cls(
+            round=int(raw["round"]),
+            ts=str(raw["ts"]),
+            candidate=dict(raw["candidate"]),
+            tier=str(raw["tier"]),
+            baseline_ref=str(raw["baseline_ref"]),
+            metrics=dict(raw["metrics"]),
+            verdict=str(raw["verdict"]),
+            dataset_hash=str(raw["dataset_hash"]),
+            reasons=[str(r) for r in raw.get("reasons", [])],
+            gates=dict(raw["gates"]) if raw.get("gates") is not None else None,
+            bench_refs=[str(r) for r in raw.get("bench_refs", [])],
+            attribution_delta=dict(raw["attribution_delta"]) if raw.get("attribution_delta") is not None else None,
+            attribution_ref=raw.get("attribution_ref"),
+            coverage_warning=bool(raw.get("coverage_warning", False)),
+            notes=str(raw.get("notes", "")),
+        )
+
+
+def validate_record(raw: dict) -> None:
+    """Validate one ledger record against the v1alpha1 ledger contract."""
+    for name in COMMON_REQUIRED:
+        _require_present(raw, name)
+    if isinstance(raw["round"], bool) or not isinstance(raw["round"], int):
+        raise ContractError("round must be an integer")
+    tier = raw["tier"]
+    if tier not in TIERS:
+        raise ContractError(f"tier must be one of {sorted(TIERS)}, got {tier!r}")
+    verdict = raw["verdict"]
+    if tier == "replay" and verdict not in REPLAY_VERDICTS:
+        raise ContractError(
+            f"replay-tier records must use RANKED verdict (got {verdict!r}); "
+            "unverified numbers must not look like conclusions"
+        )
+    if tier == "live" and verdict not in LIVE_VERDICTS:
+        raise ContractError(
+            f"live-tier records must use one of {sorted(LIVE_VERDICTS)} (got {verdict!r}); "
+            "use RANKED only in the replay tier"
+        )
+    if not isinstance(raw["metrics"], dict):
+        raise ContractError("metrics must be a mapping")
+    if not isinstance(raw["candidate"], dict):
+        raise ContractError("candidate must be a mapping")
+    _require_nonempty_str(raw["dataset_hash"], "dataset_hash")
+    if tier == "live":
+        gates = raw.get("gates")
+        if not isinstance(gates, dict):
+            raise ContractError("live-tier records must carry a 'gates' mapping (guard-floor results)")
+        bench_refs = raw.get("bench_refs")
+        if not isinstance(bench_refs, list):
+            raise ContractError("live-tier records must carry a 'bench_refs' list (sr-bench run/compare IDs)")
+        if verdict != "INCONCLUSIVE" and not bench_refs:
+            raise ContractError(
+                "live records with a concluded verdict must reference at least one sr-bench run "
+                "(bench_refs); INCONCLUSIVE records may have an empty list"
+            )
+    for optional_list in ("reasons", "bench_refs"):
+        if optional_list in raw and not isinstance(raw[optional_list], list):
+            raise ContractError(f"{optional_list} must be a list")
+    if "attribution_ref" in raw and raw["attribution_ref"] is not None:
+        _require_nonempty_str(raw["attribution_ref"], "attribution_ref")
+
+
+def _require_present(raw: dict, name: str) -> None:
+    if name not in raw:
+        raise ContractError(f"ledger record is missing required field: {name}")
+
+
+def _require_nonempty_str(value: Any, name: str) -> None:
+    if not isinstance(value, str) or not value.strip():
+        raise ContractError(f"{name} must be a non-empty string")
+
+
+class Ledger:
+    """Append-only JSONL ledger at a fixed path."""
+
+    def __init__(self, path: str | Path):
+        self.path = Path(path)
+
+    def append(self, record: LedgerRecord | dict) -> dict:
+        raw = record.to_dict() if isinstance(record, LedgerRecord) else dict(record)
+        validate_record(raw)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        line = json.dumps(raw, ensure_ascii=False, allow_nan=False)
+        with self.path.open("a", encoding="utf-8") as fh:
+            fh.write(line + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        return raw
+
+    def read(self) -> list[dict]:
+        if not self.path.is_file():
+            return []
+        records: list[dict] = []
+        with self.path.open("r", encoding="utf-8") as fh:
+            for lineno, line in enumerate(fh, 1):
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError as exc:
+                    raise ContractError(f"ledger {self.path} line {lineno} is not valid JSON: {exc}") from exc
+        return records
+
+    def iter_records(self) -> Iterator[dict]:
+        yield from self.read()
+
+    def filter(
+        self,
+        *,
+        tier: str | None = None,
+        verdict: str | None = None,
+        round_no: int | None = None,
+        proposer: str | None = None,
+    ) -> list[dict]:
+        out = []
+        for raw in self.read():
+            if tier is not None and raw.get("tier") != tier:
+                continue
+            if verdict is not None and raw.get("verdict") != verdict:
+                continue
+            if round_no is not None and raw.get("round") != round_no:
+                continue
+            if proposer is not None and raw.get("candidate", {}).get("provenance", {}).get("proposer") != proposer:
+                continue
+            out.append(raw)
+        return out
+
+    def top_replay(self, metric_key: str) -> dict | None:
+        """Best replay-tier candidate: highest metric, coverage_warning excluded.
+
+        This is the hand-off contract to the live tier (Sub-issue 3)."""
+        best: dict | None = None
+        best_value: float | None = None
+        for raw in self.filter(tier="replay", verdict="RANKED"):
+            if raw.get("coverage_warning"):
+                continue
+            value = raw.get("metrics", {}).get(metric_key)
+            if not isinstance(value, (int, float)) or isinstance(value, bool):
+                continue
+            if best_value is None or value > best_value:
+                best, best_value = raw, float(value)
+        return best
