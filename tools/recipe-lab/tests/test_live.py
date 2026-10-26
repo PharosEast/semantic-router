@@ -1,0 +1,80 @@
+"""Live-tier orchestration tests: guard parsing, metric pairing, verdict flow."""
+
+from __future__ import annotations
+
+import pytest
+
+from recipe_lab.contract import ContractError
+from recipe_lab.live import _pair_metrics, guards_from_rows, live_verdict_from_runs
+from recipe_lab.srbench import SrbenchCli
+from tests.fixtures import VALID_SPEC
+
+
+def test_guards_from_rows_validates():
+    guards = guards_from_rows([{"name": "pii", "metric": "guard.pii", "value": 0.97, "floor": 0.95}])
+    assert guards[0].passed is True
+    # a missing floor is legal (guard not evaluated -> incomplete), a missing
+    # name is not - the record would be unidentifiable
+    with pytest.raises(ContractError, match="name"):
+        guards_from_rows([{"metric": "m", "value": 0.9, "floor": 0.8}])
+
+
+def test_pair_metrics_sectioned_payload():
+    payload = {"baseline": {"m": {"capability.score": 0.80}}, "candidate": {"capability.score": 0.86}}
+    base, cand = _pair_metrics(payload, "capability.score", [])
+    assert (base, cand) == (0.80, 0.86)
+
+
+def test_pair_metrics_flat_two_values():
+    base, cand = _pair_metrics({"a": 0.80, "b": 0.86}, "x", [])
+    assert base is None and cand is None  # different key, nothing matched
+    incomplete: list[str] = []
+    base, cand = _pair_metrics({"capability.score": 0.80, "nested": {"capability.score": 0.86}}, "capability.score", incomplete)
+    assert (base, cand) == (0.80, 0.86)
+    assert incomplete == []
+
+
+def test_pair_metrics_ambiguous_is_incomplete():
+    incomplete: list[str] = []
+    base, cand = _pair_metrics({"capability.score": 0.8}, "capability.score", incomplete)
+    assert base is None and cand is None
+    assert "ambiguous" in incomplete[0]
+
+
+def _spec():
+    from recipe_lab.contract import ExperimentSpec
+
+    return ExperimentSpec.from_dict(VALID_SPEC)
+
+
+def test_live_verdict_pass_flow():
+    class FakeCli:
+        def compare(self, base, cand):
+            return {"baseline": {"capability.score": 0.80}, "candidate": {"capability.score": 0.86}}
+
+    result = live_verdict_from_runs(
+        spec=_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        guards=guards_from_rows([{"name": "pii", "metric": "g", "value": 0.97, "floor": 0.95}]),
+    )
+    assert result["verdict"] == "PASS"
+    assert result["gates"] == {"pii": "pass"}
+    assert result["bench_refs"] == ["run-a", "run-b"]
+
+
+def test_live_verdict_ambiguous_is_inconclusive():
+    class FakeCli:
+        def compare(self, base, cand):
+            return {"capability.score": 0.8}  # only one value -> ambiguous
+
+    result = live_verdict_from_runs(
+        spec=_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        guards=[],
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert result["gates"] == {}

@@ -104,3 +104,17 @@ def require_metric(payload: Any, metric_key: str) -> float:
     if value is None:
         raise ContractError(f"metric {metric_key!r} not found in sr-bench payload")
     return value
+
+
+def extract_metric_values(payload: Any, metric_key: str) -> list[float]:
+    """All numeric occurrences of `metric_key`, in traversal order."""
+    values: list[float] = []
+    if isinstance(payload, dict):
+        if metric_key in payload and isinstance(payload[metric_key], (int, float)):
+            values.append(float(payload[metric_key]))
+        for value in payload.values():
+            values.extend(extract_metric_values(value, metric_key))
+    elif isinstance(payload, list):
+        for item in payload:
+            values.extend(extract_metric_values(item, metric_key))
+    return values
