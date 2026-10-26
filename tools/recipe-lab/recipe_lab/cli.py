@@ -39,8 +39,17 @@ from .contract import (
 )
 from .insights import merge_insight_refs, parse_insight_refs, resolve_insight_refs
 from .ledger import Ledger, LedgerRecord
+from .live import guards_from_rows, live_verdict_from_runs
 from .proposers import rule_threshold, threshold_search
-from .runner import RunnerEnv, RunnerError, RunnerTimeout, attribution_delta, evaluate_candidate, replay_metric_value
+from .runner import (
+    RunnerEnv,
+    RunnerError,
+    RunnerTimeout,
+    attribution_delta,
+    candidate_accuracy,
+    evaluate_candidate,
+    replay_metric_value,
+)
 from .splitting import (
     default_split_rule,
     load_cases,
@@ -48,6 +57,7 @@ from .splitting import (
     split_cases,
     write_splits,
 )
+from .srbench import SrbenchCli
 
 
 def _print_json(value: object) -> None:
@@ -586,6 +596,52 @@ def cmd_ledger(args: argparse.Namespace) -> int:
     raise SystemExit(f"unknown ledger action: {args.ledger_action}")  # pragma: no cover
 
 
+def cmd_live_verdict(args: argparse.Namespace) -> int:
+    """Compare two sr-bench runs and record the live-tier verdict."""
+    spec = _load_spec(args.spec)
+    try:
+        guards_rows = [json.loads(line) for line in Path(args.guards).read_text(encoding="utf-8").splitlines() if line.strip()] if args.guards else []
+        guards = guards_from_rows(guards_rows)
+        candidate_row = json.loads(Path(args.candidate).read_text(encoding="utf-8")) if args.candidate else None
+    except (ContractError, OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot load guards or candidate: {exc}") from exc
+
+    cli = SrbenchCli(bin=args.srbench_bin, url=args.srbench_url, store=args.srbench_store, timeout_s=args.timeout)
+    try:
+        result = live_verdict_from_runs(
+            spec=spec,
+            cli=cli,
+            baseline_run_id=args.baseline_run_id,
+            candidate_run_id=args.candidate_run_id,
+            guards=guards,
+        )
+    except (ContractError, RuntimeError) as exc:
+        raise SystemExit(f"live verdict error: {exc}") from exc
+
+    if args.ledger:
+        ledger = Ledger(args.ledger)
+        record = LedgerRecord(
+            round=args.round,
+            ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            candidate=candidate_row
+            or {"kind": "config", "ref": args.candidate_run_id, "change_summary": "", "provenance": {"proposer": "external", "insight_refs": []}},
+            tier="live",
+            baseline_ref=args.baseline_run_id,
+            metrics={spec.objective.metric_key: result["metrics"]["candidate"]},
+            verdict=result["verdict"],
+            dataset_hash=spec.workload.content_hash,
+            reasons=result["reasons"],
+            gates=result["gates"],
+            bench_refs=result["bench_refs"],
+            attribution_delta=None,
+            coverage_warning=False,
+            notes=f"baseline={result['metrics']['baseline']}",
+        )
+        ledger.append(record)
+    _print_json(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="recipe-lab",
@@ -789,6 +845,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="validator invoked as '<bin> config validate --config <path>' (C)",
     )
     p_run.set_defaults(func=cmd_run)
+
+    p_live = sub.add_parser(
+        "live-verdict",
+        help="compare two sr-bench runs and record the live-tier three-state verdict",
+    )
+    p_live.add_argument("--spec", required=True, help="experiment spec YAML")
+    p_live.add_argument("--baseline-run-id", required=True, help="sr-bench baseline run ID")
+    p_live.add_argument("--candidate-run-id", required=True, help="sr-bench candidate run ID")
+    p_live.add_argument("--guards", default=None, help="guards JSONL (name/metric/value/floor) from model_eval")
+    p_live.add_argument("--candidate", default=None, help="candidate JSON file for the ledger record")
+    p_live.add_argument("--ledger", default=None, help="ledger JSONL to append the live record to")
+    p_live.add_argument("--srbench-bin", default="vllm-sr")
+    p_live.add_argument("--srbench-url", default=None)
+    p_live.add_argument("--srbench-store", default=None)
+    p_live.add_argument("--timeout", type=float, default=3600.0)
+    p_live.add_argument("--round", type=int, default=1)
+    p_live.set_defaults(func=cmd_live_verdict)
 
     p_ledger = sub.add_parser("ledger", help="inspect or append to the evidence ledger")
     ledger_sub = p_ledger.add_subparsers(dest="ledger_action", required=True)

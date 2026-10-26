@@ -283,3 +283,9 @@ def replay_metric_value(summary: dict, replay_metric: str) -> float | None:
         raise ContractError(f"unknown replay metric {replay_metric!r}; known: {sorted(REPLAY_SUMMARY_KEYS)}")
     value = summary.get(summary_key)
     return None if value is None else round(float(value), 6)
+
+
+def candidate_accuracy(summary: dict, metric_key: str) -> float | None:
+    """The objective metric for a candidate: routed-outcome accuracy (live tier)."""
+    accuracy = summary.get("accuracy")
+    return None if accuracy is None else round(float(accuracy), 6)
