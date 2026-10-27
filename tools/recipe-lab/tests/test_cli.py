@@ -1,4 +1,10 @@
-"""CLI tests for the A4 contract gates: dataset hash command + verification."""
+"""CLI tests: stage-2 contract gates (A4/A1/A5/B) and the Sub-issue 5 CLI audit.
+
+Audit contract (see tools/agent/skills/recipe-lab-loop/references/command-reference.md):
+stdout of every command is a single JSON document (allow_nan=False, UTF-8);
+progress goes to stderr; exit codes are 0 success, 1 FAIL verdict
+(live-verdict only), 2 usage/contract/tool error.
+"""
 
 from __future__ import annotations
 
@@ -7,8 +13,7 @@ import json
 
 import pytest
 import yaml
-from recipe_lab.cli import main
-
+from recipe_lab.cli import main, verdict_exit_code
 from tests.fixtures import VALID_SPEC
 
 EXIT_CONTRACT_ERROR = 2
@@ -395,3 +400,57 @@ def test_split_command_outputs_spec_ready_block(tmp_path, capsys):
         for name in parsed["splits"]
     )
     assert total == EXPECTED_TOTAL_CASES
+
+
+# ---- Sub-issue 5 CLI audit: exit-code contract and structured stdout ----
+
+
+def _write_spec(tmp_path):
+    spec = tmp_path / "spec.yaml"
+    spec.write_text(yaml.safe_dump(VALID_SPEC), encoding="utf-8")
+    return str(spec)
+
+
+def test_verdict_exit_code_mapping():
+    assert verdict_exit_code("PASS") == 0
+    assert verdict_exit_code("FAIL") == 1
+    assert verdict_exit_code("INCONCLUSIVE") == EXIT_CONTRACT_ERROR
+
+
+def test_plan_prints_single_json_document(tmp_path, capsys):
+    spec = _write_spec(tmp_path)
+    assert main(["plan", "--spec", spec]) == 0
+    out = capsys.readouterr().out
+    parsed = json.loads(out)  # exactly one JSON document, no extra text
+    assert parsed["api_version"] == "recipe-lab/v1alpha1"
+    assert parsed["objective"]["metric_key"] == "capability.score"
+
+
+def test_missing_spec_exits_2_with_stderr_message(tmp_path, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["plan", "--spec", str(tmp_path / "missing.yaml")])
+    assert exc.value.code == EXIT_CONTRACT_ERROR
+    assert "contract error" in capsys.readouterr().err
+
+
+def test_argparse_usage_error_exits_2():
+    with pytest.raises(SystemExit) as exc:
+        main(["no-such-command"])
+    assert exc.value.code == EXIT_CONTRACT_ERROR
+
+
+def test_record_draft_without_pass_exits_2(tmp_path, capsys):
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "record-draft",
+                "--ledger",
+                str(ledger),
+                "--output",
+                str(tmp_path / "d.md"),
+            ]
+        )
+    assert exc.value.code == EXIT_CONTRACT_ERROR
+    assert "no PASS live record" in capsys.readouterr().err
