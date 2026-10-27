@@ -70,13 +70,19 @@ def _print_json(value: object) -> None:
     print(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
 
 
+def _fail(message: str) -> None:
+    """Print the error and exit with the contract-error code (2)."""
+    print(message, file=sys.stderr)
+    raise SystemExit(2)
+
+
 def _load_spec(path: str) -> ExperimentSpec:
     try:
         return ExperimentSpec.from_yaml(path)
     except ContractError as exc:
-        raise SystemExit(f"contract error: {exc}") from exc
+        _fail(f"contract error: {exc}")
     except OSError as exc:
-        raise SystemExit(f"cannot read spec: {exc}") from exc
+        _fail(f"cannot read spec: {exc}")
 
 
 def _select_split(spec: ExperimentSpec, split_name: str) -> str:
@@ -137,7 +143,7 @@ def cmd_attribute(args: argparse.Namespace) -> int:
     try:
         cases = load_records(args.records)
     except (ContractError, OSError) as exc:
-        raise SystemExit(f"cannot load attribution records: {exc}") from exc
+        _fail(f"cannot load attribution records: {exc}")
 
     labels = sorted({c.truth for c in cases})
     gaps = spec.validate_policy_covers(labels)
@@ -181,9 +187,9 @@ def cmd_collect_replays(args: argparse.Namespace) -> int:
     them against the labeled case list -> attribution input records, or with
     --unlabeled emit one raw diagnostic row per record (no labels needed)."""
     if args.unlabeled and args.cases:
-        raise SystemExit("collect-replays: --unlabeled and --cases are mutually exclusive")
+        _fail("collect-replays: --unlabeled and --cases are mutually exclusive")
     if not args.unlabeled and not args.cases:
-        raise SystemExit("collect-replays: one of --cases (labeled join) or --unlabeled (raw rows) is required")
+        _fail("collect-replays: one of --cases (labeled join) or --unlabeled (raw rows) is required")
     try:
         records = fetch_replays(
             args.url,
@@ -192,7 +198,7 @@ def cmd_collect_replays(args: argparse.Namespace) -> int:
             api_key_env=args.api_key_env,
         )
     except RuntimeError as exc:
-        raise SystemExit(f"replay fetch error: {exc}") from exc
+        _fail(f"replay fetch error: {exc}")
 
     output = Path(args.output)
     result: dict = {"replay_records": len(records), "output": str(output)}
@@ -203,7 +209,7 @@ def cmd_collect_replays(args: argparse.Namespace) -> int:
         try:
             cases = load_cases(args.cases)
         except ContractError as exc:
-            raise SystemExit(f"cases error: {exc}") from exc
+            _fail(f"cases error: {exc}")
         rows, stats = records_to_cases(records, cases, family=args.family)
         write_cases(cases, output.with_suffix(".cases.jsonl"))
         result["rows"] = len(rows)
@@ -225,11 +231,11 @@ def cmd_bank(args: argparse.Namespace) -> int:
                     cases.append(json.loads(line))
         models = [m.strip() for m in args.models.split(",") if m.strip()]
         if not models:
-            raise SystemExit("--models must list at least one model name")
+            _fail("--models must list at least one model name")
         try:
             entries = build_bank(cases, models, args.endpoint, timeout=args.timeout)
         except ContractError as exc:
-            raise SystemExit(f"answer bank error: {exc}") from exc
+            _fail(f"answer bank error: {exc}")
         out = write_bank(entries, args.output)
         _print_json({"entries": len(entries), "models": models, "output": str(out)})
         return 0
@@ -239,7 +245,7 @@ def cmd_bank(args: argparse.Namespace) -> int:
             bank = load_bank(args.bank)
             rows = [json.loads(line) for line in Path(args.records).read_text(encoding="utf-8").splitlines() if line.strip()]
         except (ContractError, OSError, json.JSONDecodeError) as exc:
-            raise SystemExit(f"cannot load bank or records: {exc}") from exc
+            _fail(f"cannot load bank or records: {exc}")
         merged, stats = apply_bank(rows, bank)
         output = Path(args.output) if args.output else Path(args.records)
         with output.open("w", encoding="utf-8") as fh:
@@ -248,7 +254,7 @@ def cmd_bank(args: argparse.Namespace) -> int:
         _print_json({"rows": len(merged), "stats": stats, "output": str(output)})
         return 0
 
-    raise SystemExit(f"unknown bank action: {args.bank_action}")  # pragma: no cover
+    _fail(f"unknown bank action: {args.bank_action}")  # pragma: no cover
 
 
 def cmd_propose(args: argparse.Namespace) -> int:
@@ -261,17 +267,17 @@ def cmd_propose(args: argparse.Namespace) -> int:
         with Path(args.base_config).open("r", encoding="utf-8") as fh:
             base = yaml.safe_load(fh)
     except (OSError, yaml.YAMLError) as exc:
-        raise SystemExit(f"cannot read base config: {exc}") from exc
+        _fail(f"cannot read base config: {exc}")
     deltas = [float(part) for part in str(args.deltas).split(",") if part.strip()]
     if not deltas:
-        raise SystemExit("--deltas must list at least one perturbation")
+        _fail("--deltas must list at least one perturbation")
     try:
         candidates = threshold_search.propose_thresholds(
             base, args.signal, deltas, lo=args.lo, hi=args.hi
         )
         paths = threshold_search.write_candidates(candidates, args.output_dir)
     except ContractError as exc:
-        raise SystemExit(f"proposer error: {exc}") from exc
+        _fail(f"proposer error: {exc}")
     _print_json(
         {
             "signal": args.signal,
@@ -412,10 +418,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         bank = load_bank(args.bank)
         cases = [json.loads(line) for line in Path(args.cases).read_text(encoding="utf-8").splitlines() if line.strip()]
     except (ContractError, OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"cannot load bank or cases: {exc}") from exc
+        _fail(f"cannot load bank or cases: {exc}")
     candidates = _resolve_candidates(args.candidates)
     if not candidates:
-        raise SystemExit(f"no candidate configs found: {args.candidates}")
+        _fail(f"no candidate configs found: {args.candidates}")
 
     # C: optional pre-flight validation; rejected candidates never reach the ledger.
     rejected: list[dict] = []
@@ -521,7 +527,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(f"[run] {candidate_path.name}: TRIAL TIMEOUT -> ledger (status=timeout)", file=sys.stderr)
             continue
         except (RunnerError, ContractError, OSError) as exc:
-            raise SystemExit(f"candidate evaluation failed for {candidate_path}: {exc}") from exc
+            _fail(f"candidate evaluation failed for {candidate_path}: {exc}")
         summary = result["summary"]
         # A1: the replay metric is contracted in the spec (not the live metric_key)
         replay_metric = spec.objective.replay_metric
@@ -563,7 +569,7 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         try:
             raw = json.loads(Path(args.record).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            raise SystemExit(f"cannot read record file: {exc}") from exc
+            _fail(f"cannot read record file: {exc}")
         # G2: merge --insight-refs into the record's candidate provenance;
         # unresolvable refs raise ContractError -> main() exits 2.
         if args.insight_refs:
@@ -572,7 +578,7 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         try:
             stored = ledger.append(LedgerRecord.from_dict(raw))
         except ContractError as exc:
-            raise SystemExit(f"ledger contract error: {exc}") from exc
+            _fail(f"ledger contract error: {exc}")
         _print_json({"appended": True, "records": len(ledger.read()), "record": stored})
         return 0
 
@@ -585,7 +591,7 @@ def cmd_ledger(args: argparse.Namespace) -> int:
                 proposer=args.proposer,
             )
         except ContractError as exc:
-            raise SystemExit(f"ledger contract error: {exc}") from exc
+            _fail(f"ledger contract error: {exc}")
         if args.json:
             _print_json(rows)
         else:
@@ -607,11 +613,16 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         try:
             best = ledger.top_replay(metric_key)
         except ContractError as exc:
-            raise SystemExit(f"ledger contract error: {exc}") from exc
+            _fail(f"ledger contract error: {exc}")
         _print_json(best if best is not None else {})
         return 0
 
-    raise SystemExit(f"unknown ledger action: {args.ledger_action}")  # pragma: no cover
+    _fail(f"unknown ledger action: {args.ledger_action}")  # pragma: no cover
+
+
+def verdict_exit_code(verdict: str) -> int:
+    """0 = PASS, 1 = FAIL, 2 = INCONCLUSIVE (or tool/usage error elsewhere)."""
+    return {"PASS": 0, "FAIL": 1}.get(verdict, 2)
 
 
 def cmd_live_verdict(args: argparse.Namespace) -> int:
@@ -634,7 +645,7 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
         )
         candidate_row = json.loads(Path(args.candidate).read_text(encoding="utf-8")) if args.candidate else None
     except (OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"cannot load guard measurements or candidate: {exc}") from exc
+        _fail(f"cannot load guard measurements or candidate: {exc}")
     # A3: measurement schema violations are contract errors (exit 2); a
     # `floor` key in the file must never silently override spec.gates.
     measurements = measurements_from_rows(raw_measurements)
@@ -660,7 +671,7 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             measurements=measurements,
         )
     except (ContractError, RuntimeError) as exc:
-        raise SystemExit(f"live verdict error: {exc}") from exc
+        _fail(f"live verdict error: {exc}")
 
     if args.ledger:
         record = LedgerRecord(
@@ -685,7 +696,7 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
         )
         ledger.append(record)
     _print_json(result)
-    return 0
+    return verdict_exit_code(result["verdict"])
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -716,7 +727,7 @@ def cmd_record_draft(args: argparse.Namespace) -> int:
     ledger = Ledger(args.ledger)
     records = ledger.filter(tier="live", verdict="PASS")
     if not records:
-        raise SystemExit("no PASS live record in the ledger; nothing to draft")
+        _fail("no PASS live record in the ledger; nothing to draft")
     record = records[-1]
     draft = render_promotion_draft(record)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
@@ -876,7 +887,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_rule.set_defaults(func=cmd_propose_rule)
 
     p_run = sub.add_parser("run", help="evaluate candidate configs in the replay tier (RANKED -> ledger)")
-    p_run.add_argument("--tier", default="replay", choices=["replay"], help="live tier arrives with sub-issue 3")
+    p_run.add_argument("--tier", default="replay", choices=["replay"], help="replay tier (RANKED records); live tier uses the live-verdict command")
     p_run.add_argument("--spec", required=True, help="experiment spec YAML")
     p_run.add_argument("--cases", required=True, help="labeled case list JSONL")
     p_run.add_argument(
