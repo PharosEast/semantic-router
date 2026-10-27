@@ -659,6 +659,15 @@ domains:
     checks: [make test-agent-crew]
     verifications: [bench-tools]
 
+  recipe-lab:
+    owner: evaluation-quality
+    paths:
+      - tools/recipe-lab/**
+      - tools/agent/skills/recipe-lab-loop/**
+      - tools/make/tooling.mk
+    checks: [make test-recipe-lab]
+    verifications: []
+
   paper:
     owner: paper
     paths: [paper/**]
