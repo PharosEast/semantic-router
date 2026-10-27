@@ -188,6 +188,10 @@ def record_to_case(
 
     Returns (row, join_state) where join_state is "matched" or the skip
     reason ("no_prompt", "unlabeled"). Only matched records become rows.
+
+    Session evidence (conversation_id / turn_index / session_action /
+    selection_reasoning) is carried through verbatim when the record has it;
+    missing fields stay absent so single-turn records keep their shape.
     """
     prompt = _record_field(record, "prompt", "Prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -213,6 +217,15 @@ def record_to_case(
         or {},
         "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
     }
+    session_evidence = {
+        "conversation_id": _record_field(record, "conversation_id", "ConversationID"),
+        "session_id": _record_field(record, "session_id", "SessionID"),
+        "turn_index": _record_field(record, "turn_index", "TurnIndex"),
+        "session_action": _record_field(record, "session_action", "SessionAction"),
+        "selection_reasoning": _record_field(record, "selection_reasoning", "SelectionReasoning"),
+    }
+    if any(value is not None for value in session_evidence.values()):
+        row["session"] = {k: v for k, v in session_evidence.items() if v is not None}
     return row, "matched"
 
 

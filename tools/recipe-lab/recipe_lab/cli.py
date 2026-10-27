@@ -66,6 +66,7 @@ from .runner import (
     evaluate_candidate,
     replay_metric_value,
 )
+from .session_attribution import write_session_report
 from .splitting import (
     default_split_rule,
     load_cases,
@@ -192,6 +193,17 @@ def cmd_attribute(args: argparse.Namespace) -> int:
             "summary": summary,
         }
     )
+    return 0
+
+
+def cmd_attribute_session(args: argparse.Namespace) -> int:
+    """Session-aware agentic attribution over graded records (Sub-issue 6)."""
+    try:
+        rows = [json.loads(line) for line in Path(args.records).read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, json.JSONDecodeError) as exc:
+        _fail(f"cannot load attribution records: {exc}")
+    summary = write_session_report(rows, args.output_dir)
+    _print_json(summary)
     return 0
 
 
@@ -951,6 +963,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory for attribution.jsonl and report.md",
     )
     p_attr.set_defaults(func=cmd_attribute)
+
+    p_attr_session = sub.add_parser(
+        "attribute-session",
+        help="session-aware agentic attribution (lane_flap / tool_loop_interrupted / selection_failed)",
+    )
+    p_attr_session.add_argument("--records", required=True, help="path to the graded attribution records JSONL (with session fields)")
+    p_attr_session.add_argument("--output-dir", required=True, help="directory for session-report.md and session-events.json")
+    p_attr_session.set_defaults(func=cmd_attribute_session)
 
     p_collect = sub.add_parser(
         "collect-replays",
