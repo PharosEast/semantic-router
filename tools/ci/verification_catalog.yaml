@@ -330,6 +330,18 @@ verifications:
     workflow: .github/workflows/test-tools.yml
     target: test-bench-tools
     inventory: bench-research-tools-pytest-discovery
+  recipe-lab:
+    layer: router
+    execution: automatic
+    display_name: Recipe Lab
+    activity: test
+    boundary: [unit]
+    executor: tools
+    category: components
+    worker: router
+    workflow: .github/workflows/test-tools.yml
+    target: test-recipe-lab
+    inventory: recipe-lab-pytest-discovery
 
   harness-tools:
     layer: source

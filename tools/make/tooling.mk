@@ -4,6 +4,10 @@ test-calibration: $(HARNESS_VENV_DEPS) ## Test recipe probes and offline tuning 
 	@PYTHONPATH="$(CURDIR)/tools/calibration:$(CURDIR)/tools/calibration/recipe$${PYTHONPATH:+:$${PYTHONPATH}}" \
 		"$(AGENT_PYTHON)" -m pytest tools/calibration/recipe tools/calibration/tuning/tests tools/calibration/systemone_auto/tests
 
+test-recipe-lab: $(HARNESS_VENV_DEPS) ## Test the recipe-lab closed-loop experiment toolkit offline
+	@PYTHONPATH="$(CURDIR)/tools/recipe-lab$${PYTHONPATH:+:$${PYTHONPATH}}" \
+		"$(AGENT_PYTHON)" -m pytest -q tools/recipe-lab/tests
+
 PROVIDER_MOCKER_VENV ?= $(CURDIR)/.agent-harness/provider-mocker
 PROVIDER_MOCKER_PYTHON := $(PROVIDER_MOCKER_VENV)/bin/python
 PROVIDER_MOCKER_BOOTSTRAP_PYTHON ?= $(AGENT_PYTHON)
@@ -18,7 +22,7 @@ $(PROVIDER_MOCKER_VENV)/.requirements: tools/test/services/provider-mocker/requi
 test-provider-mocker: $(PROVIDER_MOCKER_VENV)/.requirements ## Test the provider mocker's protocol contracts
 	@cd tools/test/services/provider-mocker && "$(PROVIDER_MOCKER_PYTHON)" -m pytest tests
 
-.PHONY: test-calibration test-provider-mocker
+.PHONY: test-calibration test-provider-mocker test-recipe-lab
 
 TINY_MODEL_PORT ?= 8000
 
