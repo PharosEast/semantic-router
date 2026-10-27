@@ -56,8 +56,8 @@ def _pair_metrics(
     INCONCLUSIVE rather than a guess.
     """
     if isinstance(comparison, dict):
-        base_section = comparison.get("baseline")
-        cand_section = comparison.get("candidate")
+        base_section = comparison.get("baseline", comparison.get("baseline_targets"))
+        cand_section = comparison.get("candidate", comparison.get("candidate_targets"))
         if isinstance(base_section, (dict, list)) and isinstance(cand_section, (dict, list)):
             base_values = extract_metric_values(base_section, metric_key)
             cand_values = extract_metric_values(cand_section, metric_key)

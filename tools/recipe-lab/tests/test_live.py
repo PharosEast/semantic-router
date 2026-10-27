@@ -23,6 +23,13 @@ def test_pair_metrics_sectioned_payload():
     payload = {"baseline": {"m": {"capability.score": 0.80}}, "candidate": {"capability.score": 0.86}}
     base, cand = _pair_metrics(payload, "capability.score", [])
     assert (base, cand) == (0.80, 0.86)
+    # sr-bench compare's actual shape: *_targets arrays with accuracy leaves
+    srbench_payload = {
+        "baseline_targets": [{"id": "single", "accuracy": 1.0}],
+        "candidate_targets": [{"id": "mom", "accuracy": 0.833}],
+    }
+    base, cand = _pair_metrics(srbench_payload, "accuracy", [])
+    assert (base, cand) == (1.0, 0.833)
 
 
 def test_pair_metrics_flat_two_values():

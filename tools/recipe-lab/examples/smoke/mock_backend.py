@@ -55,7 +55,7 @@ def _answer_for(model: str, prompt: str) -> str:
     return "mock answer"
 
 
-def _completion(model: str, prompt: str) -> bytes:
+def _completion(model: str, content: str) -> bytes:
     return json.dumps(
         {
             "id": "chatcmpl-mock",
@@ -64,10 +64,7 @@ def _completion(model: str, prompt: str) -> bytes:
             "choices": [
                 {
                     "index": 0,
-                    "message": {
-                        "role": "assistant",
-                        "content": _answer_for(model, prompt),
-                    },
+                    "message": {"role": "assistant", "content": content},
                     "finish_reason": "stop",
                 }
             ],
@@ -110,11 +107,48 @@ class Handler(BaseHTTPRequestHandler):
                 payload = json.loads(raw.decode("utf-8"))
                 model = str(payload.get("model", "unknown"))
                 prompt = str(payload.get("messages", [{}])[-1].get("content", ""))
+                stream = bool(payload.get("stream"))
             except (json.JSONDecodeError, AttributeError):
-                model, prompt = "unknown", ""
-            self._send(200, _completion(model, prompt))
+                model, prompt, stream = "unknown", "", False
+            content = _answer_for(model, prompt)
+            if stream:
+                self._send_sse(model, content)
+            else:
+                self._send(200, _completion(model, content))
         else:
             self._send(404, b'{"error": "not found"}')
+
+    def _send_sse(self, model: str, content: str) -> None:
+        chunk = {
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [
+                {"index": 0, "delta": {"role": "assistant", "content": content}}
+            ],
+        }
+        final = {
+            "id": "chatcmpl-mock",
+            "object": "chat.completion.chunk",
+            "model": model,
+            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "usage": {
+                "prompt_tokens": 16,
+                "completion_tokens": 2,
+                "total_tokens": 18,
+                "prompt_tokens_details": {"cached_tokens": 0},
+            },
+        }
+        body = (
+            f"data: {json.dumps(chunk)}\n\n"
+            f"data: {json.dumps(final)}\n\n"
+            "data: [DONE]\n\n"
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
 
     def log_message(self, fmt: str, *args) -> None:  # silence default stderr noise
         pass
