@@ -674,11 +674,20 @@ domains:
     checks: [make test-agent-crew]
     verifications: [bench-tools]
 
+  recipe-lab:
+    owner: evaluation-quality
+    paths:
+      - tools/recipe-lab/**
+      - tools/agent/skills/recipe-lab-loop/**
+      - tools/make/tooling.mk
+    checks: [make test-recipe-lab]
+    verifications: [recipe-lab]
+
   paper:
     owner: paper
     paths: [paper/**]
     checks: []
-    verifications: []
+    verifications: [recipe-lab]
 
   training:
     owner: training
@@ -749,7 +758,7 @@ domains:
     paths:
       - tools/ci/python_test_evidence.py
     checks: [make harness-check]
-    verifications: [cli-unit, model-runtime, bench-tools, training, learning-tools, harness-tools, mock-provider, onnx-artifacts]
+    verifications: [cli-unit, model-runtime, bench-tools, training, learning-tools, recipe-lab, harness-tools, mock-provider, onnx-artifacts]
 
   component-execution:
     owner: maintainers
@@ -776,7 +785,7 @@ domains:
       - tools/ci/verification_catalog.yaml
       - tools/ci/worker_process.py
     checks: [make harness-check]
-    verifications: [cli-unit, model-runtime, bench-tools, training, onnx-artifacts, mock-provider, learning-tools, harness-tools, e2e-unit, soak-tools]
+    verifications: [cli-unit, model-runtime, bench-tools, training, onnx-artifacts, mock-provider, learning-tools, recipe-lab, harness-tools, e2e-unit, soak-tools]
 
   runtime-evidence:
     owner: maintainers
