@@ -1,9 +1,10 @@
 # recipe-lab command reference
 
-All commands print structured JSON (allow_nan=False, UTF-8) and are
-non-interactive and idempotent. Exit codes: `0` success (for
-`run --tier live` / `live-verdict`: 0 = PASS), `1` = FAIL verdict, `2` =
-usage or contract error or INCONCLUSIVE.
+All commands print a single structured JSON document on stdout
+(allow_nan=False, UTF-8); progress and logs go to stderr; no command reads
+stdin. Exit codes: `0` success (for `live-verdict`: PASS), `1` FAIL verdict
+(`live-verdict` only), `2` usage, contract or tool error, and INCONCLUSIVE
+for `live-verdict`.
 
 ## Evidence intake
 
@@ -30,6 +31,9 @@ usage or contract error or INCONCLUSIVE.
   [--baseline-config B] --proposer P --ledger L --output-dir D
   --router-bin BIN --mock-backend M [--mock-extra-args "..."]`
   One router lifecycle per candidate; RANKED records land in the ledger.
+  `--candidates` accepts a directory, a comma-separated list, or a single
+  config path — the agent's own proposal entry: pass one config plus
+  `--proposer agent:<id>` so the ledger records who proposed it.
 
 ## Live tier
 
