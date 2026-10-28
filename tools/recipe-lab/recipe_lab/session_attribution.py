@@ -1,4 +1,4 @@
-"""Session-aware attribution over replay records (Sub-issue 6, P3).
+"""Session-aware attribution over replay records (Sub-issue 6, P2).
 
 Single-turn attribution (attribution.py) keys evidence per request. Agentic
 traffic lives per (conversation, turn): the replay record already carries the
@@ -7,22 +7,26 @@ selection_reasoning), so this module aggregates rows into sessions and layers
 three agentic evidence classes on top of the single-turn E1/E2/E3 classes -
 it never redefines them:
 
-- lane_flap            adjacent turns of one conversation selected different
-                       models (may be a legitimate switch or a protection
-                       miss; reported with the router's own session reasoning)
-- tool_loop_interrupted a turn gap inside a conversation: the recorded
-                       turn_index sequence jumps, which is what a rejected
-                       (503) selection looks like from the replay side on
-                       routers without the standalone rejection-recording fix
+- lane_flap            adjacent model-bearing requests of one conversation
+                       selected different models (may be a legitimate switch
+                       or a protection miss; reported with the router's own
+                       session reasoning)
+- tool_loop_interrupted a recorded failed selection whose turn continued
+                       afterwards: an agentic tool loop was interrupted by the
+                       rejected (503) selection and resumed within the same
+                       user turn. Requires the rejection-recording router fix
                        (lifecycle_state=failed +
-                       terminal_reason=selection_rejected)
-- selection_failed     the explicit rejection records the router emits for
-                       503 no_eligible_model selections once the standalone
-                       router fix is merged (lifecycle_state=failed +
-                       terminal_reason=selection_rejected); on unfixed
-                       routers nothing emits them, the class exists so
-                       downstream consumers can already branch on it
+                       terminal_reason=selection_rejected); on unfixed routers
+                       nothing emits those records, so this class stays empty
+- selection_failed     every recorded failed selection (lifecycle_state=failed)
+                       as record-level evidence; tool_loop_interrupted is the
+                       conversation-level subset that resumed in-turn
 
+Requests inside one conversation are ordered by (turn_index, record_ts,
+request_id). The router counts turn_index per user turn, and one agentic user
+turn fans out into many tool-loop requests that all share the same
+turn_index - only the record timestamp orders them. Rows collected by an
+older adapter without record_ts fall back to (turn_index, request_id) order.
 Pure functions, no I/O, deterministic: same rows -> same report bytes.
 """
 
@@ -40,6 +44,8 @@ SESSION_CLASSES = (
     SESSION_CLASS_TOOL_LOOP_INTERRUPTED,
     SESSION_CLASS_SELECTION_FAILED,
 )
+
+LIFECYCLE_FAILED = "failed"
 
 
 def _session_of(row: dict[str, Any]) -> dict[str, Any] | None:
@@ -68,6 +74,20 @@ def _turn_index(row: dict[str, Any]) -> int | None:
     return value
 
 
+def _record_ts(row: dict[str, Any]) -> str:
+    value = row.get("record_ts")
+    return value if isinstance(value, str) else ""
+
+
+def _lifecycle_state(row: dict[str, Any]) -> str:
+    value = row.get("lifecycle_state")
+    return value if isinstance(value, str) else ""
+
+
+def _request_order(row: dict[str, Any]) -> tuple[int | None, str, str]:
+    return (_turn_index(row), _record_ts(row), str(row.get("request_id") or ""))
+
+
 def _event(
     conversation: str,
     kind: str,
@@ -88,7 +108,7 @@ def analyze_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
 
     Rows without session fields are counted as single-turn and ignored here
     (the single-turn attribution owns them). Deterministic output: sessions
-    sorted by key, turns by index.
+    sorted by key, requests by (turn_index, record_ts, request_id).
     """
     sessions: dict[str, list[dict[str, Any]]] = {}
     single_turn = 0
@@ -102,25 +122,28 @@ def analyze_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
     events: list[dict[str, Any]] = []
     session_summaries: list[dict[str, Any]] = []
     for conversation in sorted(sessions):
-        turns = sorted(
+        requests = sorted(
             (row for row in sessions[conversation] if _turn_index(row) is not None),
-            key=_turn_index,
+            key=_request_order,
         )
         lane_flaps = 0
-        turn_gaps = 0
-        for i in range(1, len(turns)):
-            prev, curr = turns[i - 1], turns[i]
+        selection_failures = 0
+        interruptions = 0
+        # lane_flap: adjacent model-bearing requests (failed selections carry
+        # no routed model, so they never join a lane and never break adjacency)
+        routed_requests = [row for row in requests if str(row.get("routed") or "")]
+        for i in range(1, len(routed_requests)):
+            prev, curr = routed_requests[i - 1], routed_requests[i]
             prev_model = str(prev.get("routed") or "")
             curr_model = str(curr.get("routed") or "")
-            prev_index, curr_index = _turn_index(prev), _turn_index(curr)
-            if prev_model and curr_model and prev_model != curr_model:
+            if prev_model != curr_model:
                 lane_flaps += 1
                 session = _session_of(curr) or {}
                 events.append(
                     _event(
                         conversation,
                         SESSION_CLASS_LANE_FLAP,
-                        turn_index=curr_index,
+                        turn_index=_turn_index(curr),
                         detail={
                             "from": prev_model,
                             "to": curr_model,
@@ -129,23 +152,53 @@ def analyze_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
                         },
                     )
                 )
-            if curr_index - prev_index > 1:
-                turn_gaps += 1
+        # selection_failed / tool_loop_interrupted: recorded failed selections
+        for i, req in enumerate(requests):
+            if _lifecycle_state(req) != LIFECYCLE_FAILED:
+                continue
+            selection_failures += 1
+            events.append(
+                _event(
+                    conversation,
+                    SESSION_CLASS_SELECTION_FAILED,
+                    turn_index=_turn_index(req),
+                    detail={
+                        "terminal_reason": str(req.get("terminal_reason") or ""),
+                        "response_status": req.get("response_status"),
+                        "request_id": str(req.get("request_id") or ""),
+                    },
+                )
+            )
+            turn = _turn_index(req)
+            resumed = next(
+                (
+                    later
+                    for later in requests[i + 1 :]
+                    if _turn_index(later) == turn
+                ),
+                None,
+            )
+            if resumed is not None:
+                interruptions += 1
                 events.append(
                     _event(
                         conversation,
                         SESSION_CLASS_TOOL_LOOP_INTERRUPTED,
-                        turn_index=curr_index,
-                        detail={"after_turn": prev_index, "resumed_at": curr_index},
+                        turn_index=turn,
+                        detail={
+                            "interrupted_request": str(req.get("request_id") or ""),
+                            "resumed_request": str(resumed.get("request_id") or ""),
+                        },
                     )
                 )
         session_summaries.append(
             {
                 "conversation": conversation,
-                "turns_recorded": len(turns),
-                "turn_span": [_turn_index(turns[0]), _turn_index(turns[-1])] if turns else [],
+                "requests_recorded": len(requests),
+                "turn_span": [_turn_index(requests[0]), _turn_index(requests[-1])] if requests else [],
                 "lane_flaps": lane_flaps,
-                "turn_gaps": turn_gaps,
+                "selection_failures": selection_failures,
+                "tool_loop_interruptions": interruptions,
             }
         )
     counts = Counter(event["class"] for event in events)
@@ -175,13 +228,20 @@ def render_session_report(analysis: dict[str, Any]) -> str:
     ]
     for cls in SESSION_CLASSES:
         lines.append(f"| {cls} | {analysis['event_counts'][cls]} |")
-    lines += ["", "## Sessions", "", "| conversation | turns | span | lane_flaps | turn_gaps |", "|---|---|---|---|---|"]
+    lines += [
+        "",
+        "## Sessions",
+        "",
+        "| conversation | requests | span | lane_flaps | selection_failures | loop_interruptions |",
+        "|---|---|---|---|---|---|",
+    ]
     for session in analysis["sessions"]:
         span = session["turn_span"]
         span_text = f"{span[0]}..{span[1]}" if span else "-"
         lines.append(
-            f"| `{session['conversation']}` | {session['turns_recorded']} | {span_text} "
-            f"| {session['lane_flaps']} | {session['turn_gaps']} |"
+            f"| `{session['conversation']}` | {session['requests_recorded']} | {span_text} "
+            f"| {session['lane_flaps']} | {session['selection_failures']} "
+            f"| {session['tool_loop_interruptions']} |"
         )
     if analysis["events"]:
         lines += ["", "## Events", ""]
