@@ -191,7 +191,12 @@ def record_to_case(
 
     Session evidence (conversation_id / turn_index / session_action /
     selection_reasoning) is carried through verbatim when the record has it;
-    missing fields stay absent so single-turn records keep their shape.
+    missing fields stay absent so single-turn records keep their shape. The
+    record timeline (record_ts) and lifecycle evidence (lifecycle_state /
+    terminal_reason / response_status) are carried the same way: session
+    attribution orders one user turn's fan-out requests by record_ts, and a
+    lifecycle_state=failed record is the direct evidence of an interrupted
+    tool loop (requires the rejection-recording router fix).
     """
     prompt = _record_field(record, "prompt", "Prompt")
     if not isinstance(prompt, str) or not prompt.strip():
@@ -217,6 +222,18 @@ def record_to_case(
         or {},
         "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
     }
+    record_ts = _record_field(record, "timestamp", "Timestamp")
+    if record_ts is not None:
+        row["record_ts"] = str(record_ts)
+    lifecycle_state = _record_field(record, "lifecycle_state", "LifecycleState")
+    if lifecycle_state:
+        row["lifecycle_state"] = str(lifecycle_state)
+    terminal_reason = _record_field(record, "terminal_reason", "TerminalReason")
+    if terminal_reason:
+        row["terminal_reason"] = str(terminal_reason)
+    response_status = _record_field(record, "response_status", "ResponseStatus")
+    if response_status is not None:
+        row["response_status"] = response_status
     session_evidence = {
         "conversation_id": _record_field(record, "conversation_id", "ConversationID"),
         "session_id": _record_field(record, "session_id", "SessionID"),
@@ -270,7 +287,10 @@ def records_to_cases(
     """Join replay records against the labeled case list.
 
     Returns (rows, join_stats). Duplicate prompts keep their first record;
-    later duplicates count as skipped with reason "duplicate_prompt".
+    later duplicates count as skipped with reason "duplicate_prompt" — except
+    records with lifecycle_state=failed, which are never deduped: they are
+    the direct evidence of interrupted selections and several retries can
+    share one prompt.
     """
     by_prompt: dict[str, CaseJoin] = {}
     for case in cases:
@@ -287,11 +307,14 @@ def records_to_cases(
         row, state = record_to_case(record, by_prompt, family=family)
         if state == "matched":
             prompt = _record_field(record, "prompt", "Prompt")
-            if prompt in seen_prompts:
+            if str(row.get("lifecycle_state") or "") == "failed":
+                rows.append(row)  # rejection evidence is never deduped and never claims the prompt
+            elif prompt in seen_prompts:
                 stats["duplicate_prompt"] += 1
                 continue
-            seen_prompts.add(prompt)
-            rows.append(row)
+            else:
+                seen_prompts.add(prompt)
+                rows.append(row)
         stats[state] = stats.get(state, 0) + 1
     return rows, stats
 

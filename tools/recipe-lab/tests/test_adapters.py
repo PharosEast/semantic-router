@@ -17,14 +17,16 @@ from recipe_lab.adapters.router_replay import (
 from recipe_lab.contract import ContractError
 
 
-def fake_record(request_id: str, prompt: str, decision: str, selected: str) -> dict:
-    return {
+def fake_record(request_id: str, prompt: str, decision: str, selected: str, **extra) -> dict:
+    record = {
         "request_id": request_id,
         "decision": decision,
         "selected_model": selected,
         "prompt": prompt,
         "signals": {"decision": ["depth"]},
     }
+    record.update(extra)
+    return record
 
 
 def evidence_record(request_id: str, prompt: str, decision: str, selected: str) -> dict:
@@ -216,6 +218,50 @@ def test_fetch_replays_halves_page_on_http_413():
     requested = [call.args[0].full_url for call in urlopen.call_args_list]
     assert "limit=50&offset=0" in requested[0]
     assert "limit=25&offset=0" in requested[1]
+
+
+def test_record_to_case_carries_timeline_and_lifecycle():
+    by_prompt = {c["prompt"]: type("C", (), c) for c in CASES}
+    record = fake_record(
+        "r1",
+        "What is the capital of France?",
+        "local_standard",
+        "local/private-qwen",
+        timestamp="2026-10-28T10:00:00Z",
+        lifecycle_state="completed",
+    )
+    row, state = record_to_case(record, by_prompt)
+    assert state == "matched"
+    assert row["record_ts"] == "2026-10-28T10:00:00Z"
+    assert row["lifecycle_state"] == "completed"
+    assert "terminal_reason" not in row  # absent fields keep the row shape
+    # an older record wire without these fields still produces a plain row
+    row_plain, _ = record_to_case(fake_record("r2", "What is the capital of France?", "local_standard", "local/private-qwen"), by_prompt)
+    assert "record_ts" not in row_plain and "lifecycle_state" not in row_plain
+
+
+def test_records_to_cases_keeps_failed_records():
+    # one prompt, one 503 rejection then a successful retry: the failed
+    # record is the interruption evidence and must not be deduped away.
+    records = [
+        fake_record(
+            "r1",
+            "What is the capital of France?",
+            "local_standard",
+            "",
+            timestamp="2026-10-28T10:00:00Z",
+            lifecycle_state="failed",
+            terminal_reason="selection_rejected",
+            response_status=503,
+        ),
+        fake_record("r2", "What is the capital of France?", "local_standard", "local/private-qwen", timestamp="2026-10-28T10:00:01Z"),
+    ]
+    rows, stats = records_to_cases(records, [type("C", (), c) for c in CASES])
+    assert len(rows) == 2
+    assert rows[0]["lifecycle_state"] == "failed"
+    assert rows[0]["routed"] == ""  # a rejection carries no routed model
+    assert rows[1]["routed"] == "local/private-qwen"
+    assert stats["duplicate_prompt"] == 0
 
 
 def test_load_cases_rejects_missing_truth(tmp_path):
