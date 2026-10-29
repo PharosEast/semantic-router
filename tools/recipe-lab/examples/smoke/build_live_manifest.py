@@ -33,6 +33,11 @@ def main() -> int:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--mock-url", default="http://127.0.0.1:8000/v1")
     parser.add_argument("--router-url", default="http://127.0.0.1:8899/v1")
+    parser.add_argument(
+        "--router-preview-url",
+        default="http://127.0.0.1:8080/api/v1/routing/preview",
+        help="router management preview endpoint (required by sr-bench preview)",
+    )
     parser.add_argument("--router-model", default="vllm-sr/auto")
     parser.add_argument("--config-hash", required=True, help="router's frozen config hash (64 hex)")
     parser.add_argument("--per-deep", type=int, default=6)
@@ -108,14 +113,18 @@ def main() -> int:
     # accounting - require_priced would demand the full router usage-receipt
     # chain (SKILL: "capability_only permits unpriced evaluation")
     prices = {
-        "mock": {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0},
+        "local/private-qwen": {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0},
+        "cloud/frontier-reasoning": {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0},
         "vllm-sr/auto": {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0},
     }
 
     single_target = {
         "id": "single",
         "kind": "single",
-        "model": "mock",
+        # the baseline is "no routing": everything hits the local low-cost
+        # lane, so the capability model fails the deep questions and the
+        # router candidate has real headroom to show
+        "model": "local/private-qwen",
         "base_url": args.mock_url,
         "prices": prices,
     }
@@ -153,6 +162,22 @@ def main() -> int:
     )
     (out_dir / "candidate-manifest.json").write_text(
         json.dumps(candidate_manifest, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
+    # routing-distribution preview takes a mom-only manifest (sr-bench:
+    # "preview only supports mom targets") and the mom target must declare
+    # the router's management preview_url
+    mom_target = dict(candidate_manifest["targets"][1])
+    mom_target["preview_url"] = args.router_preview_url
+    preview_manifest = {
+        "version": "sr-bench-1.0",
+        "name": "recipe-lab-live-preview",
+        "cost_policy": "capability_only",
+        "targets": [mom_target],
+        "cases": manifest_cases,
+        "limits": limits,
+    }
+    (out_dir / "preview-manifest.json").write_text(
+        json.dumps(preview_manifest, ensure_ascii=False, indent=1), encoding="utf-8"
     )
 
     digest = hashlib.sha256(cases_path.read_bytes()).hexdigest()

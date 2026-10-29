@@ -55,3 +55,17 @@ def test_report_reads_written_file(tmp_path):
     with fake_run():
         result = SrbenchCli().report("run-a", out)
     assert result["quality"]["accuracy"] == 0.83
+
+
+def test_preview_candidate_plan_experiment_arg_shapes():
+    """The thin wrappers pass the right sr-bench subcommand and arguments."""
+    with fake_run(stdout="{}") as run_mock:
+        SrbenchCli().preview("run-a")
+        cmd = run_mock.call_args[0][0]
+        assert cmd[2:] == ["preview", "run-a"]
+    with fake_run(stdout="{}") as run_mock:
+        SrbenchCli().candidate_plan("run-base")
+        assert run_mock.call_args[0][0][2:] == ["candidate-plan", "run-base"]
+    with fake_run(stdout="{}") as run_mock:
+        SrbenchCli().experiment(["attach", "exp-1", "--run", "run-a"])
+        assert run_mock.call_args[0][0][2:] == ["experiment", "attach", "exp-1", "--run", "run-a"]

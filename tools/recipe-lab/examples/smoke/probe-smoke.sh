@@ -1,15 +1,27 @@
 #!/bin/bash
 # Probe the router's 400 with sr-bench-style streaming requests.
+#
+# Environment (all optional; defaults derive from this script's location):
+#   REPO            semantic-router checkout        (default: derived)
+#   RECIPE_LAB_BIN  dir with recipe-lab CLI+python  (default: $REPO/.venv/bin)
+#   PYTHON_BIN      python for the mock backend     (default: $RECIPE_LAB_BIN/python)
+#   SR_BUILD        build prefix                    (default: $REPO/build)
+#   ROUTER_BIN      router binary                   (default: $SR_BUILD/bin/semantic-router)
+#   WORK_ROOT       scratch root for run dirs       (default: $REPO/.tmp-smoke-runs)
 set -u
-source "$HOME/jinghaoyu/sr-build/env.sh"
-ASSETS="$HOME/jinghaoyu/semantic-router-fork/tools/recipe-lab/examples/smoke"
-RL="$HOME/jinghaoyu/venvs/recipe-lab-venv/bin"
-WORK="$HOME/jinghaoyu/recipe-lab-workspace/runs/probe-400-$(date +%H%M%S)"
+ASSETS="$(cd "$(dirname "$0")" && pwd)"
+REPO="${REPO:-$(cd "$ASSETS/../../.." && pwd)}"
+RL="${RECIPE_LAB_BIN:-$REPO/.venv/bin}"
+PYBIN="${PYTHON_BIN:-$RL/python}"
+SR_BUILD="${SR_BUILD:-$REPO/build}"
+ROUTER_BIN="${ROUTER_BIN:-$SR_BUILD/bin/semantic-router}"
+WORK_ROOT="${WORK_ROOT:-$REPO/.tmp-smoke-runs}"
+WORK="$WORK_ROOT/probe-400-$(date +%H%M%S)"
 mkdir -p "$WORK"
-"$HOME/jinghaoyu/vllm028-env/bin/python" "$ASSETS/mock_backend.py" --port 8000 > "$WORK/mock.log" 2>&1 &
+"$PYBIN" "$ASSETS/mock_backend.py" --port 8000 > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 1
-"$SR_BUILD/bin/semantic-router" -config "$ASSETS/smoke-config.yaml" -gateway standalone > "$WORK/router.log" 2>&1 &
+"$ROUTER_BIN" -config "$ASSETS/smoke-config.yaml" -gateway standalone > "$WORK/router.log" 2>&1 &
 ROUTER_PID=$!
 for i in $(seq 1 60); do
   sleep 5

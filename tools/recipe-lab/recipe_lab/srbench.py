@@ -70,6 +70,18 @@ class SrbenchCli:
     def compare(self, baseline_run_id: str, candidate_run_id: str) -> dict[str, Any] | str:
         return self.run_command(["compare", baseline_run_id, candidate_run_id])
 
+    def preview(self, run_id: str) -> dict[str, Any] | str:
+        """Routing-distribution diagnosis for a run (no quality numbers)."""
+        return self.run_command(["preview", run_id])
+
+    def candidate_plan(self, baseline_run_id: str) -> dict[str, Any] | str:
+        """Reuse a terminal baseline's frozen protocol for a candidate run."""
+        return self.run_command(["candidate-plan", baseline_run_id])
+
+    def experiment(self, args: list[str]) -> dict[str, Any] | str:
+        """Group baselines/routing-checks/candidates (create, attach, show...)."""
+        return self.run_command(["experiment", *args])
+
     def report(self, run_id: str, output_path: str | Path) -> dict[str, Any] | str:
         self.run_command(["report", run_id, "--output", str(output_path)])
         path = Path(output_path)
