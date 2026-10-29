@@ -1,21 +1,30 @@
 #!/bin/bash
 # Round-2 agentic probe: tool-loop binding vs admitted-set conflict (E/F).
+# Environment (all optional; defaults derive from this script's location):
+#   REPO            semantic-router checkout        (default: derived)
+#   RECIPE_LAB_BIN  dir with recipe-lab CLI+python  (default: $REPO/.venv/bin)
+#   PYTHON_BIN      python for the mock backend     (default: $RECIPE_LAB_BIN/python)
+#   SR_BUILD        build prefix                    (default: $REPO/build)
+#   ROUTER_BIN      router binary                   (default: $SR_BUILD/bin/semantic-router)
+#   WORK_ROOT       scratch root for run dirs       (default: $REPO/.tmp-smoke-runs)
 set -u
-source "$HOME/jinghaoyu/sr-build/env.sh"
-REPO="$HOME/jinghaoyu/semantic-router-fork"
-ASSETS="$REPO/tools/recipe-lab/examples/smoke"
-RL="$HOME/jinghaoyu/venvs/recipe-lab-venv/bin"
-VLLM_PY="$HOME/jinghaoyu/vllm028-env/bin/python"
-W="$HOME/jinghaoyu/recipe-lab-workspace/runs/agent-probe-r2-$(date +%m%d%H%M%S)"
+ASSETS="$(cd "$(dirname "$0")" && pwd)"
+REPO="${REPO:-$(cd "$ASSETS/../../.." && pwd)}"
+RL="${RECIPE_LAB_BIN:-$REPO/.venv/bin}"
+PYBIN="${PYTHON_BIN:-$RL/python}"
+SR_BUILD="${SR_BUILD:-$REPO/build}"
+ROUTER_BIN="${ROUTER_BIN:-$SR_BUILD/bin/semantic-router}"
+WORK_ROOT="${WORK_ROOT:-$REPO/.tmp-smoke-runs}"
+W="$WORK_ROOT/agent-probe-r2-$(date +%m%d%H%M%S)"
 mkdir -p "$W"
 echo "PROBE2-WORK=$W"
 ROUTER_PID=""; MOCK_PID=""
 cleanup() { for pid in ${ROUTER_PID:-} ${MOCK_PID:-}; do kill "$pid" 2>/dev/null; done; }
 trap cleanup EXIT
-"$VLLM_PY" "$ASSETS/mock_backend.py" --port 8000 > "$W/mock.log" 2>&1 &
+"$PYBIN" "$ASSETS/mock_backend.py" --port 8000 > "$W/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 2
-"$SR_BUILD/bin/semantic-router" -config "$ASSETS/agent-probe-config.yaml" -gateway standalone > "$W/router.log" 2>&1 &
+"$ROUTER_BIN" -config "$ASSETS/agent-probe-config.yaml" -gateway standalone > "$W/router.log" 2>&1 &
 ROUTER_PID=$!
 READY=0
 for i in $(seq 1 60); do
