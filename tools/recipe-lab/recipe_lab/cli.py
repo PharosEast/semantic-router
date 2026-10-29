@@ -164,6 +164,13 @@ def cmd_attribute(args: argparse.Namespace) -> int:
 
     out_dir = Path(args.output_dir)
     jsonl_path = write_jsonl(rows, out_dir / "attribution.jsonl")
+    # G3: the summary is written next to attribution.jsonl so `next` can
+    # resolve a record's attribution_ref, verify the artifact hash and read it.
+    summary_path = out_dir / "summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    summary_path.write_text(
+        json.dumps(summary, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8"
+    )
     report_path = out_dir / "report.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
     report_path.write_text(render_markdown(summary, split_hash), encoding="utf-8")
@@ -172,6 +179,7 @@ def cmd_attribute(args: argparse.Namespace) -> int:
         {
             "records": len(cases),
             "attribution_jsonl": str(jsonl_path),
+            "summary_json": str(summary_path),
             "report": str(report_path),
             "summary": summary,
         }
@@ -778,10 +786,13 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_next(args: argparse.Namespace) -> int:
-    """A2: the replay candidate in the context is ranked by the contract's
-    objective.replay_metric, the same selection `ledger top` uses."""
+    """G3: full next-round context - contract summary, ledger tail, best
+    replay candidate (A2 best_replay), last live verdict, latest attribution
+    summary (hash-verified via attribution_ref) and optional diagnosis
+    highlights, each with its citable insight-ref. Byte-stable for the same
+    inputs; frozen_test case content is never exported."""
     spec = _load_spec(args.spec)
-    context = write_next_context(args.ledger, args.output, metric_key=spec.objective.replay_metric, tail=args.tail)
+    context = write_next_context(args.ledger, args.output, spec=spec, diagnosis_path=args.diagnosis, tail=args.tail)
     _print_json({"context": args.output, "bytes": len(context)})
     return 0
 
@@ -1262,6 +1273,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_next.add_argument("--ledger", required=True, help="ledger JSONL")
     p_next.add_argument("--output", required=True, help="output Markdown path")
     p_next.add_argument("--tail", type=int, default=10, help="how many recent records to include")
+    p_next.add_argument(
+        "--diagnosis",
+        default=None,
+        help="diagnosis.json artifact; its highlights join the context with a citable diag: ref (G3)",
+    )
     p_next.set_defaults(func=cmd_next)
 
     p_prov = sub.add_parser("provenance", help="emit the recipe-lab-run-v1 manifest for a ledger")
