@@ -6,41 +6,114 @@ evidence together:
 1. the caller (or an upstream script) runs sr-bench for baseline and
    candidate and holds two run IDs;
 2. `live_verdict_from_runs` compares them, reads the objective metric,
-   applies the three-state verdict with the guard floors, and returns the
-   live-tier evidence block (bench_refs included - the ledger record is
-   self-sufficient for Sub-issue 4's report replay).
+   applies the three-state verdict with the guard floors and the objective
+   constraints, and returns the live-tier evidence block (bench_refs
+   included - the ledger record is self-sufficient for Sub-issue 4's
+   report replay).
 
-Guard results come from model_eval guard tooling produced offline (the
-tool does not own guard evaluation); they arrive as GuardResult values.
+Guards (A3): the contract is the only source of floors. `spec.gates`
+declares `{name, metric, floor}`; the `--guard-measurements` file carries
+measurements only (`name` / `candidate` / `baseline` values produced
+offline by model_eval guard tooling). A `floor` inside the measurement
+file is a contract bypass and is rejected. `floor: "baseline"` in the
+contract resolves against the measured baseline value. A declared gate
+without a usable measurement is not a failure: the gate is unevaluated
+and the verdict becomes INCONCLUSIVE.
+
+Verified cost fields (E): sr-bench compare exposes per-arm spend on the
+`baseline_targets` / `candidate_targets` entries as `total_spend_usd`,
+`cost_usd`, `cache_neutral_cost_usd` and `evaluation_cost_usd`; unknown
+usage is serialized as `null` (with a `total_cost_comparison_reason`),
+so a constraint on an unknown cost must be unevaluated (INCONCLUSIVE),
+never zero.
 """
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Sequence
 
-from .contract import ContractError, ExperimentSpec
+from .contract import ContractError, ExperimentSpec, Gate
 from .srbench import SrbenchCli, extract_metric_values
 from .verdict import GuardResult, evaluate_verdict
 
+_MEASUREMENT_KEYS = ("name", "candidate", "baseline")
 
-def guards_from_rows(rows: list[dict[str, Any]]) -> list[GuardResult]:
-    """Build GuardResult values from a guards JSONL (name/metric/value/floor)."""
-    guards: list[GuardResult] = []
+
+def measurements_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate a guard-measurements JSONL (measurements only, no floors).
+
+    Each row is `{name, candidate, baseline}`; `candidate` and `baseline`
+    are optional numbers (missing = not measured). A `floor` key means the
+    caller is trying to bypass the contract's gates - ContractError. Keys
+    outside the measurement schema are rejected the same way.
+    """
+    validated: list[dict[str, Any]] = []
     for index, row in enumerate(rows, 1):
-        for key in ("name", "metric"):
-            if not isinstance(row.get(key), str) or not row[key].strip():
-                raise ContractError(f"guards row {index}: {key} must be a non-empty string")
-        value = row.get("value")
-        floor = row.get("floor")
+        if not isinstance(row, dict):
+            raise ContractError(f"guard measurement row {index} must be a JSON object")
+        unknown = sorted(set(row) - set(_MEASUREMENT_KEYS))
+        if unknown:
+            raise ContractError(
+                f"guard measurement row {index} has non-measurement keys {unknown}; "
+                "floors come from the spec gates, the file carries measurements only"
+            )
+        name = row.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise ContractError(f"guard measurement row {index}: name must be a non-empty string")
+        for key in ("candidate", "baseline"):
+            value = row.get(key)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ContractError(f"guard measurement row {index}: {key} must be a number or null")
+        validated.append({key: row.get(key) for key in _MEASUREMENT_KEYS})
+    return validated
+
+
+def resolve_gates(
+    gates: Sequence[Gate],
+    measurements: list[dict[str, Any]],
+) -> tuple[list[GuardResult], list[str]]:
+    """Resolve the contract's gates against measured values (A3).
+
+    Returns the GuardResult list (one per declared gate, in contract
+    order) and the sorted names of measurements the contract never
+    declared. `floor: "baseline"` resolves against the measured baseline
+    value; a gate with no measurement, no baseline value for a baseline
+    floor, or no candidate value stays unevaluated (value=None, floor=None)
+    so the verdict becomes INCONCLUSIVE instead of guessing.
+    """
+    by_name: dict[str, dict[str, Any]] = {}
+    for row in measurements:
+        name = row["name"]
+        if name in by_name:
+            raise ContractError(f"duplicate guard measurement for {name!r}")
+        by_name[name] = row
+    undeclared = sorted(set(by_name) - {gate.name for gate in gates})
+
+    guards: list[GuardResult] = []
+    for gate in gates:
+        row = by_name.get(gate.name)
+        if row is None:
+            guards.append(GuardResult(name=gate.name, metric=gate.metric, value=None, floor=None))
+            continue
+        floor = gate.floor
+        if floor == "baseline":
+            base = row.get("baseline")
+            if base is None:
+                guards.append(GuardResult(name=gate.name, metric=gate.metric, value=None, floor=None))
+                continue
+            floor = float(base)
+        candidate = row.get("candidate")
         guards.append(
             GuardResult(
-                name=row["name"],
-                metric=row["metric"],
-                value=None if value is None else float(value),
-                floor=None if floor is None else float(floor),
+                name=gate.name,
+                metric=gate.metric,
+                value=None if candidate is None else float(candidate),
+                floor=floor,
             )
         )
-    return guards
+    return guards, undeclared
 
 
 def _arm_accuracy(targets: Any, metric_key: str, *, routing_arm: bool) -> float | None:
@@ -110,14 +183,21 @@ def live_verdict_from_runs(
     cli: SrbenchCli,
     baseline_run_id: str,
     candidate_run_id: str,
-    guards: list[GuardResult],
+    measurements: list[dict[str, Any]],
     incomplete_reasons: list[str] | None = None,
 ) -> dict[str, Any]:
-    """Compare two sr-bench runs and decide the live-tier verdict."""
+    """Compare two sr-bench runs and decide the live-tier verdict (A3).
+
+    Guard floors come only from `spec.gates`; `measurements` carries the
+    offline measured values. Undeclared measurement names are reported
+    (in `undeclared_measurements` and the reasons) but never veto. An
+    empty contract adds an explicit `gates_note`.
+    """
     comparison = cli.compare(baseline_run_id, candidate_run_id)
     incomplete = list(incomplete_reasons or [])
     baseline_metric, candidate_metric = _pair_metrics(comparison, spec.objective.metric_key, incomplete)
 
+    guards, undeclared = resolve_gates(spec.gates, measurements)
     verdict = evaluate_verdict(
         baseline_metric=baseline_metric,
         candidate_metric=candidate_metric,
@@ -126,14 +206,24 @@ def live_verdict_from_runs(
         guards=guards,
         incomplete_reasons=incomplete,
     )
-    return {
+    reasons = list(verdict.reasons)
+    if undeclared:
+        reasons.append(
+            "undeclared guard measurements ignored (not declared in spec.gates): "
+            + ", ".join(undeclared)
+        )
+    result: dict[str, Any] = {
         "verdict": verdict.verdict,
-        "reasons": verdict.reasons,
+        "reasons": reasons,
         "improvement_pct": verdict.improvement_pct,
         "metrics": {
             "baseline": baseline_metric,
             "candidate": candidate_metric,
         },
         "gates": {g.name: ("pass" if g.passed else ("incomplete" if not g.evaluated else "fail")) for g in guards},
+        "undeclared_measurements": undeclared,
         "bench_refs": [baseline_run_id, candidate_run_id],
     }
+    if not spec.gates:
+        result["gates_note"] = "no guard declared"
+    return result
