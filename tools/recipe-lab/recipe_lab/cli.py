@@ -263,6 +263,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             gates=None,
             bench_refs=[],
             attribution_delta=attribution_delta(baseline_summary, summary) if baseline_summary else None,
+            attribution_ref=args.attribution_ref,
             coverage_warning=coverage_warning,
             notes=f"statuses={json.dumps(result['statuses'], ensure_ascii=False)}",
         )
@@ -401,6 +402,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--baseline-config", default=None, help="evaluate this config first to anchor attribution deltas")
     p_run.add_argument("--proposer", default="threshold-search", help="provenance tag for the candidates")
+    p_run.add_argument(
+        "--attribution-ref",
+        default=None,
+        help="attribution artifact this round is based on (path@hash) from recipe-lab attribute; recorded in the ledger",
+    )
     p_run.add_argument("--ledger", required=True, help="ledger JSONL to append RANKED records to")
     p_run.add_argument("--output-dir", required=True, help="per-candidate evaluation artifacts directory")
     p_run.add_argument("--router-bin", required=True, help="path to the semantic-router binary")

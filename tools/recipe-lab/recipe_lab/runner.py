@@ -143,7 +143,7 @@ def evaluate_candidate(
 
         # backend first: the router probes it during startup. Each child gets
         # its own session/process group, so the group-kill in `finally` cannot
-        # reach the srun task this runner lives in.
+        # reach the scheduler task this runner lives in.
         mock = subprocess.Popen(
             [env.python_bin, env.mock_backend_script, "--port", str(env.backend_port), *env.mock_extra_args],
             stdout=subprocess.DEVNULL,
