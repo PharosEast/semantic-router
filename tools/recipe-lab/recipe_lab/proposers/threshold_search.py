@@ -13,6 +13,7 @@ YAML config revisions: nothing here talks to a router or a model.
 from __future__ import annotations
 
 import copy
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -87,7 +88,9 @@ def propose_thresholds(
 
 
 def write_candidates(candidates: list[ThresholdCandidate], output_dir: str | Path) -> list[Path]:
-    """Write each candidate config as YAML; returns the file paths."""
+    """Write each candidate config as YAML plus a sidecar metadata JSON
+    (`<stem>.candidate.json`) so `run` can carry the proposer's provenance
+    into the ledger; returns the config file paths."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
@@ -95,6 +98,19 @@ def write_candidates(candidates: list[ThresholdCandidate], output_dir: str | Pat
         path = out_dir / f"candidate-{index:03d}-{candidate.signal_name}-{candidate.new_value}.yaml"
         with path.open("w", encoding="utf-8") as fh:
             yaml.safe_dump(candidate.config, fh, allow_unicode=True, sort_keys=False)
+        sidecar = {
+            "kind": "config",
+            "ref": candidate.ref,
+            "change_summary": candidate.summary(),
+            "provenance": {"proposer": "threshold-search", "insight_refs": []},
+            "sites": [
+                {"signal": candidate.signal_name, "op": "gte", "from": candidate.old_value, "to": candidate.new_value}
+            ],
+        }
+        path.with_suffix(".candidate.json").write_text(
+            json.dumps(sidecar, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
         paths.append(path)
     return paths
 
