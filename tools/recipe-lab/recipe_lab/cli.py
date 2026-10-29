@@ -18,10 +18,23 @@ from . import __version__
 from .adapters.router_replay import fetch_replays, load_cases, records_to_cases, records_to_rows, write_cases
 from .attribution import attribute, load_records, render_markdown, summarize, write_jsonl
 from .bank import apply_bank, build_bank, load_bank, write_bank
-from .contract import ContractError, ExperimentSpec, dataset_content_hash
+from .contract import (
+    ContractError,
+    ExperimentSpec,
+    RUNNABLE_SPLITS,
+    check_runnable_split,
+    dataset_content_hash,
+)
 from .ledger import Ledger, LedgerRecord
 from .proposers import threshold_search
 from .runner import RunnerEnv, RunnerError, RunnerTimeout, attribution_delta, evaluate_candidate, replay_metric_value
+from .splitting import (
+    default_split_rule,
+    load_cases,
+    parse_ratios,
+    split_cases,
+    write_splits,
+)
 
 
 def _print_json(value: object) -> None:
@@ -35,6 +48,23 @@ def _load_spec(path: str) -> ExperimentSpec:
         raise SystemExit(f"contract error: {exc}") from exc
     except OSError as exc:
         raise SystemExit(f"cannot read spec: {exc}") from exc
+
+
+def _select_split(spec: ExperimentSpec, split_name: str) -> str:
+    """B: resolve --split against the workload; frozen_test is quarantined and
+    legacy single-dataset workloads only accept 'dev'."""
+    try:
+        check_runnable_split(split_name)
+        spec.workload.split_hash(split_name)
+    except ContractError as exc:
+        raise ContractError(str(exc)) from exc
+    if spec.workload.legacy:
+        print(
+            "warning: workload uses the legacy single-dataset form; treated as split 'dev' only; "
+            "migrate to workload.splits for calib/dev/frozen_test separation",
+            file=sys.stderr,
+        )
+    return split_name
 
 
 def cmd_plan(args: argparse.Namespace) -> int:
@@ -53,13 +83,28 @@ def cmd_hash(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_split(args: argparse.Namespace) -> int:
+    """B: split a labeled case list into calib/dev/frozen_test deterministically."""
+    ratios = parse_ratios(args.ratios)
+    try:
+        cases = load_cases(args.cases)
+    except OSError as exc:
+        raise ContractError(f"cannot read cases: {exc}") from exc
+    split_map = split_cases(cases, ratios, args.group_key, args.seed)
+    splits = write_splits(split_map, args.output_dir)
+    split_rule = args.split_rule or default_split_rule(args.group_key, args.seed, ratios)
+    _print_json({"split_rule": split_rule, "splits": splits})
+    return 0
+
+
 def cmd_attribute(args: argparse.Namespace) -> int:
     spec = _load_spec(args.spec)
-    # A4 contract gates: re-hash the frozen dataset, then any --cases input.
+    split_name = _select_split(spec, args.split)
+    # A4 contract gates: re-hash the selected split, then any --cases input.
     # ContractError propagates to main() -> exit 2.
-    spec.verify_workload()
+    split_hash = spec.verify_workload(split=split_name)
     if args.cases:
-        spec.require_dataset_file(args.cases, "cases")
+        spec.require_dataset_file(args.cases, "cases", expected_hash=split_hash)
     try:
         cases = load_records(args.records)
     except (ContractError, OSError) as exc:
@@ -74,14 +119,14 @@ def cmd_attribute(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
 
-    rows = attribute(cases, spec.oracle_policy, dataset_hash=spec.workload.content_hash)
+    rows = attribute(cases, spec.oracle_policy, dataset_hash=split_hash)
     summary = summarize(rows)
 
     out_dir = Path(args.output_dir)
     jsonl_path = write_jsonl(rows, out_dir / "attribution.jsonl")
     report_path = out_dir / "report.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(render_markdown(summary, spec.workload.content_hash), encoding="utf-8")
+    report_path.write_text(render_markdown(summary, split_hash), encoding="utf-8")
 
     _print_json(
         {
@@ -171,8 +216,10 @@ def cmd_bank(args: argparse.Namespace) -> int:
 
 def cmd_propose(args: argparse.Namespace) -> int:
     if args.spec:
-        # A4 contract gate: optional spec; verifies the frozen dataset hash.
-        _load_spec(args.spec).verify_workload()
+        spec = _load_spec(args.spec)
+        # A4/B contract gate: optional spec; verifies the selected split hash.
+        split_name = _select_split(spec, args.split)
+        spec.verify_workload(split=split_name)
     try:
         with Path(args.base_config).open("r", encoding="utf-8") as fh:
             base = yaml.safe_load(fh)
@@ -210,10 +257,13 @@ def cmd_run(args: argparse.Namespace) -> int:
     # A5 budget gate: rounds beyond the contract are refused up front.
     if args.round > spec.budget.rounds:
         raise ContractError(f"budget exhausted: round {args.round} > budget.rounds {spec.budget.rounds}")
-    # A4 contract gates: re-hash the frozen dataset, then the --cases input
+    # B: resolve the split; frozen_test is quarantined, legacy is dev-only.
+    split_name = _select_split(spec, args.split)
+    split_hash = spec.workload.split_hash(split_name)
+    # A4 contract gates: re-hash the selected split, then the --cases input
     # must be byte-identical to it (cross-round comparability).
-    spec.verify_workload()
-    spec.require_dataset_file(args.cases, "cases")
+    spec.verify_workload(split=split_name)
+    spec.require_dataset_file(args.cases, "cases", expected_hash=split_hash)
     try:
         bank = load_bank(args.bank)
         cases = [json.loads(line) for line in Path(args.cases).read_text(encoding="utf-8").splitlines() if line.strip()]
@@ -294,7 +344,8 @@ def cmd_run(args: argparse.Namespace) -> int:
                 baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
                 metrics={},
                 verdict="RANKED",
-                dataset_hash=spec.workload.content_hash,
+                dataset_hash=split_hash,
+                split=split_name,
                 reasons=[f"trial timeout: {exc}"],
                 gates=None,
                 bench_refs=[],
@@ -327,7 +378,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
             metrics={replay_metric: metric_value} if metric_value is not None else {},
             verdict="RANKED",
-            dataset_hash=spec.workload.content_hash,
+            dataset_hash=split_hash,
+            split=split_name,
             reasons=[],
             gates=None,
             bench_refs=[],
@@ -417,13 +469,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_hash.add_argument("--file", required=True, help="dataset JSONL file")
     p_hash.set_defaults(func=cmd_hash)
 
+    p_split = sub.add_parser(
+        "split",
+        help="split a labeled case list into calib/dev/frozen_test (B)",
+        description="Deterministic group-level 3-way split: same cases + group key + seed => byte-identical output.",
+    )
+    p_split.add_argument("--cases", required=True, help="labeled case list JSONL (needs case_id + prompt)")
+    p_split.add_argument("--group-key", default="source_id", help="case field to group by (leakage guard)")
+    p_split.add_argument("--ratios", default="0.4,0.3,0.3", help="calib/dev/frozen_test ratios, e.g. 0.4,0.3,0.3")
+    p_split.add_argument("--seed", type=int, default=42, help="shuffle seed for the group assignment")
+    p_split.add_argument("--split-rule", default=None, help="override the provenance split_rule text")
+    p_split.add_argument("--output-dir", required=True, help="directory for calib.jsonl / dev.jsonl / frozen_test.jsonl")
+    p_split.set_defaults(func=cmd_split)
+
     p_attr = sub.add_parser("attribute", help="run E1/E2/E3 misroute attribution over labeled records")
     p_attr.add_argument("--spec", required=True, help="path to the experiment spec YAML (provides oracle policy)")
     p_attr.add_argument("--records", required=True, help="path to the attribution records JSONL")
     p_attr.add_argument(
+        "--split",
+        default="dev",
+        choices=["calib", "dev", "frozen_test"],
+        help="workload split the records were produced on (frozen_test is quarantined; B)",
+    )
+    p_attr.add_argument(
         "--cases",
         default=None,
-        help="optional labeled case list JSONL; when given, its hash must match the spec workload (A4)",
+        help="optional labeled case list JSONL; when given, its hash must match the selected split (A4)",
     )
     p_attr.add_argument("--output-dir", default=".", help="directory for attribution.jsonl and report.md")
     p_attr.set_defaults(func=cmd_attribute)
@@ -473,7 +544,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_prop.add_argument(
         "--spec",
         default=None,
-        help="optional experiment spec; when given, the frozen workload hash is verified first (A4)",
+        help="optional experiment spec; when given, the selected split hash is verified first (A4/B)",
+    )
+    p_prop.add_argument(
+        "--split",
+        default="dev",
+        choices=["calib", "dev", "frozen_test"],
+        help="workload split to verify against (frozen_test is quarantined; B)",
     )
     p_prop.add_argument("--signal", required=True, help="decision signal name whose gte to perturb")
     p_prop.add_argument("--deltas", default="-0.1,-0.05,0.05,0.1", help="comma-separated deltas")
@@ -486,6 +563,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--tier", default="replay", choices=["replay"], help="live tier arrives with sub-issue 3")
     p_run.add_argument("--spec", required=True, help="experiment spec YAML")
     p_run.add_argument("--cases", required=True, help="labeled case list JSONL")
+    p_run.add_argument(
+        "--split",
+        default="dev",
+        choices=["calib", "dev", "frozen_test"],
+        help="workload split to evaluate on (frozen_test is quarantined; B)",
+    )
     p_run.add_argument("--bank", required=True, help="answer bank JSONL")
     p_run.add_argument(
         "--candidates",

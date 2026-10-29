@@ -39,6 +39,20 @@ VALID_SPEC: dict = {
     },
 }
 
+# B: the preferred three-way workload form (splits must be disjoint)
+VALID_SPLITS_SPEC: dict = {
+    **VALID_SPEC,
+    "workload": {
+        "profile": "standard",
+        "split_rule": "group by source_id; seed 42; 40/30/30",
+        "splits": {
+            "calib": {"manifest": "calib.jsonl", "content_hash": "sha256:" + "1" * 64},
+            "dev": {"manifest": "dev.jsonl", "content_hash": "sha256:" + "2" * 64},
+            "frozen_test": {"manifest": "frozen_test.jsonl", "content_hash": "sha256:" + "3" * 64},
+        },
+    },
+}
+
 
 def make_case(case_id: str, truth: str, matched_decision: str, routed: str, answer_ok, family=None) -> dict:
     return {

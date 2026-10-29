@@ -26,6 +26,7 @@ can never silently join two rounds of results.
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -42,6 +43,10 @@ STACK_MODES = {"external", "serve"}
 # `metric_key` stays the live sr-bench metric; `replay_metric` is what the
 # replay ledger records and `ledger top --spec` ranks by.
 REPLAY_METRICS = {"routed_accuracy"}
+# B: the frozen dataset is split three ways; frozen_test is quarantined from
+# replay/propose work and may only be touched by live-verdict --final, once.
+SPLIT_NAMES = ("calib", "dev", "frozen_test")
+RUNNABLE_SPLITS = ("calib", "dev")
 TIERS = {"replay", "preview", "live"}
 CANDIDATE_KINDS = {"config", "artifact"}
 VERDICTS = {"PASS", "FAIL", "INCONCLUSIVE", "RANKED"}
@@ -74,6 +79,57 @@ def _require_number(value: Any, where: str) -> float:
 def dataset_content_hash(path: str | Path) -> str:
     """The frozen dataset identity: 'sha256:' + sha256 of the file's raw bytes."""
     return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def check_runnable_split(split: str) -> None:
+    """frozen_test is quarantined (B): replay/propose/attribute may not touch
+    it. live-verdict --final is the only consumer, via its own gate."""
+    if split == "frozen_test":
+        raise ContractError("frozen_test is quarantined; use live-verdict --final")
+
+
+def _check_split_disjointness(base: Path, workload: Workload) -> None:
+    """The three-way split must be disjoint: no case_id and no prompt content
+    shared between two splits (else calibration data leaks into the frozen
+    test and the final verdict is no longer honest)."""
+    seen: dict[str, tuple[set[str], set[str]]] = {}
+    for name, split in workload.splits.items():
+        manifest = base / split.manifest
+        case_ids: set[str] = set()
+        prompt_hashes: set[str] = set()
+        with manifest.open("r", encoding="utf-8") as fh:
+            for line_no, line in enumerate(fh, 1):
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ContractError(f"split {name!r} line {line_no} is not valid JSON: {exc}") from exc
+                case_id = row.get("case_id")
+                if not isinstance(case_id, str) or not case_id:
+                    raise ContractError(f"split {name!r} line {line_no} is missing a non-empty case_id")
+                prompt = row.get("prompt")
+                if not isinstance(prompt, str) or not prompt:
+                    raise ContractError(f"split {name!r} line {line_no} is missing a non-empty prompt")
+                case_ids.add(case_id)
+                prompt_hashes.add(hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+        seen[name] = (case_ids, prompt_hashes)
+
+    names = sorted(seen)
+    for i, left in enumerate(names):
+        for right in names[i + 1 :]:
+            shared_ids = seen[left][0] & seen[right][0]
+            shared_prompts = seen[left][1] & seen[right][1]
+            if shared_ids or shared_prompts:
+                detail = []
+                if shared_ids:
+                    detail.append(f"case_id(s) {sorted(shared_ids)[:3]}")
+                if shared_prompts:
+                    detail.append(f"{len(shared_prompts)} shared prompt(s)")
+                raise ContractError(
+                    f"workload splits overlap between {left!r} and {right!r}: {'; '.join(detail)}; "
+                    "splits must be disjoint (case_id and prompt)"
+                )
 
 
 @dataclass(frozen=True)
@@ -112,13 +168,57 @@ class Objective:
 
 
 @dataclass(frozen=True)
-class Workload:
+class SplitSpec:
+    """One named slice of the frozen dataset (B)."""
+
     manifest: str
     content_hash: str
+
+    @classmethod
+    def from_dict(cls, raw: dict, name: str) -> "SplitSpec":
+        manifest = raw.get("manifest")
+        _require(
+            isinstance(manifest, str) and manifest.strip(),
+            f"workload.splits.{name}.manifest must be a non-empty string",
+        )
+        content_hash = raw.get("content_hash")
+        _require(
+            isinstance(content_hash, str) and content_hash.strip(),
+            f"workload.splits.{name}.content_hash is required (frozen dataset hash)",
+        )
+        return cls(manifest=manifest, content_hash=content_hash)
+
+    def to_dict(self) -> dict:
+        return {"manifest": self.manifest, "content_hash": self.content_hash}
+
+
+@dataclass(frozen=True)
+class Workload:
     profile: str
+    split_rule: str | None
+    splits: dict[str, SplitSpec]
+    legacy: bool
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Workload":
+        profile = raw.get("profile", "quick")
+        _require(profile in PROFILES, f"workload.profile must be one of {sorted(PROFILES)}")
+        if "splits" in raw:
+            split_rule = raw.get("split_rule")
+            _require(
+                isinstance(split_rule, str) and split_rule.strip(),
+                "workload.split_rule must be a non-empty string when workload.splits is used "
+                "(free text like 'group by source_id; seed 42; 40/30/30'; it is written to provenance)",
+            )
+            splits_raw = raw.get("splits")
+            _require(isinstance(splits_raw, dict), "workload.splits must be a mapping")
+            _require(
+                set(splits_raw) == set(SPLIT_NAMES),
+                f"workload.splits must declare exactly {sorted(SPLIT_NAMES)}",
+            )
+            splits = {name: SplitSpec.from_dict(_require_mapping(v, f"workload.splits.{name}"), name) for name, v in splits_raw.items()}
+            return cls(profile=profile, split_rule=split_rule, splits=splits, legacy=False)
+        # legacy single-dataset form: treated as a dev-only workload
         manifest = raw.get("manifest")
         _require(isinstance(manifest, str) and manifest.strip(), "workload.manifest must be a non-empty string")
         content_hash = raw.get("content_hash")
@@ -126,12 +226,32 @@ class Workload:
             isinstance(content_hash, str) and content_hash.strip(),
             "workload.content_hash is required (frozen dataset hash; cross-round comparability depends on it)",
         )
-        profile = raw.get("profile", "quick")
-        _require(profile in PROFILES, f"workload.profile must be one of {sorted(PROFILES)}")
-        return cls(manifest=manifest, content_hash=content_hash, profile=profile)
+        return cls(
+            profile=profile,
+            split_rule=None,
+            splits={"dev": SplitSpec(manifest=manifest, content_hash=content_hash)},
+            legacy=True,
+        )
+
+    def split_hash(self, name: str) -> str:
+        if name not in self.splits:
+            raise ContractError(f"unknown workload split {name!r}; declared: {sorted(self.splits)}")
+        return self.splits[name].content_hash
+
+    def split_manifest(self, name: str) -> str:
+        if name not in self.splits:
+            raise ContractError(f"unknown workload split {name!r}; declared: {sorted(self.splits)}")
+        return self.splits[name].manifest
 
     def to_dict(self) -> dict:
-        return {"manifest": self.manifest, "content_hash": self.content_hash, "profile": self.profile}
+        if self.legacy:
+            split = self.splits["dev"]
+            return {"manifest": split.manifest, "content_hash": split.content_hash, "profile": self.profile}
+        return {
+            "profile": self.profile,
+            "split_rule": self.split_rule,
+            "splits": {name: split.to_dict() for name, split in self.splits.items()},
+        }
 
 
 @dataclass(frozen=True)
@@ -282,40 +402,52 @@ class ExperimentSpec:
         spec = cls.from_dict(raw)
         return cls(**{**spec.__dict__, "spec_dir": str(path.parent)})
 
-    def verify_workload(self, base_dir: str | Path | None = None) -> str:
-        """Re-hash the workload manifest and compare with the declared hash.
+    def verify_workload(self, base_dir: str | Path | None = None, split: str | None = None) -> str:
+        """Re-hash the declared split manifests and compare with declared hashes.
 
-        Returns the verified content hash. `workload.manifest` resolves against
-        `base_dir`, defaulting to the spec file's directory (from_yaml). This
-        is the A4 contract check: attribute / run / propose-* call it before
+        Returns the verified content hash of the selected split (all declared
+        splits when `split` is None). `workload.splits[*].manifest` resolves
+        against `base_dir`, defaulting to the spec file's directory. This is
+        the A4 contract check: attribute / run / propose-* call it before
         touching any data, so a drifted dataset can never silently join two
-        rounds of results.
+        rounds of results. With the full three-way form, also checks the
+        calib/dev/frozen_test slices are disjoint (case_id + prompt hash).
         """
         base = Path(base_dir) if base_dir is not None else (Path(self.spec_dir) if self.spec_dir else None)
         if base is None:
             raise ContractError(
                 "cannot locate the workload manifest: the spec was not loaded from a file; pass base_dir"
             )
-        manifest = base / self.workload.manifest
-        if not manifest.is_file():
-            raise ContractError(
-                f"dataset manifest not found: {manifest} (workload.manifest is relative to the spec file)"
-            )
-        actual = dataset_content_hash(manifest)
-        if actual != self.workload.content_hash:
-            raise ContractError(f"dataset hash mismatch: spec={self.workload.content_hash} file={actual}")
-        return actual
+        names = [split] if split is not None else sorted(self.workload.splits)
+        verified: dict[str, str] = {}
+        for name in names:
+            manifest = base / self.workload.split_manifest(name)
+            if not manifest.is_file():
+                raise ContractError(
+                    f"dataset manifest not found: {manifest} (workload.splits.{name}.manifest is relative to the spec file)"
+                )
+            actual = dataset_content_hash(manifest)
+            if actual != self.workload.split_hash(name):
+                raise ContractError(f"dataset hash mismatch for split {name!r}: spec={self.workload.split_hash(name)} file={actual}")
+            verified[name] = actual
+        if split is None and not self.workload.legacy:
+            _check_split_disjointness(base, self.workload)
+        if split is not None:
+            return verified[split]
+        return verified
 
-    def require_dataset_file(self, path: str | Path, what: str) -> str:
+    def require_dataset_file(self, path: str | Path, what: str, expected_hash: str | None = None) -> str:
         """Assert a CLI-provided data file (--cases) is byte-identical to the
-        frozen workload. Raises ContractError (exit 2 via main) on drift or a
-        missing file."""
+        frozen workload (or an explicit split hash). Raises ContractError
+        (exit 2 via main) on drift or a missing file."""
+        if expected_hash is None:
+            expected_hash = self.workload.split_hash("dev")
         try:
             actual = dataset_content_hash(path)
         except OSError as exc:
             raise ContractError(f"cannot read {what}: {exc}") from exc
-        if actual != self.workload.content_hash:
-            raise ContractError(f"{what} hash mismatch: spec={self.workload.content_hash} file={actual}")
+        if actual != expected_hash:
+            raise ContractError(f"{what} hash mismatch: spec={expected_hash} file={actual}")
         return actual
 
     def validate_policy_covers(self, labels: list[str]) -> list[str]:
