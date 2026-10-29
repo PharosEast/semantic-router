@@ -778,7 +778,10 @@ def cmd_report(args: argparse.Namespace) -> int:
 
 
 def cmd_next(args: argparse.Namespace) -> int:
-    context = write_next_context(args.ledger, args.output, tail=args.tail)
+    """A2: the replay candidate in the context is ranked by the contract's
+    objective.replay_metric, the same selection `ledger top` uses."""
+    spec = _load_spec(args.spec)
+    context = write_next_context(args.ledger, args.output, metric_key=spec.objective.replay_metric, tail=args.tail)
     _print_json({"context": args.output, "bytes": len(context)})
     return 0
 
@@ -1255,6 +1258,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.set_defaults(func=cmd_report)
 
     p_next = sub.add_parser("next", help="agent context export (untrusted reference material header included)")
+    p_next.add_argument("--spec", required=True, help="experiment spec YAML (objective.replay_metric ranks the best replay candidate, A2)")
     p_next.add_argument("--ledger", required=True, help="ledger JSONL")
     p_next.add_argument("--output", required=True, help="output Markdown path")
     p_next.add_argument("--tail", type=int, default=10, help="how many recent records to include")
