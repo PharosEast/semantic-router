@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterator
 
-from .contract import LIVE_VERDICTS, REPLAY_VERDICTS, TIERS, ContractError
+from .contract import LIVE_VERDICTS, REPLAY_VERDICTS, SPLIT_NAMES, TIERS, ContractError
 
 COMMON_REQUIRED = ("round", "ts", "candidate", "tier", "baseline_ref", "metrics", "verdict", "dataset_hash")
 
@@ -43,6 +43,9 @@ class LedgerRecord:
     attribution_ref: str | None = None
     coverage_warning: bool = False
     notes: str = ""
+    # B: which frozen split the record's data came from (calib/dev/frozen_test).
+    # Legacy single-dataset records omit the field (equivalent to "dev").
+    split: str | None = None
     # A5: present only when the trial produced no usable metric (e.g.
     # "timeout" when the stack exceeded budget.max_minutes_per_trial).
     # best_replay / top_replay exclude records carrying a status.
@@ -72,6 +75,8 @@ class LedgerRecord:
             out["coverage_warning"] = True
         if self.notes:
             out["notes"] = self.notes
+        if self.split:
+            out["split"] = self.split
         if self.status:
             out["status"] = self.status
         return out
@@ -95,6 +100,7 @@ class LedgerRecord:
             attribution_ref=raw.get("attribution_ref"),
             coverage_warning=bool(raw.get("coverage_warning", False)),
             notes=str(raw.get("notes", "")),
+            split=raw.get("split"),
             status=raw.get("status"),
         )
 
@@ -141,6 +147,9 @@ def validate_record(raw: dict) -> None:
             raise ContractError(f"{optional_list} must be a list")
     if "attribution_ref" in raw and raw["attribution_ref"] is not None:
         _require_nonempty_str(raw["attribution_ref"], "attribution_ref")
+    if "split" in raw and raw["split"] is not None:
+        if raw["split"] not in SPLIT_NAMES:
+            raise ContractError(f"split must be one of {sorted(SPLIT_NAMES)}, got {raw['split']!r}")
     if "status" in raw and raw["status"] is not None:
         _require_nonempty_str(raw["status"], "status")
         if raw["status"] != "timeout":

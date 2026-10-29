@@ -14,6 +14,14 @@ workload:
   manifest: datasets/dev-mmlu-pro.yaml
   content_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
   profile: quick
+  # B: preferred form - three-way split produced by `recipe-lab split`:
+  # split_rule: "group by source_id; seed 42; 40/30/30"   # required, written to provenance
+  # splits:
+  #   calib:       {manifest: calib.jsonl,       content_hash: sha256:<...>}
+  #   dev:         {manifest: dev.jsonl,         content_hash: sha256:<...>}
+  #   frozen_test: {manifest: frozen_test.jsonl, content_hash: sha256:<...>}
+  # The three splits must be disjoint (case_id and prompt); frozen_test is
+  # quarantined from replay/propose and only touched by live-verdict --final.
 attribution:
   oracle_policy:
     math: local/model-math
