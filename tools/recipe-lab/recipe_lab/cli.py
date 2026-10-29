@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -37,7 +38,7 @@ from .contract import (
     dataset_content_hash,
 )
 from .ledger import Ledger, LedgerRecord
-from .proposers import threshold_search
+from .proposers import rule_threshold, threshold_search
 from .runner import (
     RunnerEnv,
     RunnerError,
@@ -273,11 +274,138 @@ def cmd_propose(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_propose_rule(args: argparse.Namespace) -> int:
+    try:
+        with Path(args.base_config).open("r", encoding="utf-8") as fh:
+            base = yaml.safe_load(fh)
+    except (OSError, yaml.YAMLError) as exc:
+        raise SystemExit(f"cannot read base config: {exc}") from exc
+    if args.list_sites:
+        sites = rule_threshold.find_threshold_sites(base)
+        if args.signal:
+            sites = [s for s in sites if s.signal == args.signal]
+        _print_json(
+            {
+                "sites": [
+                    {
+                        "decision": s.decision,
+                        "signal": s.signal,
+                        "op": s.op,
+                        "value": s.value,
+                        "negated": s.negated,
+                        "path": list(s.path),
+                    }
+                    for s in sites
+                ]
+            }
+        )
+        return 0
+    if not args.signal:
+        raise SystemExit("propose-rule-thresholds: --signal is required")
+    values = (
+        [float(part) for part in str(args.values).split(",") if part.strip()]
+        if args.values
+        else None
+    )
+    deltas = (
+        [float(part) for part in str(args.deltas).split(",") if part.strip()]
+        if args.deltas
+        else None
+    )
+    if values is None and deltas is None:
+        raise SystemExit(
+            "propose-rule-thresholds: one of --values or --deltas is required"
+        )
+    if values is not None and deltas is not None:
+        raise SystemExit(
+            "propose-rule-thresholds: --values and --deltas are mutually exclusive"
+        )
+    if not args.output_dir:
+        raise SystemExit("propose-rule-thresholds: --output-dir is required")
+    decisions = (
+        [d.strip() for d in str(args.decisions).split(",") if d.strip()]
+        if args.decisions
+        else None
+    )
+    try:
+        candidates = rule_threshold.propose_rule_thresholds(
+            base,
+            args.signal,
+            values=values,
+            deltas=deltas,
+            decisions=decisions,
+            allow_partial=args.allow_partial,
+            from_value=args.from_value,
+            op=args.op,
+            lo=args.lo,
+            hi=args.hi,
+        )
+        paths = rule_threshold.write_candidates(candidates, args.output_dir)
+    except ContractError as exc:
+        raise SystemExit(f"proposer error: {exc}") from exc
+    _print_json(
+        {
+            "signal": args.signal,
+            "candidates": [c.summary() for c in candidates],
+            "files": [str(p) for p in paths],
+        }
+    )
+    return 0
+
+
 def _resolve_candidates(value: str) -> list[Path]:
     path = Path(value)
     if path.is_dir():
         return sorted(path.glob("*.yaml"))
     return [Path(part.strip()) for part in value.split(",") if part.strip()]
+
+
+def _candidate_entry(
+    path: Path, fallback_proposer: str, index: int, total: int
+) -> dict:
+    """C: prefer the sidecar metadata the proposer wrote next to the config
+    (`<stem>.candidate.json`); fall back to the bare-path form for configs
+    that come without one."""
+    sidecar = path.with_suffix(".candidate.json")
+    if not sidecar.is_file():
+        return {
+            "kind": "config",
+            "ref": str(path),
+            "change_summary": f"candidate {index}/{total}",
+            "provenance": {"proposer": fallback_proposer, "insight_refs": []},
+        }
+    try:
+        raw = json.loads(sidecar.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot read candidate sidecar {sidecar}: {exc}") from exc
+    return {
+        "kind": raw.get("kind", "config"),
+        "ref": raw.get("ref", str(path)),
+        "change_summary": raw.get("change_summary", ""),
+        "provenance": raw.get(
+            "provenance", {"proposer": fallback_proposer, "insight_refs": []}
+        ),
+    }
+
+
+def _validate_config(path: Path, validate_bin: str) -> str | None:
+    """C: returns None when the config validates, else the rejection reason."""
+    try:
+        proc = subprocess.run(
+            [validate_bin, "config", "validate", "--config", str(path)],
+            capture_output=True,
+            text=True,
+            timeout=300.0,
+        )
+    except FileNotFoundError as exc:
+        raise ContractError(f"validator binary not found: {validate_bin}") from exc
+    except subprocess.TimeoutExpired:
+        return "config validate timed out"
+    if proc.returncode != 0:
+        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+        tail = detail[-1] if detail else "no output"
+        return f"config validate exit {proc.returncode}: {tail}"
+    return None
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -306,6 +434,24 @@ def cmd_run(args: argparse.Namespace) -> int:
     candidates = _resolve_candidates(args.candidates)
     if not candidates:
         raise SystemExit(f"no candidate configs found: {args.candidates}")
+
+    # C: optional pre-flight validation; rejected candidates never reach the ledger.
+    rejected: list[dict] = []
+    if args.validate:
+        kept: list[Path] = []
+        for path in candidates:
+            reason = _validate_config(path, args.validate_bin)
+            if reason is None:
+                kept.append(path)
+            else:
+                rejected.append({"path": str(path), "reason": reason})
+                print(f"[run] rejected {path.name}: {reason}", file=sys.stderr)
+        candidates = kept
+    if not candidates:
+        _print_json(
+            {"evaluated": 0, "timed_out": [], "rejected": rejected, "best": None}
+        )
+        return 2
 
     output_dir = Path(args.output_dir)
     ledger = Ledger(args.ledger)
@@ -359,6 +505,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"[run] candidate {index}/{len(candidates)}: {candidate_path}",
             file=sys.stderr,
         )
+        entry = _candidate_entry(candidate_path, args.proposer, index, len(candidates))
         try:
             result = evaluate_candidate(
                 candidate_config=candidate_path,
@@ -377,12 +524,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             record = LedgerRecord(
                 round=args.round,
                 ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                candidate={
-                    "kind": "config",
-                    "ref": str(candidate_path),
-                    "change_summary": f"candidate {index}/{len(candidates)}",
-                    "provenance": {"proposer": args.proposer, "insight_refs": []},
-                },
+                candidate=entry,
                 tier="replay",
                 baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
                 metrics={},
@@ -418,12 +560,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         record = LedgerRecord(
             round=args.round,
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            candidate={
-                "kind": "config",
-                "ref": str(candidate_path),
-                "change_summary": f"candidate {index}/{len(candidates)}",
-                "provenance": {"proposer": args.proposer, "insight_refs": []},
-            },
+            candidate=entry,
             tier="replay",
             baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
             metrics={replay_metric: metric_value} if metric_value is not None else {},
@@ -451,7 +588,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     best = ledger.top_replay(spec.objective.replay_metric)
-    _print_json({"evaluated": len(appended), "timed_out": timeouts, "best": best})
+    _print_json(
+        {
+            "evaluated": len(appended),
+            "timed_out": timeouts,
+            "rejected": rejected,
+            "best": best,
+        }
+    )
     return 0
 
 
@@ -698,6 +842,74 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_prop.set_defaults(func=cmd_propose)
 
+    p_rule = sub.add_parser(
+        "propose-rule-thresholds",
+        help="generate candidate configs by moving every rule-level predicate site of one signal (C)",
+        description=(
+            "Finds predicate occurrences inside decision rules (including under NOT branches), "
+            "optionally filters them, and moves all selected sites to each target value. "
+            "Writes one YAML config plus a sidecar metadata JSON per candidate."
+        ),
+    )
+    p_rule.add_argument("--base-config", required=True, help="base recipe config YAML")
+    p_rule.add_argument(
+        "--signal",
+        default=None,
+        help="decision signal name whose rule predicates to move (optional with --list-sites)",
+    )
+    p_rule.add_argument(
+        "--from",
+        dest="from_value",
+        type=float,
+        default=None,
+        help="only move sites currently at this value (e.g. the 2.5 -> 1.75 BUG-3 calibration)",
+    )
+    p_rule.add_argument(
+        "--values", default=None, help="comma-separated target threshold values"
+    )
+    p_rule.add_argument(
+        "--deltas", default=None, help="comma-separated deltas from the current value"
+    )
+    p_rule.add_argument(
+        "--decisions",
+        default=None,
+        help="comma-separated decision names to restrict the move to",
+    )
+    p_rule.add_argument(
+        "--allow-partial",
+        action="store_true",
+        help="skip decisions without a matching site (warn) instead of failing",
+    )
+    p_rule.add_argument(
+        "--op",
+        choices=["gte", "gt", "lte", "lt"],
+        default=None,
+        help="restrict to one predicate operator",
+    )
+    p_rule.add_argument(
+        "--lo",
+        type=float,
+        default=None,
+        help="threshold lower clamp (default: inferred from the signal)",
+    )
+    p_rule.add_argument(
+        "--hi",
+        type=float,
+        default=None,
+        help="threshold upper clamp (default: inferred from the signal)",
+    )
+    p_rule.add_argument(
+        "--list-sites",
+        action="store_true",
+        help="print the matching threshold sites as JSON and exit",
+    )
+    p_rule.add_argument(
+        "--output-dir",
+        default=None,
+        help="directory for candidate config YAMLs (required when proposing)",
+    )
+    p_rule.set_defaults(func=cmd_propose_rule)
+
     p_run = sub.add_parser(
         "run", help="evaluate candidate configs in the replay tier (RANKED -> ledger)"
     )
@@ -777,6 +989,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="extra args passed to the mock backend (split on spaces)",
     )
     p_run.add_argument("--round", type=int, default=1)
+    p_run.add_argument(
+        "--validate",
+        action="store_true",
+        help="pre-flight each candidate config with --validate-bin; rejected candidates never reach the ledger (C)",
+    )
+    p_run.add_argument(
+        "--validate-bin",
+        default="vllm-sr",
+        help="validator invoked as '<bin> config validate --config <path>' (C)",
+    )
     p_run.set_defaults(func=cmd_run)
 
     p_ledger = sub.add_parser("ledger", help="inspect or append to the evidence ledger")
