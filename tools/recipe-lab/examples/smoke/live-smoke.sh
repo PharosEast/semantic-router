@@ -4,15 +4,26 @@
 # -> ledger. Everything runs inside one GPU job so the sr-bench service
 # reaches the stack on localhost.
 #
-#   setsid nohup srun --partition=h20 --gres=gpu:1 --cpus-per-task=8 --time=00:55:00 \
-#     bash ~/jinghaoyu/sr-build/scripts/live-smoke.sh \
-#     > ~/jinghaoyu/recipe-lab-workspace/logs/live-smoke-launch.log 2>&1 < /dev/null &
+#   setsid nohup srun --gres=gpu:1 --cpus-per-task=8 --time=00:55:00 \
+#     bash tools/recipe-lab/examples/smoke/live-smoke.sh \
+#     > live-smoke-launch.log 2>&1 < /dev/null &
+#
+# Environment (all optional; defaults derive from this script's location):
+#   REPO            semantic-router checkout        (default: derived)
+#   RECIPE_LAB_BIN  dir with recipe-lab CLI+python  (default: $REPO/.venv/bin)
+#   SR_BUILD        build prefix                    (default: $REPO/build)
+#   ROUTER_BIN      router binary                   (default: $SR_BUILD/bin/semantic-router)
+#   WORK_ROOT       scratch root for run dirs       (default: $REPO/.tmp-smoke-runs)
+#   DATASET_DIR     local MMLU-Pro snapshot         (default: $WORK_ROOT/dataset/mmlu-pro)
 set -u
-source "$HOME/jinghaoyu/sr-build/env.sh"
-REPO="$HOME/jinghaoyu/semantic-router-fork"
-ASSETS="$REPO/tools/recipe-lab/examples/smoke"
-RL="$HOME/jinghaoyu/venvs/recipe-lab-venv/bin"
-WORK="$HOME/jinghaoyu/recipe-lab-workspace/runs/live-smoke-$(date +%m%d%H%M%S)"
+ASSETS="$(cd "$(dirname "$0")" && pwd)"
+REPO="${REPO:-$(cd "$ASSETS/../../.." && pwd)}"
+RL="${RECIPE_LAB_BIN:-$REPO/.venv/bin}"
+SR_BUILD="${SR_BUILD:-$REPO/build}"
+ROUTER_BIN="${ROUTER_BIN:-$SR_BUILD/bin/semantic-router}"
+WORK_ROOT="${WORK_ROOT:-$REPO/.tmp-smoke-runs}"
+DATASET_DIR="${DATASET_DIR:-$WORK_ROOT/dataset/mmlu-pro}"
+WORK="$WORK_ROOT/live-smoke-$(date +%m%d%H%M%S)"
 mkdir -p "$WORK"
 echo "WORK=$WORK"
 
@@ -24,16 +35,16 @@ trap cleanup EXIT
 # 1. manifests from the local MMLU snapshot (config hash patched after the
 #    router is up; provisional 64-hex placeholder keeps the builder happy)
 "$RL/python" "$ASSETS/build_live_manifest.py" \
-  --dataset-dir "$HOME/jinghaoyu/dataset/mmlu-pro" \
+  --dataset-dir "$DATASET_DIR" \
   --output-dir "$WORK" \
   --config-hash 0000000000000000000000000000000000000000000000000000000000000000 || exit 1
 
 # 2. mock backend with the capability table, then the router
-"$HOME/jinghaoyu/vllm028-env/bin/python" "$ASSETS/mock_backend.py" --port 8000 \
+"$PYBIN" "$ASSETS/mock_backend.py" --port 8000 \
   --cases "$WORK/cases-mcq.jsonl" > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 2
-"$SR_BUILD/bin/semantic-router" -config "$ASSETS/smoke-config.yaml" -gateway standalone \
+"$ROUTER_BIN" -config "$ASSETS/smoke-config.yaml" -gateway standalone \
   > "$WORK/router.log" 2>&1 &
 ROUTER_PID=$!
 READY=0
