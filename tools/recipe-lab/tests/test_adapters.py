@@ -37,7 +37,7 @@ def test_record_to_case_joins_by_prompt():
     assert state == "matched"
     assert row["case_id"] == "c1"
     assert row["truth"] == "local_standard"
-    assert row["pred"] == "local_standard"
+    assert row["matched_decision"] == "local_standard"  # F1: pred -> matched_decision
     assert row["routed"] == "local/private-qwen"
     assert row["answer_ok"] is None  # correctness joins later
 

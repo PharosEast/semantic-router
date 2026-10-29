@@ -40,11 +40,11 @@ VALID_SPEC: dict = {
 }
 
 
-def make_case(case_id: str, truth: str, pred: str, routed: str, answer_ok, family=None) -> dict:
+def make_case(case_id: str, truth: str, matched_decision: str, routed: str, answer_ok, family=None) -> dict:
     return {
         "case_id": case_id,
         "truth": truth,
-        "pred": pred,
+        "matched_decision": matched_decision,
         "routed": routed,
         "answer_ok": answer_ok,
         **({"family": family} if family is not None else {}),
@@ -52,7 +52,8 @@ def make_case(case_id: str, truth: str, pred: str, routed: str, answer_ok, famil
 
 
 ATTRIBUTION_CASES: list[dict] = [
-    make_case("case-e1", "math", "code", "local/model-code", False, family="d3"),
+    # decision mismatch: expected math but the decision matched code (F1)
+    make_case("case-mm", "math", "code", "local/model-code", False, family="d3"),
     make_case("case-e2", "math", "math", "local/model-code", False, family="d3"),
     make_case("case-e3", "math", "math", "local/model-math", False, family="d3"),
     make_case("case-sub", "math", "math", "local/model-code", True, family="d3"),

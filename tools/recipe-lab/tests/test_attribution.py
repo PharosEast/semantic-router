@@ -8,6 +8,7 @@ import pytest
 
 from recipe_lab.attribution import (
     CORRECT,
+    DECISION_MISMATCH,
     E1_SIGNAL,
     E2_POLICY,
     E3_CAPABILITY,
@@ -33,7 +34,8 @@ def test_all_classes_classified():
         dataset_hash="sha256:" + "2" * 64,
     )
     by_id = {r["case_id"]: r for r in rows}
-    assert by_id["case-e1"]["error_class"] == E1_SIGNAL
+    # string-only truth: a mismatched decision is decision_mismatch, not E1 (F1)
+    assert by_id["case-mm"]["error_class"] == DECISION_MISMATCH
     assert by_id["case-e2"]["error_class"] == E2_POLICY
     assert by_id["case-e3"]["error_class"] == E3_CAPABILITY
     assert by_id["case-sub"]["error_class"] == SUBOPTIMAL
@@ -42,6 +44,26 @@ def test_all_classes_classified():
     assert by_id["case-gap"]["error_class"] == POLICY_GAP
     # dataset hash is stamped on every row
     assert all(r["dataset_hash"] == "sha256:" + "2" * 64 for r in rows)
+
+
+def test_e1_never_produced_from_string_truth():
+    # F1: without signal-level truth, no record can be classified as E1
+    rows = attribute(
+        [CaseInput.from_dict(c, i) for i, c in enumerate(ATTRIBUTION_CASES)],
+        POLICY,
+    )
+    assert all(r["error_class"] != E1_SIGNAL for r in rows)
+    assert rows[0]["matched_decision"] == "code"  # renamed row field is present
+
+
+def test_legacy_pred_field_still_readable():
+    # records written before F1 use "pred"; they must keep loading
+    row = classify_case(
+        {"case_id": "x", "truth": "math", "pred": "code", "routed": "m", "answer_ok": False},
+        POLICY,
+    )
+    assert row["error_class"] == DECISION_MISMATCH
+    assert row["matched_decision"] == "code"
 
 
 def test_evidence_first_no_evidence_with_deviation():
@@ -67,12 +89,14 @@ def test_summary_math():
     assert summary["answered"] == 4  # correct + e2 + e3 + suboptimal
     assert summary["correct"] == 1
     assert summary["accuracy"] == pytest.approx(0.25)
-    assert summary["class_counts"][E1_SIGNAL] == 1
-    # E1 confusion pair: truth=math predicted as code
-    assert {"truth": "math", "pred": "code", "count": 1} in summary["e1_confusion_top"]
+    assert summary["class_counts"][DECISION_MISMATCH] == 1
+    assert summary["class_counts"][E1_SIGNAL] == 0  # E1 needs signal-level truth (F1)
+    # decision mismatch pair: truth=math matched as code
+    assert {"truth": "math", "matched_decision": "code", "count": 1} in summary["decision_mismatch_top"]
+    assert summary["e1_confusion_top"] == []
     # E2 deviation: routed code, expected model-math
     assert {"routed": "local/model-code", "expected": "local/model-math", "count": 1} in summary["e2_deviations_top"]
-    assert summary["e1_by_family"] == {"d3": 1}
+    assert summary["e1_by_family"] == {}
 
 
 def test_report_renders_family_aware_hints():
@@ -83,8 +107,11 @@ def test_report_renders_family_aware_hints():
     text = render_markdown(summarize(rows), dataset_hash="sha256:abc")
     assert "Misroute attribution report" in text
     assert "sha256:abc" in text
+    assert "decision_mismatch confusion pairs" in text
+    assert "`math` but decision matched `code`" in text
     assert "E1 by signal family" in text
-    assert "signal-question engineering" in text  # dynamic-question hint
+    # E1 needs signal-level truth (F2): empty for now, with a hint instead
+    assert "- none (E1 needs signal-level truth, F2)" in text
     assert "E2 routing deviations" in text
 
 

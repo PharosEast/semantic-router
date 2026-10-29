@@ -9,8 +9,11 @@ and exposes them through the management API:
 This adapter pulls those records and joins them against a hand-labeled case
 list (prompt -> truth label) to produce attribution input records:
 
-    {"case_id": ..., "truth": ..., "pred": <record.decision>,
+    {"case_id": ..., "truth": ..., "matched_decision": <record.decision>,
      "routed": <record.selected_model>, "family": ..., "answer_ok": null}
+
+The row field is matched_decision (F1): with string-only truth, a mismatched
+decision is decision_mismatch, never E1_signal.
 
 answer_ok stays null here: correctness is joined later from saved answers
 (Sub-issue 2's answer bank). The evidence-first rule handles the null.
@@ -132,7 +135,7 @@ def record_to_case(
     row = {
         "case_id": case.case_id,
         "truth": case.truth,
-        "pred": decision,
+        "matched_decision": decision,
         "routed": selected,
         "family": family,
         "answer_ok": None,  # correctness is joined later from the answer bank
