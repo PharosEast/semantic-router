@@ -32,6 +32,29 @@ def test_pair_metrics_sectioned_payload():
     assert (base, cand) == (1.0, 0.833)
 
 
+def test_pair_metrics_prefers_routing_arm_over_reference_lane():
+    # a candidate run keeps its "no routing" reference single lane before the
+    # routing arm; the comparison arm is the router (mom), not the reference
+    payload = {
+        "baseline_targets": [{"id": "single", "accuracy": 0.5}],
+        "candidate_targets": [
+            {"id": "single", "accuracy": 0.5},
+            {"id": "mom", "accuracy": 0.6667},
+        ],
+    }
+    incomplete: list[str] = []
+    base, cand = _pair_metrics(payload, "accuracy", incomplete)
+    assert (base, cand) == (0.5, 0.6667)
+    assert incomplete == []
+    # without a mom kind, the last target carrying the metric is the arm
+    payload["candidate_targets"] = [
+        {"id": "single", "accuracy": 0.5},
+        {"id": "router", "accuracy": 0.7},
+    ]
+    base, cand = _pair_metrics(payload, "accuracy", [])
+    assert (base, cand) == (0.5, 0.7)
+
+
 def test_pair_metrics_flat_two_values():
     base, cand = _pair_metrics({"a": 0.80, "b": 0.86}, "x", [])
     assert base is None and cand is None  # different key, nothing matched

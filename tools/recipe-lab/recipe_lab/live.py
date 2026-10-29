@@ -43,6 +43,30 @@ def guards_from_rows(rows: list[dict[str, Any]]) -> list[GuardResult]:
     return guards
 
 
+def _arm_accuracy(targets: Any, metric_key: str, *, routing_arm: bool) -> float | None:
+    """Accuracy of one run's comparison arm from a target list.
+
+    A candidate run typically carries a reference single-target lane (the
+    "no routing" arm) before the routing arm, so traversal order alone would
+    read the reference instead of the router. The routing arm is the `mom`
+    target when present, else the last target with the metric.
+    """
+    if not isinstance(targets, list):
+        return None
+    entries = [t for t in targets if isinstance(t, dict)]
+    if routing_arm:
+        for entry in entries:
+            if entry.get("kind") == "mom":
+                values = extract_metric_values(entry, metric_key)
+                if values:
+                    return values[0]
+    for entry in reversed(entries):
+        values = extract_metric_values(entry, metric_key)
+        if values:
+            return values[0]
+    return None
+
+
 def _pair_metrics(
     comparison: Any,
     metric_key: str,
@@ -50,21 +74,27 @@ def _pair_metrics(
 ) -> tuple[float | None, float | None]:
     """Pair baseline/candidate metric values from a compare payload.
 
-    Preferred shape: {"baseline": {...}, "candidate": {...}} sections. If the
-    payload is flatter, collect every numeric occurrence; exactly two are
-    read in traversal order, anything else is ambiguous evidence and becomes
-    INCONCLUSIVE rather than a guess.
+    Preferred shape: {"baseline_targets": [...], "candidate_targets": [...]}
+    sections (sr-bench compare), where the candidate arm is the routing
+    target, not its reference single lane. Flat payloads with exactly two
+    numeric occurrences are read in traversal order; anything else is
+    ambiguous evidence and becomes INCONCLUSIVE rather than a guess.
     """
     if isinstance(comparison, dict):
         base_section = comparison.get("baseline", comparison.get("baseline_targets"))
         cand_section = comparison.get("candidate", comparison.get("candidate_targets"))
         if isinstance(base_section, (dict, list)) and isinstance(cand_section, (dict, list)):
-            base_values = extract_metric_values(base_section, metric_key)
-            cand_values = extract_metric_values(cand_section, metric_key)
-            return (
-                base_values[0] if base_values else None,
-                cand_values[0] if cand_values else None,
-            )
+            if isinstance(base_section, list):
+                baseline_metric = _arm_accuracy(base_section, metric_key, routing_arm=False)
+            else:
+                base_values = extract_metric_values(base_section, metric_key)
+                baseline_metric = base_values[0] if base_values else None
+            if isinstance(cand_section, list):
+                candidate_metric = _arm_accuracy(cand_section, metric_key, routing_arm=True)
+            else:
+                cand_values = extract_metric_values(cand_section, metric_key)
+                candidate_metric = cand_values[0] if cand_values else None
+            return baseline_metric, candidate_metric
     values = extract_metric_values(comparison, metric_key)
     if len(values) == 2:
         return values[0], values[1]

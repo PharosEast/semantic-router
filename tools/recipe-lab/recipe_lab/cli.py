@@ -634,6 +634,7 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             gates=result["gates"],
             bench_refs=result["bench_refs"],
             attribution_delta=None,
+            attribution_ref=args.attribution_ref,
             coverage_warning=False,
             notes=f"baseline={result['metrics']['baseline']}",
         )
@@ -855,6 +856,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--candidate-run-id", required=True, help="sr-bench candidate run ID")
     p_live.add_argument("--guards", default=None, help="guards JSONL (name/metric/value/floor) from model_eval")
     p_live.add_argument("--candidate", default=None, help="candidate JSON file for the ledger record")
+    p_live.add_argument(
+        "--attribution-ref",
+        default=None,
+        help="attribution artifact this round is based on (path@hash); recorded in the ledger",
+    )
     p_live.add_argument("--ledger", default=None, help="ledger JSONL to append the live record to")
     p_live.add_argument("--srbench-bin", default="vllm-sr")
     p_live.add_argument("--srbench-url", default=None)
