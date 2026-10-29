@@ -15,7 +15,7 @@
   "metrics": {"capability.score": 0.794},
   "verdict": "RANKED",
   "dataset_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "attribution_delta": {"e1_fixed": 2, "e2_fixed": 1, "e3_remaining": 3},
+  "attribution_delta": {"e1_fixed": 2, "e2_fixed": 1, "decision_mismatch_fixed": 0, "e3_remaining": 3},
   "attribution_ref": "attribution.jsonl@sha256:0000000000000000000000000000000000000000000000000000000000000000",
   "notes": "smoke-test record"
 }
