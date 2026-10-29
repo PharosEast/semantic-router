@@ -195,6 +195,32 @@ def _require_nonempty_str(value: Any, name: str) -> None:
         raise ContractError(f"{name} must be a non-empty string")
 
 
+def best_replay(records: list[dict], metric_key: str) -> dict | None:
+    """A2: pure best-replay selection over raw ledger records.
+
+    Highest ``metrics[metric_key]`` among tier "replay" / verdict "RANKED"
+    records; coverage_warning records and A5 status records (a trial that
+    produced no usable metric) are excluded. Ties keep the earliest record.
+    Shared by ``Ledger.top_replay`` and the ``next`` context export so the
+    hand-off to the live tier and the agent context always agree.
+    """
+    best: dict | None = None
+    best_value: float | None = None
+    for raw in records:
+        if raw.get("tier") != "replay" or raw.get("verdict") != "RANKED":
+            continue
+        if raw.get("coverage_warning"):
+            continue
+        if raw.get("status"):  # A5: a trial that produced no metric never ranks
+            continue
+        value = raw.get("metrics", {}).get(metric_key)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if best_value is None or value > best_value:
+            best, best_value = raw, float(value)
+    return best
+
+
 def compute_record_id(raw: dict) -> str:
     """G1: stable content identity of a ledger record, 'rec-<12 hex>' over the
     canonical JSON of the record without its own record_id. Same content =>
@@ -274,17 +300,6 @@ class Ledger:
     def top_replay(self, metric_key: str) -> dict | None:
         """Best replay-tier candidate: highest metric, coverage_warning excluded.
 
-        This is the hand-off contract to the live tier (Sub-issue 3)."""
-        best: dict | None = None
-        best_value: float | None = None
-        for raw in self.filter(tier="replay", verdict="RANKED"):
-            if raw.get("coverage_warning"):
-                continue
-            if raw.get("status"):  # A5: a trial that produced no metric never ranks
-                continue
-            value = raw.get("metrics", {}).get(metric_key)
-            if not isinstance(value, (int, float)) or isinstance(value, bool):
-                continue
-            if best_value is None or value > best_value:
-                best, best_value = raw, float(value)
-        return best
+        This is the hand-off contract to the live tier (Sub-issue 3); A2 routes
+        it through the shared pure `best_replay` selection."""
+        return best_replay(self.read(), metric_key)

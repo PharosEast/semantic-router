@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from .ledger import Ledger
+from .ledger import Ledger, best_replay
 
 UNTRUSTED_HEADER = (
     "# recipe-lab knowledge context\n"
@@ -43,30 +43,28 @@ def _record_brief(record: dict[str, Any]) -> str:
     )
 
 
-def render_next_context(records: list[dict[str, Any]], tail: int = 10) -> str:
+def render_next_context(records: list[dict[str, Any]], metric_key: str, tail: int = 10) -> str:
     lines = [UNTRUSTED_HEADER, "## Ledger tail (most recent last)", ""]
     for record in records[-tail:]:
         lines.append(_record_brief(record))
-    replay_best = None
-    for record in records:
-        if record.get("tier") == "replay" and record.get("verdict") == "RANKED":
-            replay_best = record
+    # A2: the best replay candidate is picked by the shared pure selection
+    # (highest replay_metric, coverage_warning excluded), not by recency -
+    # an earlier candidate with a higher metric must win over a later one.
+    replay_best = best_replay(records, metric_key)
     lines += ["", "## Best replay-tier candidate so far", ""]
     if replay_best is not None:
         candidate = replay_best.get("candidate") or {}
         lines.append(f"- ref: {candidate.get('ref')} (round {replay_best.get('round')}, record {replay_best.get('record_id', '-')})")
         lines.append(f"- metrics: {json.dumps(replay_best.get('metrics') or {}, ensure_ascii=False)}")
-        if replay_best.get("coverage_warning"):
-            lines.append("- coverage_warning: some cases lacked evidence; re-verify before trusting")
     else:
         lines.append("- none yet: run the replay tier first")
     lines += ["", _NEXT_STEPS]
     return "\n".join(lines)
 
 
-def write_next_context(ledger_path: str, output_path: str, tail: int = 10) -> str:
+def write_next_context(ledger_path: str, output_path: str, metric_key: str, tail: int = 10) -> str:
     ledger = Ledger(ledger_path)
-    context = render_next_context(ledger.read(), tail=tail)
+    context = render_next_context(ledger.read(), metric_key, tail=tail)
     with open(output_path, "w", encoding="utf-8") as fh:
         fh.write(context)
     return context
