@@ -23,17 +23,26 @@ pip install -e '.[dev]'
 3. **答案库（bank）**：绕过 router 直接问每个模型，按 `expected_contains` 评分。
 4. **归因（attribute）**：E1 信号错 / E2 策略错 / E3 能力错（+ 次优路由、无证据）；
    在 `attribution.jsonl` 旁写 `summary.json`（summarize 结果），供 `next` 校验哈希后读取。
-5. **候选提议**：`propose-thresholds` 扰动单个决策信号阈值；
+5. **诊断（D）**：`diagnose` 对无标签 replay 流量做三类体检——决策覆盖率（dead/rare，
+   `--expect-rare` 里的安全决策只报告不告警）、信号分布（分位点 / 自身量程直方图 /
+   量程利用率）、阈值可达性（规则谓词位点按写入语义求流量满足率，全组为 0 即 unreachable）。
+   产出 `diagnosis.json`（`recipe-lab-diagnosis-v1`，带输入哈希，字节级稳定）与 `diagnosis.md`；
+   顶层 `dead_decisions` / `rare_decisions` / `unreachable_sites` 数组与 `next --diagnosis`
+   的消费形状一致。诊断只报告现象，不是裁决。
+6. **候选提议**：`propose-thresholds` 扰动单个决策信号阈值；
    `propose-rule-thresholds` 一次性移动一个信号在决策规则里的全部谓词位点
-   （含 NOT 分支；BUG-3 黄金用例即四个 `difficulty gte 2.5 -> 1.75` 一次到位）。
+   （含 NOT 分支；BUG-3 黄金用例即四个 `difficulty gte 2.5 -> 1.75` 一次到位）；
+   `propose-calibrated` 从诊断产物的观测分布取分位点（或目标流量占比）自动定值，
+   旁车自动携带 `diag:...#threshold.<decision>.<signal>` 引用，诊断与 base config
+   哈希不符直接拒绝（exit 2）。
    每个候选除 YAML 外还写 `<stem>.candidate.json` 旁车
    （kind / ref / change_summary / provenance / sites）。
-6. **replay 评估（run）**：同一题集 + 答案库下重放候选配置。排序指标是契约里的
+7. **replay 评估（run）**：同一题集 + 答案库下重放候选配置。排序指标是契约里的
    `objective.replay_metric`（A1，默认 `routed_accuracy`）；`budget.rounds` 是轮次硬上限，
    `budget.max_minutes_per_trial` 是单个 trial 的 deadline（A5），超时记 `status=timeout`
    且不参与排序。`--validate` 用 `vllm-sr config validate` 预检候选，被拒候选不进台账，
    全部被拒则 exit 2。
-7. **台账（ledger）**：append / show / top。每条记录有稳定 `record_id`（G1），
+8. **台账（ledger）**：append / show / top。每条记录有稳定 `record_id`（G1），
    provenance 可携带 insight-refs（G2）。`ledger top --spec` 按 replay_metric 取最优。
 8. **报告与上下文（report / provenance / record-draft / next）**：报告、manifest 与
    晋升草稿只从台账重放；`next` 把下一轮上下文导出给 agent（见下）。
@@ -50,9 +59,11 @@ pip install -e '.[dev]'
 | `attribute` | E1/E2/E3 误路由归因（`--split` + 可选 `--cases` 哈希校验） |
 | `attribute-session` | 会话级 agentic 归因：lane_flap / tool_loop_interrupted / selection_failed（sub-6 P2） |
 | `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签 |
+| `diagnose` | 无标签流量的三类体检：覆盖率 / 分布 / 阈值可达性（D） |
 | `bank` | 构建 / 应用 per-case/per-model 答案库 |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
+| `propose-calibrated` | 按观测分布分位点提议规则阈值候选（D） |
 | `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
 | `live-verdict` | 比较两个 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
@@ -70,9 +81,17 @@ recipe-lab plan --spec examples/spec.example.yaml
 # 三分题集（同题集 + 同参数 => 字节级一致输出）
 recipe-lab split --cases labeled.jsonl --output-dir splits/
 
+# 诊断：不需要标准答案，从无标签 replay 流量里发现死决策、压缩量程与不可达阈值
+recipe-lab diagnose --records rows.jsonl --config config.yaml --output-dir diag/ \
+  --expect-rare local_security_containment,local_privacy_policy
+
 # 候选生成：BUG-3 式校准（规则级位点一次到位）
 recipe-lab propose-rule-thresholds --base-config config.yaml \
   --signal difficulty --from 2.5 --values 1.75 --output-dir cands/
+
+# 候选生成：按诊断观测分布自动定值（p75，或 --target-share 0.25 表达同一意图）
+recipe-lab propose-calibrated --diagnosis diag/diagnosis.json --base-config config.yaml \
+  --signal difficulty --from 2.5 --quantiles 0.75 --output-dir cands/
 
 # replay 评估（frozen_test 拒绝；候选先过 config validate）
 recipe-lab run --spec spec.yaml --split dev --cases splits/dev.jsonl \
@@ -196,5 +215,9 @@ python -c "from huggingface_hub import snapshot_download; \
 srun --gres=gpu:1 --cpus-per-task=8 --time=00:45:00 \
   bash tools/recipe-lab/examples/smoke/replay-smoke.sh
 ```
+
+`calibration-smoke.sh` 是唯一的例外：纯离线（无 GPU、无 router），用合成夹具完整走一遍
+`diagnose` → `propose-calibrated`，并断言候选与 BUG-3 黄金结果一致；同一流程也写成
+pytest 用例（`tests/test_calibration_smoke.py`）纳入单元测试。
 
 集群级运维脚本（数据集批量下载、长时间循环压测、作业收尾）不属于本仓库，放在仓库外私有目录维护。
