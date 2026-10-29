@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .adapters.router_replay import fetch_replays, load_cases, records_to_cases, write_cases
+from .adapters.router_replay import fetch_replays, load_cases, records_to_cases, records_to_rows, write_cases
 from .attribution import attribute, load_records, render_markdown, summarize, write_jsonl
 from .contract import ContractError, ExperimentSpec
 
@@ -74,12 +74,13 @@ def cmd_attribute(args: argparse.Namespace) -> int:
 
 
 def cmd_collect_replays(args: argparse.Namespace) -> int:
-    """Pull replay records from the router management API and join them
-    against the labeled case list -> attribution input records."""
-    try:
-        cases = load_cases(args.cases)
-    except ContractError as exc:
-        raise SystemExit(f"cases error: {exc}") from exc
+    """Pull replay records from the router management API and either join
+    them against the labeled case list -> attribution input records, or with
+    --unlabeled emit one raw diagnostic row per record (no labels needed)."""
+    if args.unlabeled and args.cases:
+        raise SystemExit("collect-replays: --unlabeled and --cases are mutually exclusive")
+    if not args.unlabeled and not args.cases:
+        raise SystemExit("collect-replays: one of --cases (labeled join) or --unlabeled (raw rows) is required")
     try:
         records = fetch_replays(
             args.url,
@@ -90,13 +91,24 @@ def cmd_collect_replays(args: argparse.Namespace) -> int:
     except RuntimeError as exc:
         raise SystemExit(f"replay fetch error: {exc}") from exc
 
-    rows, stats = records_to_cases(records, cases, family=args.family)
     output = Path(args.output)
-    write_cases(cases, output.with_suffix(".cases.jsonl"))
+    result: dict = {"replay_records": len(records), "output": str(output)}
+    if args.unlabeled:
+        rows = records_to_rows(records)
+        result["rows"] = len(rows)
+    else:
+        try:
+            cases = load_cases(args.cases)
+        except ContractError as exc:
+            raise SystemExit(f"cases error: {exc}") from exc
+        rows, stats = records_to_cases(records, cases, family=args.family)
+        write_cases(cases, output.with_suffix(".cases.jsonl"))
+        result["rows"] = len(rows)
+        result["join_stats"] = stats
     with output.open("w", encoding="utf-8") as fh:
         for row in rows:
             fh.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
-    _print_json({"replay_records": len(records), "rows": len(rows), "join_stats": stats, "output": str(output)})
+    _print_json(result)
     return 0
 
 
@@ -120,10 +132,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_collect = sub.add_parser(
         "collect-replays",
-        help="pull router_replay records from the management API and join them with labeled cases",
+        help="pull router_replay records from the management API and join them with labeled cases (--unlabeled for raw diagnostic rows)",
     )
     p_collect.add_argument("--url", required=True, help="router management base URL, e.g. http://127.0.0.1:8080")
-    p_collect.add_argument("--cases", required=True, help="labeled case list JSONL (case_id/prompt/truth)")
+    p_collect.add_argument(
+        "--cases", default=None, help="labeled case list JSONL (case_id/prompt/truth); omit with --unlabeled"
+    )
+    p_collect.add_argument(
+        "--unlabeled",
+        action="store_true",
+        help="skip the labeled join and emit one raw diagnostic row per replay record (no --cases needed)",
+    )
     p_collect.add_argument("--output", required=True, help="output attribution-records JSONL path")
     p_collect.add_argument("--family", default="d3", help="signal family tag for the records")
     p_collect.add_argument("--no-details", action="store_true", help="do not request showDetails=true")
