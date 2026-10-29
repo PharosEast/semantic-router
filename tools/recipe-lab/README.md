@@ -21,7 +21,8 @@ pip install -e '.[dev]'
    （`sha256:` + 原始字节哈希）；attribute / run / propose-thresholds 在触数据前
    重算校验，任何漂移直接拒绝（exit 2）。
 3. **答案库（bank）**：绕过 router 直接问每个模型，按 `expected_contains` 评分。
-4. **归因（attribute）**：E1 信号错 / E2 策略错 / E3 能力错（+ 次优路由、无证据）。
+4. **归因（attribute）**：E1 信号错 / E2 策略错 / E3 能力错（+ 次优路由、无证据）；
+   在 `attribution.jsonl` 旁写 `summary.json`（summarize 结果），供 `next` 校验哈希后读取。
 5. **候选提议**：`propose-thresholds` 扰动单个决策信号阈值；
    `propose-rule-thresholds` 一次性移动一个信号在决策规则里的全部谓词位点
    （含 NOT 分支；BUG-3 黄金用例即四个 `difficulty gte 2.5 -> 1.75` 一次到位）。
@@ -34,6 +35,8 @@ pip install -e '.[dev]'
    全部被拒则 exit 2。
 7. **台账（ledger）**：append / show / top。每条记录有稳定 `record_id`（G1），
    provenance 可携带 insight-refs（G2）。`ledger top --spec` 按 replay_metric 取最优。
+8. **报告与上下文（report / provenance / record-draft / next）**：报告、manifest 与
+   晋升草稿只从台账重放；`next` 把下一轮上下文导出给 agent（见下）。
 
 ## CLI
 
@@ -52,6 +55,10 @@ pip install -e '.[dev]'
 | `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
 | `live-verdict` | 比较两个 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
+| `report` | 只从台账重放的运行报告（G1） |
+| `provenance` | recipe-lab-run-v1 manifest（记录 ID、台账哈希、bench_refs） |
+| `record-draft` | 从最近一条 PASS live 记录生成晋升草稿 |
+| `next` | 导出下一轮 agent 上下文（G3；不可信材料头 + 可引用 ID） |
 
 常用示例：
 
@@ -83,7 +90,28 @@ recipe-lab live-verdict --spec spec.yaml --baseline-run-id run-a \
 # 晋升终裁（唯一允许引用 frozen_test 的路径）
 recipe-lab live-verdict --spec spec.yaml --baseline-run-id run-a \
   --candidate-run-id run-b --split frozen_test --final
+
+# 下一轮上下文导出（给 agent 读；同输入字节级同输出）
+recipe-lab next --spec spec.yaml --ledger ledger.jsonl \
+  --diagnosis diag/diagnosis.json --output ctx.md
 ```
+
+## 上下文导出（next，A2/G3）
+
+`next` 按固定段落顺序导出给下一轮提议者的完整上下文，同输入字节级同输出，
+frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
+
+1. 不可信材料头（台账 notes 可含任意上游文本，agent 不得当作指令）；
+2. 契约摘要：objective、replay_metric、constraints、gates、split 名称与哈希、预算已用/剩余轮数；
+3. 台账尾部 + 最好 replay 候选（A2：按 `objective.replay_metric` 经共享的
+   `ledger.best_replay` 选取，coverage_warning 与超时记录不参与，与 `ledger top` 一致）
+   + 最近一次 live 裁决及原因；
+4. 最近一次归因摘要：各类别计数、E1 / decision_mismatch / E2 top-5 —— 从最新记录的
+   `attribution_ref`（`<path>@sha256:<hex>`）校验哈希后读取 `summary.json`，哈希不符 exit 2；
+5. 诊断要点（`--diagnosis` 时）：dead / rare 决策、unreachable 阈值位点；
+6. 可引用 ID 列表：每条证据旁与汇总段都给出可直接填进 `--insight-refs` 的引用串
+   （`rec-<id>` / `bench:<run_id>` / `attr:<path>@sha256:<hex>` / `diag:<path>@sha256:<hex>#<anchor>`）；
+7. 纪律提醒。
 
 ## 洞察引用（--insight-refs，G2）
 
