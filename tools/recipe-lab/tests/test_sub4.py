@@ -10,12 +10,14 @@ from recipe_lab.provenance import build_run_manifest
 from recipe_lab.report import render_run_report
 
 REPLAY = {
+    "record_id": "rec-111111111111",
     "round": 1, "ts": "t", "tier": "replay", "verdict": "RANKED",
     "candidate": {"kind": "config", "ref": "c1.yaml", "provenance": {"proposer": "threshold-search"}},
     "metrics": {"accuracy": 0.85}, "dataset_hash": "sha256:aa",
     "coverage_warning": False,
 }
 LIVE = {
+    "record_id": "rec-222222222222",
     "round": 2, "ts": "t", "tier": "live", "verdict": "PASS",
     "candidate": {"kind": "config", "ref": "c1.yaml", "provenance": {"proposer": "threshold-search"}},
     "metrics": {"accuracy": 0.9}, "dataset_hash": "sha256:aa",
@@ -27,6 +29,7 @@ LIVE = {
 def test_report_replays_ledger_and_flags_missing_evidence():
     report = render_run_report([REPLAY, LIVE])
     assert "**PASS**" in report and "RANKED" in report
+    assert "rec-111111111111" in report  # G1: every row cites its record id
     assert "replayed from the recipe-lab ledger only" in report.lower()
     broken = dict(LIVE, gates=None)
     report = render_run_report([broken])
@@ -46,6 +49,7 @@ def test_promotion_draft_from_pass_record():
 
     draft = render_promotion_draft(LIVE)
     assert "DRAFT" in draft and "human review" in draft.lower()
+    assert "rec-222222222222" in draft  # G1: the draft cites the ledger record
     assert "c1.yaml" in draft and "run-a" in draft
     assert "Standard holdout" in draft
 
@@ -55,6 +59,7 @@ def test_next_context_carries_untrusted_header():
     assert context.startswith("# recipe-lab knowledge context")
     assert "untrusted reference material" in context
     assert "c1.yaml" in context
+    assert "rec-111111111111" in context  # G1: the tail cites record ids
     assert "Discipline reminders" in context
 
 
@@ -66,6 +71,7 @@ def test_provenance_manifest_from_ledger(tmp_path):
     manifest = build_run_manifest(str(ledger), [REPLAY, LIVE])
     assert manifest["kind"] == "recipe-lab-run"
     assert manifest["dataset_ref"]["content_hash"] == "sha256:aa"
+    assert manifest["evidence"]["ledger"]["record_ids"] == ["rec-111111111111", "rec-222222222222"]
     assert manifest["evidence"]["bench_refs"] == ["run-a", "run-b"]
     assert manifest["best_replay_candidate"]["ref"] == "c1.yaml"
     assert manifest["rounds"]["verdict_counts"] == {"PASS": 1, "RANKED": 1}

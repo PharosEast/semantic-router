@@ -73,10 +73,12 @@ BUILD=$("$RL/python" "$ASSETS/build_mmlu_cases.py" \
   --dataset-dir "$DATASET_DIR" \
   --output "$WORK/cases-mmlu.jsonl" --per-deep 12 --per-standard 12 --seed 42) || exit 1
 echo "$BUILD" | tee "$WORK/build.log"
-HASH=$(echo "$BUILD" | grep -o "sha256:[0-9a-f]*" | head -1)
-sed "s/sha256:0000000000000000000000000000000000000000000000000000000000000000/$HASH/" \
-  "$ASSETS/smoke-spec.yaml" > "$WORK/spec.yaml"
-echo "SPEC-HASH=$HASH"
+# render the experiment spec: the workload identity is the cases file hashed
+# at runtime (A4) - the template ships with placeholders
+CASES_HASH=$("$RL/recipe-lab" hash --file "$WORK/cases-mmlu.jsonl" | "$RL/python" -c "import json,sys; print(json.load(sys.stdin)['content_hash'])")
+sed -e "s|\${CASES_FILE}|$WORK/cases-mmlu.jsonl|g" -e "s|\${CASES_HASH}|$CASES_HASH|g" \
+  "$ASSETS/smoke-spec.yaml.tmpl" > "$WORK/spec.yaml"
+echo "SPEC-HASH=$CASES_HASH"
 
 # ---------------- Stage 1: collect + attribute (Sub-1) ----------------
 start_mock "$WORK/cases-mmlu.jsonl" "replay"
