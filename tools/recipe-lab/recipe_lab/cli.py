@@ -36,6 +36,7 @@ from .proposers import threshold_search
 from .runner import (
     RunnerEnv,
     RunnerError,
+    RunnerTimeout,
     attribution_delta,
     evaluate_candidate,
     replay_metric_value,
@@ -235,6 +236,11 @@ def _resolve_candidates(value: str) -> list[Path]:
 
 def cmd_run(args: argparse.Namespace) -> int:
     spec = _load_spec(args.spec)
+    # A5 budget gate: rounds beyond the contract are refused up front.
+    if args.round > spec.budget.rounds:
+        raise ContractError(
+            f"budget exhausted: round {args.round} > budget.rounds {spec.budget.rounds}"
+        )
     # A4 contract gates: re-hash the frozen dataset, then the --cases input
     # must be byte-identical to it (cross-round comparability).
     spec.verify_workload()
@@ -269,23 +275,36 @@ def cmd_run(args: argparse.Namespace) -> int:
         ),
     )
 
+    # A5: the per-trial budget is the contract's max_minutes_per_trial; it
+    # bounds readiness wait + request loop + replay fetch for every trial.
+    trial_timeout_s = spec.budget.max_minutes_per_trial * 60
+
     baseline_summary: dict | None = None
     if args.baseline_config:
         print(
             f"[run] evaluating baseline config: {args.baseline_config}", file=sys.stderr
         )
-        result = evaluate_candidate(
-            candidate_config=args.baseline_config,
-            cases=cases,
-            oracle_policy=spec.oracle_policy,
-            bank=bank,
-            env=env,
-            router_model=args.router_model,
-            family=args.family,
-        )
+        try:
+            result = evaluate_candidate(
+                candidate_config=args.baseline_config,
+                cases=cases,
+                oracle_policy=spec.oracle_policy,
+                bank=bank,
+                env=env,
+                router_model=args.router_model,
+                family=args.family,
+                trial_timeout_s=trial_timeout_s,
+            )
+        except RunnerTimeout as exc:
+            raise SystemExit(
+                f"baseline evaluation exceeded the trial budget: {exc}"
+            ) from exc
+        except (RunnerError, ContractError, OSError) as exc:
+            raise SystemExit(f"baseline evaluation failed: {exc}") from exc
         baseline_summary = result["summary"]
 
     appended = []
+    timeouts = []
     for index, candidate_path in enumerate(candidates, 1):
         print(
             f"[run] candidate {index}/{len(candidates)}: {candidate_path}",
@@ -300,7 +319,41 @@ def cmd_run(args: argparse.Namespace) -> int:
                 env=env,
                 router_model=args.router_model,
                 family=args.family,
+                trial_timeout_s=trial_timeout_s,
             )
+        except RunnerTimeout as exc:
+            # A5: a hung stack is never a worse recipe - record status=timeout
+            # with no metrics; top_replay excludes it from the ranking.
+            timeouts.append(str(candidate_path))
+            record = LedgerRecord(
+                round=args.round,
+                ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                candidate={
+                    "kind": "config",
+                    "ref": str(candidate_path),
+                    "change_summary": f"candidate {index}/{len(candidates)}",
+                    "provenance": {"proposer": args.proposer, "insight_refs": []},
+                },
+                tier="replay",
+                baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
+                metrics={},
+                verdict="RANKED",
+                dataset_hash=spec.workload.content_hash,
+                reasons=[f"trial timeout: {exc}"],
+                gates=None,
+                bench_refs=[],
+                attribution_delta=None,
+                attribution_ref=args.attribution_ref,
+                coverage_warning=True,
+                notes="",
+                status="timeout",
+            )
+            ledger.append(record)
+            print(
+                f"[run] {candidate_path.name}: TRIAL TIMEOUT -> ledger (status=timeout)",
+                file=sys.stderr,
+            )
+            continue
         except (RunnerError, ContractError, OSError) as exc:
             raise SystemExit(
                 f"candidate evaluation failed for {candidate_path}: {exc}"
@@ -347,7 +400,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     best = ledger.top_replay(spec.objective.replay_metric)
-    _print_json({"evaluated": len(appended), "best": best})
+    _print_json({"evaluated": len(appended), "timed_out": timeouts, "best": best})
     return 0
 
 

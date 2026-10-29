@@ -30,6 +30,5 @@ stack:
   mode: external
   endpoint: http://127.0.0.1:8899
   baseline_ref: config-revision@main
-evaluation:
-  search_tier: replay
-  final_tier: live
+# A5: no `evaluation` section - replay and live are separate commands with
+# CLI-fixed tiers.

@@ -43,6 +43,10 @@ class LedgerRecord:
     attribution_ref: str | None = None
     coverage_warning: bool = False
     notes: str = ""
+    # A5: present only when the trial produced no usable metric (e.g.
+    # "timeout" when the stack exceeded budget.max_minutes_per_trial).
+    # best_replay / top_replay exclude records carrying a status.
+    status: str | None = None
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {
@@ -68,6 +72,8 @@ class LedgerRecord:
             out["coverage_warning"] = True
         if self.notes:
             out["notes"] = self.notes
+        if self.status:
+            out["status"] = self.status
         return out
 
     @classmethod
@@ -89,6 +95,7 @@ class LedgerRecord:
             attribution_ref=raw.get("attribution_ref"),
             coverage_warning=bool(raw.get("coverage_warning", False)),
             notes=str(raw.get("notes", "")),
+            status=raw.get("status"),
         )
 
 
@@ -134,6 +141,10 @@ def validate_record(raw: dict) -> None:
             raise ContractError(f"{optional_list} must be a list")
     if "attribution_ref" in raw and raw["attribution_ref"] is not None:
         _require_nonempty_str(raw["attribution_ref"], "attribution_ref")
+    if "status" in raw and raw["status"] is not None:
+        _require_nonempty_str(raw["status"], "status")
+        if raw["status"] != "timeout":
+            raise ContractError(f"status must be 'timeout', got {raw['status']!r}")
 
 
 def _require_present(raw: dict, name: str) -> None:
@@ -210,6 +221,8 @@ class Ledger:
         best_value: float | None = None
         for raw in self.filter(tier="replay", verdict="RANKED"):
             if raw.get("coverage_warning"):
+                continue
+            if raw.get("status"):  # A5: a trial that produced no metric never ranks
                 continue
             value = raw.get("metrics", {}).get(metric_key)
             if not isinstance(value, (int, float)) or isinstance(value, bool):

@@ -37,7 +37,6 @@ VALID_SPEC: dict = {
         "endpoint": "http://127.0.0.1:8899",
         "baseline_ref": "config-revision@main",
     },
-    "evaluation": {"search_tier": "replay", "final_tier": "live"},
 }
 
 

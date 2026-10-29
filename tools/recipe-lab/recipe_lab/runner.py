@@ -40,6 +40,12 @@ class RunnerError(RuntimeError):
     """Raised when a candidate evaluation could not complete."""
 
 
+class RunnerTimeout(RunnerError):
+    """The whole trial (readiness + requests + replay fetch) exceeded the
+    budget's per-trial deadline. Recorded as a `status: timeout` ledger row
+    instead of a metric so a hung stack can never rank as a worse recipe."""
+
+
 @dataclass
 class RunnerEnv:
     """Process-level environment for one candidate evaluation."""
@@ -126,12 +132,27 @@ def evaluate_candidate(
     router_model: str = "vllm-sr/auto",
     family: str = "d3",
     request_timeout: float = 180.0,
+    trial_timeout_s: float | None = None,
 ) -> dict[str, Any]:
-    """Evaluate one candidate config; returns rows + summary + request log."""
+    """Evaluate one candidate config; returns rows + summary + request log.
+
+    trial_timeout_s (A5, budget.max_minutes_per_trial * 60) bounds the whole
+    trial: readiness wait + request loop + replay fetch. Exceeding it raises
+    RunnerTimeout; processes are always cleaned up in `finally`.
+    """
     env.work_dir.mkdir(parents=True, exist_ok=True)
     management_url = f"http://127.0.0.1:{env.management_port}"
     router_url = f"http://127.0.0.1:{env.router_port}"
     backend_url = f"http://127.0.0.1:{env.backend_port}"
+    deadline = time.monotonic() + trial_timeout_s if trial_timeout_s is not None else None
+
+    def remaining_s() -> float | None:
+        return None if deadline is None else deadline - time.monotonic()
+
+    def check_deadline(stage: str) -> None:
+        left = remaining_s()
+        if left is not None and left <= 0:
+            raise RunnerTimeout(f"trial exceeded {trial_timeout_s:.0f}s budget before {stage}")
 
     procs: list[subprocess.Popen] = []
     try:
@@ -171,14 +192,30 @@ def evaluate_candidate(
             start_new_session=True,  # the spawned model runtime dies with the group
         )
         procs.append(router)
-        _wait_model_runtime_ready(management_url, env.ready_timeout_s, router, status_file=status_file)
+        # readiness wait is bounded by the per-trial deadline too; a plain
+        # not-ready error still applies when the deadline is not the cause
+        ready_budget = env.ready_timeout_s
+        left = remaining_s()
+        if left is not None:
+            if left <= 0:
+                raise RunnerTimeout(f"trial exceeded {trial_timeout_s:.0f}s budget before model-runtime readiness")
+            ready_budget = min(env.ready_timeout_s, int(left) + 1)
+        try:
+            _wait_model_runtime_ready(management_url, ready_budget, router, status_file=status_file)
+        except RunnerError as exc:
+            left = remaining_s()
+            if "not ready within" in str(exc) and left is not None and left <= 0:
+                raise RunnerTimeout(f"trial exceeded {trial_timeout_s:.0f}s budget waiting for model-runtime readiness") from exc
+            raise
 
         statuses: dict[str, int] = {}
         for case in cases:
+            check_deadline(f"case {case['case_id']}")
             statuses[case["case_id"]] = _send_prompt(
                 router_url, router_model, case["prompt"], request_timeout
             )
 
+        check_deadline("replay fetch")
         records = fetch_replays(management_url)
         join_cases = [
             type("CaseJoin", (), {"case_id": c["case_id"], "prompt": c["prompt"], "truth": c["truth"]})
