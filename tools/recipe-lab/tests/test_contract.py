@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 
 import pytest
 import yaml
@@ -11,10 +12,11 @@ from recipe_lab.contract import (
     ContractError,
     ExperimentSpec,
     OraclePolicy,
+    check_runnable_split,
     dataset_content_hash,
 )
 
-from tests.fixtures import POLICY, VALID_SPEC
+from tests.fixtures import POLICY, VALID_SPEC, VALID_SPLITS_SPEC
 
 
 def test_valid_spec_roundtrip():
@@ -84,7 +86,98 @@ def test_evaluation_section_is_retired():
     raw["evaluation"] = {"search_tier": "replay", "final_tier": "live"}
     with pytest.raises(ContractError, match="'evaluation' is retired"):
         ExperimentSpec.from_dict(raw)
-    assert "evaluation" not in ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC)).to_dict()
+    assert (
+        "evaluation"
+        not in ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC)).to_dict()
+    )
+
+
+# ---- B: three-way dataset splits ----
+
+
+def test_legacy_workload_roundtrips_and_is_dev_only():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC))
+    assert spec.workload.legacy
+    assert spec.workload.split_hash("dev") == VALID_SPEC["workload"]["content_hash"]
+    assert spec.workload.to_dict() == VALID_SPEC["workload"]
+
+
+def test_splits_workload_roundtrip():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPLITS_SPEC))
+    assert not spec.workload.legacy
+    assert spec.workload.split_rule == "group by source_id; seed 42; 40/30/30"
+    assert sorted(spec.workload.splits) == ["calib", "dev", "frozen_test"]
+    assert spec.workload.split_hash("frozen_test").startswith("sha256:3")
+    out = spec.to_dict()["workload"]
+    assert set(out["splits"]) == {"calib", "dev", "frozen_test"}
+    assert "manifest" not in out  # legacy keys gone
+
+
+def test_splits_require_split_rule():
+    raw = copy.deepcopy(VALID_SPLITS_SPEC)
+    del raw["workload"]["split_rule"]
+    with pytest.raises(ContractError, match="split_rule"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_splits_require_all_three():
+    raw = copy.deepcopy(VALID_SPLITS_SPEC)
+    del raw["workload"]["splits"]["frozen_test"]
+    with pytest.raises(
+        ContractError, match="exactly \\['calib', 'dev', 'frozen_test'\\]"
+    ):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_check_runnable_split_quarantines_frozen_test():
+    with pytest.raises(ContractError, match="frozen_test is quarantined"):
+        check_runnable_split("frozen_test")
+    check_runnable_split("dev")
+    check_runnable_split("calib")
+
+
+def _write_splits_dataset(tmp_path, overlap_with_dev=False):
+    """Three disjoint slice files; optionally leak a dev case into calib."""
+    rows = {
+        "calib": [{"case_id": "c1", "prompt": "p1"}, {"case_id": "c2", "prompt": "p2"}],
+        "dev": [{"case_id": "c3", "prompt": "p3"}],
+        "frozen_test": [{"case_id": "c4", "prompt": "p4"}],
+    }
+    if overlap_with_dev:
+        rows["calib"].append({"case_id": "c3", "prompt": "p3"})
+    spec = copy.deepcopy(VALID_SPLITS_SPEC)
+    for name, case_rows in rows.items():
+        target = tmp_path / f"{name}.jsonl"
+        target.write_text(
+            "".join(json.dumps(r) + "\n" for r in case_rows), encoding="utf-8"
+        )
+        spec["workload"]["splits"][name]["manifest"] = f"{name}.jsonl"
+        spec["workload"]["splits"][name]["content_hash"] = dataset_content_hash(target)
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return spec_path
+
+
+def test_verify_workload_checks_all_splits_and_disjointness(tmp_path):
+    spec_path = _write_splits_dataset(tmp_path)
+    spec = ExperimentSpec.from_yaml(spec_path)
+    assert spec.verify_workload()["dev"] == spec.workload.split_hash("dev")  # type: ignore[index]
+
+
+def test_verify_workload_rejects_overlapping_splits(tmp_path):
+    spec_path = _write_splits_dataset(tmp_path, overlap_with_dev=True)
+    spec = ExperimentSpec.from_yaml(spec_path)
+    with pytest.raises(ContractError, match="overlap between 'calib' and 'dev'"):
+        spec.verify_workload()
+
+
+def test_verify_workload_split_selects_one_slice(tmp_path):
+    spec_path = _write_splits_dataset(tmp_path)
+    spec = ExperimentSpec.from_yaml(spec_path)
+    assert spec.verify_workload(split="dev") == spec.workload.split_hash("dev")
+    # unknown split names are refused
+    with pytest.raises(ContractError, match="unknown workload split"):
+        spec.verify_workload(split="train")
 
 
 def test_empty_oracle_policy_rejected():
@@ -157,14 +250,15 @@ def test_dataset_content_hash_is_sha256_of_raw_bytes(tmp_path):
 def test_verify_workload_passes_on_exact_bytes(tmp_path):
     spec_path, _ = _write_frozen_spec(tmp_path)
     spec = ExperimentSpec.from_yaml(spec_path)
-    assert spec.verify_workload() == spec.workload.content_hash
+    assert spec.verify_workload() == {"dev": spec.workload.split_hash("dev")}
+    assert spec.verify_workload(split="dev") == spec.workload.split_hash("dev")
 
 
 def test_verify_workload_rejects_one_byte_change(tmp_path):
     spec_path, dataset = _write_frozen_spec(tmp_path)
     dataset.write_bytes(dataset.read_bytes() + b'{"case_id":"c3"}\n')  # dataset drifted
     spec = ExperimentSpec.from_yaml(spec_path)
-    with pytest.raises(ContractError, match=r"dataset hash mismatch: spec=.* file="):
+    with pytest.raises(ContractError, match=r"dataset hash mismatch.*spec=.*file="):
         spec.verify_workload()
 
 

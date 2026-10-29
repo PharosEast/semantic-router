@@ -146,3 +146,14 @@ def test_timeout_status_is_the_only_allowed_one(tmp_path):
     ledger = Ledger(tmp_path / "ledger.jsonl")
     with pytest.raises(ContractError, match="status must be 'timeout'"):
         ledger.append(base_record(status="crashed"))
+
+
+# ---- B: split field on ledger records ----
+
+
+def test_record_split_field_roundtrip_and_validation(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    stored = ledger.append(base_record(split="dev"))
+    assert stored["split"] == "dev"
+    with pytest.raises(ContractError, match="split must be one of"):
+        ledger.append(base_record(split="train"))

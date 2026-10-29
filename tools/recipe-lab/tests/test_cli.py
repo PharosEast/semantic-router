@@ -149,3 +149,60 @@ def test_run_round_beyond_budget_exits_2(tmp_path, capsys):
     )
     assert rc == 2
     assert "budget exhausted" in capsys.readouterr().err
+
+
+# ---- B: --split handling + the split command ----
+
+
+def test_attribute_rejects_frozen_test_split(tmp_path, capsys):
+    spec_path, cases = _write_frozen_spec(tmp_path)
+    records = tmp_path / "records.jsonl"
+    records.write_text("", encoding="utf-8")
+    assert main(["attribute", "--spec", spec_path, "--records", str(records), "--split", "frozen_test"]) == 2
+    assert "frozen_test is quarantined" in capsys.readouterr().err
+
+
+def test_attribute_rejects_calib_on_legacy_workload(tmp_path, capsys):
+    spec_path, _ = _write_frozen_spec(tmp_path)  # legacy single-dataset form
+    records = tmp_path / "records.jsonl"
+    records.write_text("", encoding="utf-8")
+    assert main(["attribute", "--spec", spec_path, "--records", str(records), "--split", "calib"]) == 2
+    assert "unknown workload split 'calib'" in capsys.readouterr().err
+
+
+def test_attribute_dev_split_prints_legacy_warning(tmp_path, capsys):
+    spec_path, cases = _write_frozen_spec(tmp_path)
+    records = tmp_path / "records.jsonl"
+    records.write_text(
+        json.dumps(
+            {"case_id": "c1", "truth": "math", "matched_decision": "math", "routed": "local/model-math", "answer_ok": True}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    out_dir = tmp_path / "out"
+    assert main(["attribute", "--spec", spec_path, "--records", str(records), "--cases", str(cases), "--output-dir", str(out_dir)]) == 0
+    assert "legacy single-dataset form" in capsys.readouterr().err
+
+
+def test_split_command_outputs_spec_ready_block(tmp_path, capsys):
+    cases = tmp_path / "cases.jsonl"
+    rows = []
+    for i in range(24):
+        rows.append(json.dumps({"case_id": f"c{i}", "prompt": f"prompt {i}", "truth": "math", "source_id": f"src{i % 6}"}))
+    cases.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    out_dir = tmp_path / "slices"
+    assert main(["split", "--cases", str(cases), "--output-dir", str(out_dir)]) == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["split_rule"] == "group by source_id; seed 42; 40/30/30"
+    assert sorted(parsed["splits"]) == ["calib", "dev", "frozen_test"]
+    for name, spec_block in parsed["splits"].items():
+        assert spec_block["manifest"] == f"{name}.jsonl"
+        assert spec_block["content_hash"].startswith("sha256:")
+        assert (out_dir / f"{name}.jsonl").is_file()
+    # totals match: no case lost or duplicated
+    total = sum(
+        sum(1 for _ in (out_dir / f"{name}.jsonl").open(encoding="utf-8") if _.strip())
+        for name in parsed["splits"]
+    )
+    assert total == 24
