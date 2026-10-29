@@ -34,6 +34,16 @@ for `live-verdict`.
   (the summarize() result, read by `next`, G3) and `report.md`.
   The split manifest is re-hashed (A4); optional `--cases` verifies the
   attribution input against the split identity. `frozen_test` is refused.
+- `recipe-lab attribute-session --records R --output-dir D`
+  Session-aware agentic attribution (P2): aggregates replay rows that carry
+  session evidence (conversation_id / turn_index) into conversations and
+  layers three evidence classes on top of single-turn E1/E2/E3 (never
+  redefining them): `lane_flap` (adjacent requests of one conversation chose
+  different models), `selection_failed` (recorded failed selections) and
+  `tool_loop_interrupted` (a rejected selection whose turn resumed
+  afterwards; needs the rejection-recording router fix). Writes
+  `session-report.md` and `session-events.json`; deterministic - same rows,
+  same report bytes.
 - `recipe-lab collect-replays --url http://127.0.0.1:8080 --cases C
   --output R --family d3`
   Pulls router_replay records from the management API and joins them with
