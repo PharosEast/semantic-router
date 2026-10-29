@@ -53,7 +53,10 @@ from .contract import (
 from .insights import merge_insight_refs, parse_insight_refs, resolve_insight_refs
 from .ledger import Ledger, LedgerRecord
 from .live import live_verdict_from_runs, measurements_from_rows
+from .next import write_next_context
 from .proposers import rule_threshold, threshold_search
+from .provenance import write_run_manifest
+from .report import render_promotion_draft, write_run_report
 from .runner import (
     RunnerEnv,
     RunnerError,
@@ -768,6 +771,37 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_report(args: argparse.Namespace) -> int:
+    report = write_run_report(args.ledger, args.output)
+    _print_json({"report": args.output, "bytes": len(report)})
+    return 0
+
+
+def cmd_next(args: argparse.Namespace) -> int:
+    context = write_next_context(args.ledger, args.output, tail=args.tail)
+    _print_json({"context": args.output, "bytes": len(context)})
+    return 0
+
+
+def cmd_provenance(args: argparse.Namespace) -> int:
+    manifest = write_run_manifest(args.ledger, args.output)
+    _print_json({"manifest": args.output, "kind": manifest["kind"], "rounds": manifest["rounds"]["count"]})
+    return 0
+
+
+def cmd_record_draft(args: argparse.Namespace) -> int:
+    ledger = Ledger(args.ledger)
+    records = ledger.filter(tier="live", verdict="PASS")
+    if not records:
+        raise SystemExit("no PASS live record in the ledger; nothing to draft")
+    record = records[-1]
+    draft = render_promotion_draft(record)
+    Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+    Path(args.output).write_text(draft, encoding="utf-8")
+    _print_json({"draft": args.output, "candidate": (record.get("candidate") or {}).get("ref")})
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="recipe-lab",
@@ -1214,6 +1248,30 @@ def build_parser() -> argparse.ArgumentParser:
         help="experiment spec YAML; rank by its objective.replay_metric (A1)",
     )
     p_top.set_defaults(func=cmd_ledger)
+
+    p_report = sub.add_parser("report", help="run report replayed from the ledger only")
+    p_report.add_argument("--ledger", required=True, help="ledger JSONL")
+    p_report.add_argument("--output", required=True, help="output Markdown path")
+    p_report.set_defaults(func=cmd_report)
+
+    p_next = sub.add_parser("next", help="agent context export (untrusted reference material header included)")
+    p_next.add_argument("--ledger", required=True, help="ledger JSONL")
+    p_next.add_argument("--output", required=True, help="output Markdown path")
+    p_next.add_argument("--tail", type=int, default=10, help="how many recent records to include")
+    p_next.set_defaults(func=cmd_next)
+
+    p_prov = sub.add_parser("provenance", help="emit the recipe-lab-run-v1 manifest for a ledger")
+    p_prov.add_argument("--ledger", required=True, help="ledger JSONL")
+    p_prov.add_argument("--output", required=True, help="output manifest JSON path")
+    p_prov.set_defaults(func=cmd_provenance)
+
+    p_draft = sub.add_parser(
+        "record-draft",
+        help="draft a docs/records promotion entry from the latest PASS live record",
+    )
+    p_draft.add_argument("--ledger", required=True, help="ledger JSONL")
+    p_draft.add_argument("--output", required=True, help="output Markdown draft path")
+    p_draft.set_defaults(func=cmd_record_draft)
 
     return parser
 
