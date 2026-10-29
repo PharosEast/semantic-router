@@ -37,6 +37,7 @@ from .contract import (
     check_runnable_split,
     dataset_content_hash,
 )
+from .insights import merge_insight_refs, parse_insight_refs, resolve_insight_refs
 from .ledger import Ledger, LedgerRecord
 from .proposers import rule_threshold, threshold_search
 from .runner import (
@@ -455,6 +456,8 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     output_dir = Path(args.output_dir)
     ledger = Ledger(args.ledger)
+    # G2: fail fast on unverifiable insight references (ContractError -> exit 2).
+    insight_refs = resolve_insight_refs(parse_insight_refs(args.insight_refs), ledger)
     env = RunnerEnv(
         router_bin=args.router_bin,
         mock_backend_script=args.mock_backend,
@@ -506,6 +509,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             file=sys.stderr,
         )
         entry = _candidate_entry(candidate_path, args.proposer, index, len(candidates))
+        # G2: carry the validated insight references on the record provenance.
+        merge_insight_refs(entry["provenance"], insight_refs)
         try:
             result = evaluate_candidate(
                 candidate_config=candidate_path,
@@ -606,6 +611,13 @@ def cmd_ledger(args: argparse.Namespace) -> int:
             raw = json.loads(Path(args.record).read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
             raise SystemExit(f"cannot read record file: {exc}") from exc
+        # G2: merge --insight-refs into the record's candidate provenance;
+        # unresolvable refs raise ContractError -> main() exits 2.
+        if args.insight_refs:
+            refs = resolve_insight_refs(parse_insight_refs(args.insight_refs), ledger)
+            merge_insight_refs(
+                raw.setdefault("candidate", {}).setdefault("provenance", {}), refs
+            )
         try:
             stored = ledger.append(LedgerRecord.from_dict(raw))
         except ContractError as exc:
@@ -949,6 +961,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="attribution artifact this round is based on (path@hash) from recipe-lab attribute; recorded in the ledger",
     )
     p_run.add_argument(
+        "--insight-refs",
+        default=None,
+        help="comma-separated provenance refs: rec-<id>, bench:<run_id>, attr:<path>@sha256:<hex>, diag:<path>@sha256:<hex>#<anchor> (G2)",
+    )
+    p_run.add_argument(
         "--ledger", required=True, help="ledger JSONL to append RANKED records to"
     )
     p_run.add_argument(
@@ -1023,6 +1040,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_append.add_argument("--file", required=True, help="path to the ledger JSONL")
     p_append.add_argument(
         "--record", required=True, help="path to a JSON file containing one record"
+    )
+    p_append.add_argument(
+        "--insight-refs",
+        default=None,
+        help="comma-separated provenance refs merged into the record: rec-<id>, bench:<run_id>, attr:<path>@sha256:<hex>, diag:<path>@sha256:<hex>#<anchor> (G2)",
     )
     p_append.set_defaults(func=cmd_ledger)
 
