@@ -14,9 +14,10 @@ from recipe_lab.contract import (
     OraclePolicy,
     check_runnable_split,
     dataset_content_hash,
+    matches_condition,
 )
 
-from tests.fixtures import POLICY, VALID_SPEC, VALID_SPLITS_SPEC
+from tests.fixtures import POLICY, RULES_POLICY, VALID_SPEC, VALID_SPLITS_SPEC
 
 
 def test_valid_spec_roundtrip():
@@ -337,3 +338,118 @@ def test_require_dataset_file_rejects_drifted_cases(tmp_path):
         spec.require_dataset_file(tmp_path / "missing.jsonl", "cases")
     # the exact dataset bytes pass
     assert spec.require_dataset_file(dataset, "cases").startswith("sha256:")
+
+
+# --- F2: multi-signal oracle policy -----------------------------------------
+
+
+def test_rules_policy_roundtrip():
+    raw = RULES_POLICY.to_dict()
+    assert raw["default"] == {"decision": "simple_general", "models": ["m/general"]}
+    assert OraclePolicy.from_dict(raw).to_dict() == raw
+
+
+def test_rules_policy_first_match_wins():
+    complex_route = RULES_POLICY.evaluate({"domain": "code", "difficulty": 4})
+    assert complex_route.decision == "domain_code_complex"
+    assert complex_route.models == ("m/pro", "m/max")
+    # first rule no longer matches (difficulty below 3): second rule wins
+    assert (
+        RULES_POLICY.evaluate({"domain": "code", "difficulty": 1}).decision
+        == "domain_code"
+    )
+    # no rule matches: default
+    assert RULES_POLICY.evaluate({"domain": "math"}).decision == "simple_general"
+    # a missing fact never satisfies a condition
+    assert RULES_POLICY.evaluate({}).decision == "simple_general"
+
+
+def test_rules_policy_without_default_is_gap():
+    policy = OraclePolicy.from_dict(
+        {"rules": [{"when": {"domain": "code"}, "expect": {"decision": "domain_code"}}]}
+    )
+    assert policy.evaluate({"domain": "math"}) is None
+    # string truths cannot be resolved by a rules-form policy at all
+    assert policy.covers(["math"]) == ["math"]
+    assert policy.expected("domain_code") is None
+
+
+def test_rules_policy_rejects_mixed_forms():
+    with pytest.raises(ContractError, match="not both"):
+        OraclePolicy.from_dict(
+            {
+                "math": "local/model-math",
+                "rules": [
+                    {"when": {"domain": "code"}, "expect": {"decision": "domain_code"}}
+                ],
+            }
+        )
+
+
+def test_rules_policy_rejects_bad_condition():
+    with pytest.raises(ContractError, match="predicate"):
+        OraclePolicy.from_dict(
+            {
+                "rules": [
+                    {
+                        "when": {"difficulty": {"gte": "high"}},
+                        "expect": {"decision": "d"},
+                    }
+                ]
+            }
+        )
+    with pytest.raises(ContractError, match="predicate op"):
+        OraclePolicy.from_dict(
+            {
+                "rules": [
+                    {"when": {"difficulty": {"within": 3}}, "expect": {"decision": "d"}}
+                ]
+            }
+        )
+    with pytest.raises(ContractError, match="when"):
+        OraclePolicy.from_dict({"rules": [{"when": {}, "expect": {"decision": "d"}}]})
+
+
+def test_rules_policy_rejects_bad_models():
+    with pytest.raises(ContractError, match="models"):
+        OraclePolicy.from_dict(
+            {
+                "rules": [
+                    {
+                        "when": {"domain": "code"},
+                        "expect": {"decision": "d", "models": "m/code"},
+                    }
+                ]
+            }
+        )
+
+
+def test_rules_policy_rejects_missing_expect_decision():
+    with pytest.raises(ContractError, match="decision"):
+        OraclePolicy.from_dict({"default": {"models": ["m"]}})
+
+
+def test_matches_condition_semantics():
+    assert matches_condition("code", "code")
+    assert not matches_condition("math", "code")
+    assert not matches_condition(None, "code")
+    assert matches_condition(3, 3)
+    assert not matches_condition(3, 4)
+    assert matches_condition(3.0, {"gte": 3})
+    assert not matches_condition(2.9, {"gte": 3})
+    assert matches_condition(1.0, {"gte": 0.5, "lt": 2})
+    assert not matches_condition(2.0, {"gt": 2})
+    assert not matches_condition(2.0, {"lt": 2, "gte": 3})
+    assert not matches_condition("code", {"gte": 1})
+    assert not matches_condition(3, "code")
+
+
+def test_spec_with_rules_policy_roundtrip():
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["attribution"]["oracle_policy"] = RULES_POLICY.to_dict()
+    spec = ExperimentSpec.from_dict(raw)
+    assert (
+        spec.oracle_policy.evaluate({"domain": "code", "difficulty": 4}).decision
+        == "domain_code_complex"
+    )
+    assert ExperimentSpec.from_dict(spec.to_dict()).to_dict() == spec.to_dict()

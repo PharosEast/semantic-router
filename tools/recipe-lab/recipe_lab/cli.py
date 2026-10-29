@@ -169,7 +169,9 @@ def cmd_attribute(args: argparse.Namespace) -> int:
     except (ContractError, OSError) as exc:
         _fail(f"cannot load attribution records: {exc}")
 
-    labels = sorted({c.truth for c in cases})
+    # coverage pre-check only applies to string (label) truths; signal-fact
+    # truths are resolved per case (uncovered ones become policy_gap rows)
+    labels = sorted({c.truth for c in cases if isinstance(c.truth, str)})
     gaps = spec.validate_policy_covers(labels)
     if gaps:
         print(
