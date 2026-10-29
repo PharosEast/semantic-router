@@ -4,8 +4,11 @@ objective:
   direction: maximize
   min_improvement_pct: 1.0
 workload:
-  manifest: datasets/smoke-decision-routing.yaml
-  content_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
+  # Rendered by the smoke scripts: manifest is the labeled cases JSONL
+  # (absolute, since the rendered spec lives in the run dir) and content_hash
+  # is `recipe-lab hash --file` of exactly that file (A4 contract check).
+  manifest: ${CASES_FILE}
+  content_hash: ${CASES_HASH}
   profile: smoke
 attribution:
   oracle_policy:

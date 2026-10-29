@@ -26,6 +26,12 @@ SMOKE_DIR="$WORK_ROOT/replay-smoke-$(date +%m%d%H%M%S)"
 mkdir -p "$SMOKE_DIR"
 echo "SMOKE_DIR=$SMOKE_DIR"
 
+# 0. render the spec template: the frozen dataset identity is the real cases
+#    file hash (A4); attribute/run verify it before touching the data
+CASES_HASH=$("$RL/recipe-lab" hash --file "$ASSETS/cases.jsonl" | "$PYBIN" -c "import json,sys; print(json.load(sys.stdin)['content_hash'])")
+sed -e "s|\${CASES_FILE}|$ASSETS/cases.jsonl|g" -e "s|\${CASES_HASH}|$CASES_HASH|g" \
+  "$ASSETS/smoke-spec.yaml.tmpl" > "$SMOKE_DIR/spec.yaml"
+
 cleanup() {
   for pid in ${ROUTER_PID:-} ${MOCK_PID:-}; do kill "$pid" 2>/dev/null; done
 }
@@ -77,9 +83,10 @@ echo "REPLAYS-BYTES=$(wc -c < "$SMOKE_DIR/replays.json")"
 "$RL/recipe-lab" bank apply --bank "$SMOKE_DIR/answer-bank.jsonl" \
   --records "$SMOKE_DIR/records.jsonl" --output "$SMOKE_DIR/records-graded.jsonl" 2>&1 | tee "$SMOKE_DIR/bank-apply.log"
 
-# 8. attribution over graded records
-"$RL/recipe-lab" attribute --spec "$ASSETS/smoke-spec.yaml" \
-  --records "$SMOKE_DIR/records-graded.jsonl" --output-dir "$SMOKE_DIR" 2>&1 | tee "$SMOKE_DIR/attribute.log"
+# 8. attribution over graded records (--cases: A4 hash check against the spec)
+"$RL/recipe-lab" attribute --spec "$SMOKE_DIR/spec.yaml" \
+  --records "$SMOKE_DIR/records-graded.jsonl" --cases "$ASSETS/cases.jsonl" \
+  --output-dir "$SMOKE_DIR" 2>&1 | tee "$SMOKE_DIR/attribute.log"
 
 # 9. threshold proposer: candidate configs for the depth signal
 # (--deltas= form: argparse rejects values that start with a dash otherwise)
