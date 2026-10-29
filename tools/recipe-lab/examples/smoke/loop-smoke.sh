@@ -28,6 +28,12 @@ WORK="$WORK_ROOT/loop-smoke-$(date +%m%d%H%M%S)"
 mkdir -p "$WORK"
 echo "WORK=$WORK"
 
+# 0. render the spec template: the frozen dataset identity is the real cases
+#    file hash (A4); run verifies it before touching the data
+CASES_HASH=$("$RL/recipe-lab" hash --file "$ASSETS/cases.jsonl" | "$PYBIN" -c "import json,sys; print(json.load(sys.stdin)['content_hash'])")
+sed -e "s|\${CASES_FILE}|$ASSETS/cases.jsonl|g" -e "s|\${CASES_HASH}|$CASES_HASH|g" \
+  "$ASSETS/smoke-spec.yaml.tmpl" > "$WORK/spec.yaml"
+
 # 1. answer bank: mock backend up temporarily (direct queries, no router)
 "$PYBIN" "$ASSETS/mock_backend.py" --port 8000 > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
@@ -45,7 +51,7 @@ wait $MOCK_PID 2>/dev/null
 # 3. replay-tier run: baseline anchors the deltas, then each candidate gets its
 #    own router lifecycle; RANKED records land in the ledger
 "$RL/recipe-lab" run --tier replay \
-  --spec "$ASSETS/smoke-spec.yaml" \
+  --spec "$WORK/spec.yaml" \
   --cases "$ASSETS/cases.jsonl" \
   --bank "$WORK/answer-bank.jsonl" \
   --candidates "$WORK/candidates" \
