@@ -4,6 +4,10 @@ objective:
   direction: maximize
   min_improvement_pct: 1.0
 workload:
+  # A4 dataset identity: content_hash = "sha256:" + sha256(<manifest raw bytes>),
+  # manifest is the dataset JSONL path relative to this spec file.
+  # attribute / run verify the hash before touching the data (`recipe-lab hash
+  # --file <path>` prints it for a new dataset).
   manifest: datasets/dev-mmlu-pro.yaml
   content_hash: sha256:0000000000000000000000000000000000000000000000000000000000000000
   profile: quick

@@ -30,7 +30,7 @@ from .attribution import (
     write_jsonl,
 )
 from .bank import apply_bank, build_bank, load_bank, write_bank
-from .contract import ContractError, ExperimentSpec
+from .contract import ContractError, ExperimentSpec, dataset_content_hash
 from .ledger import Ledger, LedgerRecord
 from .proposers import threshold_search
 from .runner import (
@@ -61,8 +61,23 @@ def cmd_plan(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_hash(args: argparse.Namespace) -> int:
+    """Compute the frozen dataset identity of a JSONL file (A4)."""
+    try:
+        content_hash = dataset_content_hash(args.file)
+    except OSError as exc:
+        raise ContractError(f"cannot read dataset file: {exc}") from exc
+    _print_json({"file": str(args.file), "content_hash": content_hash})
+    return 0
+
+
 def cmd_attribute(args: argparse.Namespace) -> int:
     spec = _load_spec(args.spec)
+    # A4 contract gates: re-hash the frozen dataset, then any --cases input.
+    # ContractError propagates to main() -> exit 2.
+    spec.verify_workload()
+    if args.cases:
+        spec.require_dataset_file(args.cases, "cases")
     try:
         cases = load_records(args.records)
     except (ContractError, OSError) as exc:
@@ -183,6 +198,9 @@ def cmd_bank(args: argparse.Namespace) -> int:
 
 
 def cmd_propose(args: argparse.Namespace) -> int:
+    if args.spec:
+        # A4 contract gate: optional spec; verifies the frozen dataset hash.
+        _load_spec(args.spec).verify_workload()
     try:
         with Path(args.base_config).open("r", encoding="utf-8") as fh:
             base = yaml.safe_load(fh)
@@ -217,6 +235,10 @@ def _resolve_candidates(value: str) -> list[Path]:
 
 def cmd_run(args: argparse.Namespace) -> int:
     spec = _load_spec(args.spec)
+    # A4 contract gates: re-hash the frozen dataset, then the --cases input
+    # must be byte-identical to it (cross-round comparability).
+    spec.verify_workload()
+    spec.require_dataset_file(args.cases, "cases")
     try:
         bank = load_bank(args.bank)
         cases = [
@@ -393,6 +415,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_plan.set_defaults(func=cmd_plan)
 
+    p_hash = sub.add_parser(
+        "hash",
+        help="compute the frozen dataset identity: sha256 of the JSONL raw bytes (A4)",
+    )
+    p_hash.add_argument("--file", required=True, help="dataset JSONL file")
+    p_hash.set_defaults(func=cmd_hash)
+
     p_attr = sub.add_parser(
         "attribute", help="run E1/E2/E3 misroute attribution over labeled records"
     )
@@ -403,6 +432,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_attr.add_argument(
         "--records", required=True, help="path to the attribution records JSONL"
+    )
+    p_attr.add_argument(
+        "--cases",
+        default=None,
+        help="optional labeled case list JSONL; when given, its hash must match the spec workload (A4)",
     )
     p_attr.add_argument(
         "--output-dir",
@@ -491,6 +525,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="generate candidate configs by perturbing one decision-signal threshold",
     )
     p_prop.add_argument("--base-config", required=True, help="base recipe config YAML")
+    p_prop.add_argument(
+        "--spec",
+        default=None,
+        help="optional experiment spec; when given, the frozen workload hash is verified first (A4)",
+    )
     p_prop.add_argument(
         "--signal", required=True, help="decision signal name whose gte to perturb"
     )

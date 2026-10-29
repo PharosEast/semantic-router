@@ -13,10 +13,17 @@ Layout follows the recipe-lab design §5.3:
   budget:       rounds / max_minutes_per_trial
   stack:        mode / endpoint / baseline_ref
   evaluation:   search_tier / final_tier
+
+Dataset identity (A4): `content_hash = "sha256:" + sha256(<dataset JSONL raw
+bytes>)` and `manifest` is the path of that JSONL relative to the spec file.
+`ExperimentSpec.verify_workload()` re-hashes the manifest file and rejects a
+mismatch before any experiment command touches the data, so a drifted dataset
+can never silently join two rounds of results.
 """
 
 from __future__ import annotations
 
+import hashlib
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -58,6 +65,11 @@ def _require_number(value: Any, where: str) -> float:
         f"{where} must be a finite number",
     )
     return float(value)
+
+
+def dataset_content_hash(path: str | Path) -> str:
+    """The frozen dataset identity: 'sha256:' + sha256 of the file's raw bytes."""
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -282,6 +294,9 @@ class ExperimentSpec:
     evaluation: Evaluation = field(
         default_factory=lambda: Evaluation(search_tier="replay", final_tier="live")
     )
+    # directory of the YAML file this spec was loaded from (from_yaml only);
+    # workload.manifest resolves against it. Not part of the contract.
+    spec_dir: str | None = None
 
     @classmethod
     def from_dict(cls, raw: Any) -> ExperimentSpec:
@@ -332,7 +347,52 @@ class ExperimentSpec:
                 raise ContractError(
                     f"spec file is not valid YAML: {path} ({exc})"
                 ) from exc
-        return cls.from_dict(raw)
+        spec = cls.from_dict(raw)
+        return cls(**{**spec.__dict__, "spec_dir": str(path.parent)})
+
+    def verify_workload(self, base_dir: str | Path | None = None) -> str:
+        """Re-hash the workload manifest and compare with the declared hash.
+
+        Returns the verified content hash. `workload.manifest` resolves against
+        `base_dir`, defaulting to the spec file's directory (from_yaml). This
+        is the A4 contract check: attribute / run / propose-* call it before
+        touching any data, so a drifted dataset can never silently join two
+        rounds of results.
+        """
+        base = (
+            Path(base_dir)
+            if base_dir is not None
+            else (Path(self.spec_dir) if self.spec_dir else None)
+        )
+        if base is None:
+            raise ContractError(
+                "cannot locate the workload manifest: the spec was not loaded from a file; pass base_dir"
+            )
+        manifest = base / self.workload.manifest
+        if not manifest.is_file():
+            raise ContractError(
+                f"dataset manifest not found: {manifest} (workload.manifest is relative to the spec file)"
+            )
+        actual = dataset_content_hash(manifest)
+        if actual != self.workload.content_hash:
+            raise ContractError(
+                f"dataset hash mismatch: spec={self.workload.content_hash} file={actual}"
+            )
+        return actual
+
+    def require_dataset_file(self, path: str | Path, what: str) -> str:
+        """Assert a CLI-provided data file (--cases) is byte-identical to the
+        frozen workload. Raises ContractError (exit 2 via main) on drift or a
+        missing file."""
+        try:
+            actual = dataset_content_hash(path)
+        except OSError as exc:
+            raise ContractError(f"cannot read {what}: {exc}") from exc
+        if actual != self.workload.content_hash:
+            raise ContractError(
+                f"{what} hash mismatch: spec={self.workload.content_hash} file={actual}"
+            )
+        return actual
 
     def validate_policy_covers(self, labels: list[str]) -> list[str]:
         """Return oracle-policy coverage gaps for a dataset's label set."""
