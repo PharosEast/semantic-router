@@ -15,6 +15,7 @@ The ledger is append-only: there is no update or delete API by design.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from dataclasses import dataclass, field
@@ -166,6 +167,15 @@ def _require_nonempty_str(value: Any, name: str) -> None:
         raise ContractError(f"{name} must be a non-empty string")
 
 
+def compute_record_id(raw: dict) -> str:
+    """G1: stable content identity of a ledger record, 'rec-<12 hex>' over the
+    canonical JSON of the record without its own record_id. Same content =>
+    same id, so provenance can cite records across rounds."""
+    body = {k: v for k, v in raw.items() if k != "record_id"}
+    canonical = json.dumps(body, sort_keys=True, ensure_ascii=False, allow_nan=False)
+    return "rec-" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:12]
+
+
 class Ledger:
     """Append-only JSONL ledger at a fixed path."""
 
@@ -175,6 +185,7 @@ class Ledger:
     def append(self, record: LedgerRecord | dict) -> dict:
         raw = record.to_dict() if isinstance(record, LedgerRecord) else dict(record)
         validate_record(raw)
+        raw["record_id"] = compute_record_id(raw)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         line = json.dumps(raw, ensure_ascii=False, allow_nan=False)
         with self.path.open("a", encoding="utf-8") as fh:
@@ -193,9 +204,13 @@ class Ledger:
                 if not line:
                     continue
                 try:
-                    records.append(json.loads(line))
+                    raw = json.loads(line)
                 except json.JSONDecodeError as exc:
                     raise ContractError(f"ledger {self.path} line {lineno} is not valid JSON: {exc}") from exc
+                # G1: pre-record_id ledgers get the same id rule applied on read
+                if "record_id" not in raw:
+                    raw["record_id"] = compute_record_id(raw)
+                records.append(raw)
         return records
 
     def iter_records(self) -> Iterator[dict]:

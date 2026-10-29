@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from recipe_lab.contract import ContractError, ExperimentSpec
@@ -157,3 +159,42 @@ def test_record_split_field_roundtrip_and_validation(tmp_path):
     assert stored["split"] == "dev"
     with pytest.raises(ContractError, match="split must be one of"):
         ledger.append(base_record(split="train"))
+
+
+# ---- G1: stable record_id ----
+
+
+def test_record_id_is_stable_content_identity(tmp_path):
+    from recipe_lab.ledger import compute_record_id
+
+    first = compute_record_id(base_record())
+    assert first.startswith("rec-") and len(first) == len("rec-") + 12
+    # same content => same id; any content change => different id
+    assert compute_record_id(base_record()) == first
+    assert compute_record_id(base_record(metrics={"x": 0.5})) != first
+    # an already-present record_id does not influence the computed one
+    with_id = base_record()
+    with_id["record_id"] = "rec-deadbeefcafe"
+    assert compute_record_id(with_id) == first
+
+
+def test_append_and_read_assign_record_ids(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    stored = ledger.append(base_record())
+    assert stored["record_id"].startswith("rec-")
+    # a legacy record without an id gets one backfilled on read
+    (tmp_path / "legacy.jsonl").write_text(
+        json.dumps(base_record()) + "\n", encoding="utf-8"
+    )
+    legacy = Ledger(tmp_path / "legacy.jsonl").read()
+    assert legacy[0]["record_id"] == stored["record_id"]
+
+
+def test_ledger_show_json_shows_record_ids(tmp_path, capsys):
+    from recipe_lab.cli import main
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    ledger.append(base_record())
+    assert main(["ledger", "show", "--file", str(ledger.path), "--json"]) == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed[0]["record_id"].startswith("rec-")
