@@ -1,23 +1,36 @@
-"""Misroute attribution: E1 / E2 / E3 over a labeled frozen dataset.
+"""Misroute attribution: error taxonomy over a labeled frozen dataset.
 
 Classes (recipe-lab design §6, per signal family):
 
-- E1_SIGNAL      signal model label != ground truth
-- E2_POLICY      label right, routed model != oracle-policy expectation, answer wrong
-- E3_CAPABILITY  routing exactly as intended, answer still wrong
-- SUBOPTIMAL     routing deviated from the policy but the answer was still correct
-                 (counted separately, never as an error)
-- NO_EVIDENCE    answer correctness unknown (no saved answer / interrupted run);
-                 evidence-first: incomplete evidence is never counted as an error
-- CORRECT        routed as intended and answered correctly
-- POLICY_GAP     ground-truth label missing from the declared oracle policy
+- DECISION_MISMATCH  matched decision != expected decision, judged without
+                     signal-level truth (the decision-level class; E1 is not
+                     used for this until F2 introduces signal-level truth)
+- E1_SIGNAL          signal model label != ground truth; requires
+                     signal-level truth, which arrives with F2 (multi-signal
+                     oracle), so it is defined but not produced yet
+- E2_POLICY          decision right, routed model != oracle-policy
+                     expectation, answer wrong
+- E3_CAPABILITY      routing exactly as intended, answer still wrong
+- SUBOPTIMAL         routing deviated from the policy but the answer was
+                     still correct (counted separately, never as an error)
+- NO_EVIDENCE        answer correctness unknown (no saved answer /
+                     interrupted run); evidence-first: incomplete evidence is
+                     never counted as an error
+- CORRECT            routed as intended and answered correctly
+- POLICY_GAP         ground-truth label missing from the declared oracle
+                     policy
 
 Input records (one JSON object per line) follow a minimal schema; the
-router_replay adapter (Sub-issue 1 later work) produces exactly this shape:
+router_replay adapter produces exactly this shape:
 
-  {"case_id": str, "truth": str, "pred": str, "routed": str,
+  {"case_id": str, "truth": str, "matched_decision": str, "routed": str,
    "family": "vela_classify" | "vela_decisions" | "d3" | ...,
    "answer_ok": true | false | null}
+
+The row field is named matched_decision (F1): with string-only truth, a
+mismatched decision is decision_mismatch, never E1_signal. Records written
+before F1 remain readable: a top-level "pred" field is accepted as
+matched_decision.
 """
 
 from __future__ import annotations
@@ -31,6 +44,7 @@ from typing import Any
 from .contract import ContractError, OraclePolicy
 
 E1_SIGNAL = "E1_signal"
+DECISION_MISMATCH = "decision_mismatch"
 E2_POLICY = "E2_policy"
 E3_CAPABILITY = "E3_capability"
 SUBOPTIMAL = "suboptimal_routing"
@@ -38,23 +52,35 @@ NO_EVIDENCE = "no_evidence"
 CORRECT = "correct"
 POLICY_GAP = "policy_gap"
 
-ERROR_CLASSES = (E1_SIGNAL, E2_POLICY, E3_CAPABILITY)
-ALL_CLASSES = (CORRECT, E1_SIGNAL, E2_POLICY, E3_CAPABILITY, SUBOPTIMAL, NO_EVIDENCE, POLICY_GAP)
+ERROR_CLASSES = (E1_SIGNAL, DECISION_MISMATCH, E2_POLICY, E3_CAPABILITY)
+ALL_CLASSES = (
+    CORRECT,
+    E1_SIGNAL,
+    DECISION_MISMATCH,
+    E2_POLICY,
+    E3_CAPABILITY,
+    SUBOPTIMAL,
+    NO_EVIDENCE,
+    POLICY_GAP,
+)
 
-REQUIRED_FIELDS = ("case_id", "truth", "pred", "routed", "answer_ok")
+REQUIRED_FIELDS = ("case_id", "truth", "matched_decision", "routed", "answer_ok")
 
 
 @dataclass(frozen=True)
 class CaseInput:
     case_id: str
     truth: str
-    pred: str
+    matched_decision: str
     routed: str
     answer_ok: bool | None
     family: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict, lineno: int) -> "CaseInput":
+        if "matched_decision" not in raw and "pred" in raw:
+            # pre-F1 field name; kept readable for compatibility (F1)
+            raw = {**raw, "matched_decision": raw["pred"]}
         for name in REQUIRED_FIELDS:
             if name not in raw:
                 raise ContractError(f"attribution record line {lineno} is missing required field: {name}")
@@ -64,7 +90,7 @@ class CaseInput:
                 f"attribution record line {lineno}: answer_ok must be true, false or null (no evidence), "
                 f"got {answer_ok!r}"
             )
-        for name in ("case_id", "truth", "pred", "routed"):
+        for name in ("case_id", "truth", "matched_decision", "routed"):
             if not isinstance(raw[name], str) or not raw[name].strip():
                 raise ContractError(f"attribution record line {lineno}: {name} must be a non-empty string")
         family = raw.get("family")
@@ -73,7 +99,7 @@ class CaseInput:
         return cls(
             case_id=raw["case_id"],
             truth=raw["truth"],
-            pred=raw["pred"],
+            matched_decision=raw["matched_decision"],
             routed=raw["routed"],
             answer_ok=answer_ok,
             family=family,
@@ -90,7 +116,7 @@ def classify_case(case: "CaseInput | dict", policy: OraclePolicy) -> dict[str, A
     row: dict[str, Any] = {
         "case_id": case.case_id,
         "truth": case.truth,
-        "pred": case.pred,
+        "matched_decision": case.matched_decision,
         "routed": case.routed,
         "expected": expected,
         "family": case.family,
@@ -99,8 +125,10 @@ def classify_case(case: "CaseInput | dict", policy: OraclePolicy) -> dict[str, A
     if expected is None:
         row["error_class"] = POLICY_GAP
         return row
-    if case.pred != case.truth:
-        row["error_class"] = E1_SIGNAL
+    if case.matched_decision != case.truth:
+        # no signal-level truth in this format: a mismatched decision is not
+        # an E1 signal error (F1; E1 needs F2's signal-level truth)
+        row["error_class"] = DECISION_MISMATCH
         return row
     if case.answer_ok is None:
         row["error_class"] = NO_EVIDENCE
@@ -147,7 +175,9 @@ def summarize(rows: list[dict[str, Any]], top_k: int = 5) -> dict[str, Any]:
     accuracy = (n_correct / n_answered) if n_answered else None
 
     e1_rows = [r for r in rows if r["error_class"] == E1_SIGNAL]
-    confusion = Counter((r["truth"], r["pred"]) for r in e1_rows)
+    confusion = Counter((r["truth"], r["matched_decision"]) for r in e1_rows)
+    mm_rows = [r for r in rows if r["error_class"] == DECISION_MISMATCH]
+    mm_confusion = Counter((r["truth"], r["matched_decision"]) for r in mm_rows)
     e2_rows = [r for r in rows if r["error_class"] == E2_POLICY]
     deviations = Counter((r["routed"], r["expected"]) for r in e2_rows)
     e3_by_family = Counter(r.get("family") or "unknown" for r in rows if r["error_class"] == E3_CAPABILITY)
@@ -162,7 +192,10 @@ def summarize(rows: list[dict[str, Any]], top_k: int = 5) -> dict[str, Any]:
         "e1_by_family": dict(e1_by_family),
         "e3_by_family": dict(e3_by_family),
         "e1_confusion_top": [
-            {"truth": t, "pred": p, "count": n} for (t, p), n in confusion.most_common(top_k)
+            {"truth": t, "matched_decision": m, "count": n} for (t, m), n in confusion.most_common(top_k)
+        ],
+        "decision_mismatch_top": [
+            {"truth": t, "matched_decision": m, "count": n} for (t, m), n in mm_confusion.most_common(top_k)
         ],
         "e2_deviations_top": [
             {"routed": r, "expected": e, "count": n} for (r, e), n in deviations.most_common(top_k)
@@ -199,7 +232,15 @@ def render_markdown(summary: dict[str, Any], dataset_hash: str = "") -> str:
     lines += ["", "## E1 confusion pairs (top)", ""]
     if summary["e1_confusion_top"]:
         for item in summary["e1_confusion_top"]:
-            lines.append(f"- `{item['truth']}` -> `{item['pred']}`: {item['count']}")
+            lines.append(f"- `{item['truth']}` -> `{item['matched_decision']}`: {item['count']}")
+    else:
+        lines.append("- none (E1 needs signal-level truth, F2)")
+    lines += ["", "## decision_mismatch confusion pairs (top)", ""]
+    if summary["decision_mismatch_top"]:
+        for item in summary["decision_mismatch_top"]:
+            lines.append(
+                f"- expected `{item['truth']}` but decision matched `{item['matched_decision']}`: {item['count']}"
+            )
     else:
         lines.append("- none")
     lines += ["", "## E2 routing deviations (top)", ""]
