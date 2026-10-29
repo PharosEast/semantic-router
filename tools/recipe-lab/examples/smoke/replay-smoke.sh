@@ -2,17 +2,27 @@
 # recipe-lab replay smoke: router (d3-lite + router_replay) + mock backend
 # + labeled requests + replay dump + join + attribution.
 #
-# Run on a GPU compute node (from the head node):
-#   nohup srun --partition=h20 --gres=gpu:1 --cpus-per-task=8 --time=00:45:00 \
-#     bash ~/jinghaoyu/sr-build/scripts/replay-smoke.sh \
-#     > ~/jinghaoyu/recipe-lab-workspace/logs/replay-smoke-launch.log 2>&1 &
-# Then poll the launch log for SMOKE-DONE / SMOKE-FAILED.
+# Needs a GPU node (the router loads the decision model). Example:
+#   srun --gres=gpu:1 --cpus-per-task=8 --time=00:45:00 \
+#     bash tools/recipe-lab/examples/smoke/replay-smoke.sh
+# Poll stdout for SMOKE-DONE / SMOKE-FAILED.
+#
+# Environment (all optional; defaults derive from this script's location):
+#   REPO            semantic-router checkout        (default: derived)
+#   RECIPE_LAB_BIN  dir with recipe-lab CLI+python  (default: $REPO/.venv/bin)
+#   PYTHON_BIN      python for the mock backend     (default: $RECIPE_LAB_BIN/python)
+#   SR_BUILD        build prefix                    (default: $REPO/build)
+#   ROUTER_BIN      router binary                   (default: $SR_BUILD/bin/semantic-router)
+#   WORK_ROOT       scratch root for run dirs       (default: $REPO/.tmp-smoke-runs)
 set -u
-source "$HOME/jinghaoyu/sr-build/env.sh"
-REPO="$HOME/jinghaoyu/semantic-router-fork"
-ASSETS="$REPO/tools/recipe-lab/examples/smoke"
-RL="$HOME/jinghaoyu/venvs/recipe-lab-venv/bin"
-SMOKE_DIR="$HOME/jinghaoyu/recipe-lab-workspace/runs/replay-smoke-$(date +%m%d%H%M%S)"
+ASSETS="$(cd "$(dirname "$0")" && pwd)"
+REPO="${REPO:-$(cd "$ASSETS/../../.." && pwd)}"
+RL="${RECIPE_LAB_BIN:-$REPO/.venv/bin}"
+PYBIN="${PYTHON_BIN:-$RL/python}"
+SR_BUILD="${SR_BUILD:-$REPO/build}"
+ROUTER_BIN="${ROUTER_BIN:-$SR_BUILD/bin/semantic-router}"
+WORK_ROOT="${WORK_ROOT:-$REPO/.tmp-smoke-runs}"
+SMOKE_DIR="$WORK_ROOT/replay-smoke-$(date +%m%d%H%M%S)"
 mkdir -p "$SMOKE_DIR"
 echo "SMOKE_DIR=$SMOKE_DIR"
 
@@ -22,7 +32,7 @@ cleanup() {
 trap cleanup EXIT
 
 # 1. mock OpenAI backend on :8000
-"$HOME/jinghaoyu/vllm028-env/bin/python" "$ASSETS/mock_backend.py" --port 8000 > "$SMOKE_DIR/mock.log" 2>&1 &
+"$PYBIN" "$ASSETS/mock_backend.py" --port 8000 > "$SMOKE_DIR/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 2
 if ! curl -sf http://127.0.0.1:8000/v1/models > /dev/null; then echo SMOKE-FAILED mock; cat "$SMOKE_DIR/mock.log"; exit 1; fi
@@ -30,7 +40,7 @@ echo MOCK-OK
 
 # 2. router with d3-lite (model_runtime) + router_replay on every decision
 # -gateway standalone: the Router serves the OpenAI listeners itself (no Envoy)
-"$SR_BUILD/bin/semantic-router" -config "$ASSETS/smoke-config.yaml" -gateway standalone > "$SMOKE_DIR/router.log" 2>&1 &
+"$ROUTER_BIN" -config "$ASSETS/smoke-config.yaml" -gateway standalone > "$SMOKE_DIR/router.log" 2>&1 &
 ROUTER_PID=$!
 
 # 3. wait for the decision model to report ready via the management API

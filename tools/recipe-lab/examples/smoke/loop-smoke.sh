@@ -3,21 +3,33 @@
 # answer bank -> threshold proposer -> replay-tier run over candidates (each
 # candidate gets its own router lifecycle) -> RANKED records -> ranking.
 #
-# Run on a GPU compute node (from the head node):
-#   nohup srun --partition=h20 --gres=gpu:1 --cpus-per-task=8 --time=00:50:00 \
-#     bash ~/jinghaoyu/sr-build/scripts/loop-smoke.sh \
-#     > ~/jinghaoyu/recipe-lab-workspace/logs/loop-smoke-launch.log 2>&1 &
+# Needs a GPU node (the router loads the decision model). Example:
+#   srun --gres=gpu:1 --cpus-per-task=8 --time=00:50:00 \
+#     bash tools/recipe-lab/examples/smoke/loop-smoke.sh
+#
+# Environment (all optional; defaults derive from this script's location):
+#   REPO            semantic-router checkout        (default: derived)
+#   RECIPE_LAB_BIN  dir with recipe-lab CLI+python  (default: $REPO/.venv/bin)
+#   PYTHON_BIN      python for the mock backend     (default: $RECIPE_LAB_BIN/python)
+#   SR_BUILD        build prefix                    (default: $REPO/build)
+#   ROUTER_BIN      router binary                   (default: $SR_BUILD/bin/semantic-router)
+#   WORK_ROOT       scratch root for run dirs       (default: $REPO/.tmp-smoke-runs)
+#   HF_HOME         HuggingFace cache               (default: $WORK_ROOT/hf-home)
 set -u
-source "$HOME/jinghaoyu/sr-build/env.sh"
-REPO="$HOME/jinghaoyu/semantic-router-fork"
-ASSETS="$REPO/tools/recipe-lab/examples/smoke"
-RL="$HOME/jinghaoyu/venvs/recipe-lab-venv/bin"
-WORK="$HOME/jinghaoyu/recipe-lab-workspace/runs/loop-smoke-$(date +%m%d%H%M%S)"
+ASSETS="$(cd "$(dirname "$0")" && pwd)"
+REPO="${REPO:-$(cd "$ASSETS/../../.." && pwd)}"
+RL="${RECIPE_LAB_BIN:-$REPO/.venv/bin}"
+PYBIN="${PYTHON_BIN:-$RL/python}"
+SR_BUILD="${SR_BUILD:-$REPO/build}"
+ROUTER_BIN="${ROUTER_BIN:-$SR_BUILD/bin/semantic-router}"
+WORK_ROOT="${WORK_ROOT:-$REPO/.tmp-smoke-runs}"
+HF_HOME="${HF_HOME:-$WORK_ROOT/hf-home}"
+WORK="$WORK_ROOT/loop-smoke-$(date +%m%d%H%M%S)"
 mkdir -p "$WORK"
 echo "WORK=$WORK"
 
 # 1. answer bank: mock backend up temporarily (direct queries, no router)
-"$HOME/jinghaoyu/vllm028-env/bin/python" "$ASSETS/mock_backend.py" --port 8000 > "$WORK/mock.log" 2>&1 &
+"$PYBIN" "$ASSETS/mock_backend.py" --port 8000 > "$WORK/mock.log" 2>&1 &
 MOCK_PID=$!
 sleep 2
 "$RL/recipe-lab" bank build --cases "$ASSETS/cases.jsonl" \
@@ -41,10 +53,10 @@ wait $MOCK_PID 2>/dev/null
   --proposer threshold-search \
   --ledger "$WORK/ledger.jsonl" \
   --output-dir "$WORK/evals" \
-  --router-bin "$SR_BUILD/bin/semantic-router" \
+  --router-bin "$ROUTER_BIN" \
   --mock-backend "$ASSETS/mock_backend.py" \
-  --python-bin "$HOME/jinghaoyu/vllm028-env/bin/python" \
-  --hf-home "$HOME/jinghaoyu/hf-home" \
+  --python-bin "$PYBIN" \
+  --hf-home "$HF_HOME" \
   --round 1 || exit 1
 
 # 4. ranking
