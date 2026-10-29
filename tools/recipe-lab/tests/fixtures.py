@@ -75,3 +75,45 @@ ATTRIBUTION_CASES: list[dict] = [
     make_case("case-noev", "math", "math", "local/model-math", None, family="d3"),
     make_case("case-gap", "unknown-label", "unknown-label", "local/model-math", True),
 ]
+
+
+# ---- sub-issue 7: BUG-3 pilot-shaped diagnostic rows (D) ----
+
+def pilot_difficulty_values() -> list[float]:
+    """344 ascending difficulty scores shaped like the BUG-3 pilot (appendix
+    A of sub-issue-7): range [0.08, 1.87], 74 values below 1, nothing at or
+    above 2.5, and p75 anchored exactly at 1.75 so the calibrated proposal
+    matches the PR #5568 golden result deterministically."""
+    values = [round(0.08 + i * (0.91 / 73), 4) for i in range(74)]
+    values += [round(1.0 + i * (0.74 / 182), 4) for i in range(183)]
+    values += [1.75, 1.75]  # indices 257/258: the p75 interpolation anchors
+    values += [round(1.7501 + i * ((1.87 - 1.7501) / 84), 4) for i in range(85)]
+    assert len(values) == 344
+    return sorted(values)
+
+
+def pilot_rows() -> list[dict]:
+    """Unlabeled diagnostic rows for the agent-recipe fixture: the strong
+    lanes (domain_code_complex / complex_general) never fire, every row
+    carries a difficulty score plus a per-choice domain confidence."""
+    decisions = ["simple_math_fast_path", "domain_code", "medium_general", "simple_general"]
+    rows = []
+    for index, value in enumerate(pilot_difficulty_values()):
+        rows.append(
+            {
+                "request_id": f"req-{index:04d}",
+                "matched_decision": decisions[index % 4],
+                "signal_values": {
+                    "decision:difficulty": value,
+                    "decision:domain:code": round(0.80 + (index % 20) * 0.01, 4),
+                },
+                "signal_confidences": {},
+            }
+        )
+    return rows
+
+
+def pilot_rows_jsonl() -> str:
+    import json
+
+    return "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in pilot_rows())
