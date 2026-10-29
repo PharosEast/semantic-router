@@ -6,9 +6,14 @@
   RANKED score as a capability claim.
 - `PASS` / `FAIL` (live tier): evidence complete, guard floors evaluated.
   `FAIL` with "below min" means the candidate did not beat the baseline.
+  `FAIL` with "guard floor violated" is a safety veto (floors come only
+  from `spec.gates`; the measurements file carries values only, A3).
+  `FAIL` with "constraint ... violated" is an economic condition (E):
+  the recipe still wins on quality but breaks the cost/quality budget.
 - `INCONCLUSIVE`: incomplete evidence (timed-out trials, missing metrics,
-  unfinished guard evaluations, ambiguous compare payloads). Fix the
-  evidence problem; do not treat it as a regression.
+  unfinished guard evaluations, unevaluable constraints - unknown sr-bench
+  cost is null and is never counted as zero, ambiguous compare payloads).
+  Fix the evidence problem; do not treat it as a regression.
 
 ## Misroute classes (attribution report)
 

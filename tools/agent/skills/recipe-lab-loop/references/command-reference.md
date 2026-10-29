@@ -65,9 +65,9 @@ for `live-verdict`.
 
 ## Insight references (stage 2)
 
-`--insight-refs` (comma-separated, on `run` and `ledger append`) merges
-provenance links into `candidate.provenance.insight_refs`; unverifiable
-references exit 2:
+`--insight-refs` (comma-separated, on `run`, `ledger append` and
+`live-verdict`) merges provenance links into
+`candidate.provenance.insight_refs`; unverifiable references exit 2:
 - `rec-<id>` - an existing ledger record_id (G1: every record carries one)
 - `bench:<run_id>` - a benchmark run id (format-checked)
 - `attr:<path>@sha256:<hex>` - attribution artifact, hash-verified
@@ -76,11 +76,26 @@ references exit 2:
 ## Live tier
 
 - `recipe-lab live-verdict --spec S [--split dev|calib|frozen_test] --final?
-  --baseline-run-id A --candidate-run-id B [--guards G] [--candidate J]
+  --baseline-run-id A --candidate-run-id B [--guard-measurements M]
+  [--candidate J] [--insight-refs R]
   [--ledger L] [--srbench-bin vllm-sr --srbench-url U --srbench-store P]`
   Compares two sr-bench runs, applies guard floors, records the three-state
   verdict with gates and bench_refs. `frozen_test` requires `--final`
   (the promotion verdict is its only consumer, B).
+- Guards (A3): floors come only from `spec.gates`. `--guard-measurements`
+  is a JSONL of measurements only - `{"name": "pii-recall-floor",
+  "candidate": 0.97, "baseline": 0.96}`; a `floor` key in the file is a
+  contract bypass and exits 2. `floor: baseline` in the contract resolves
+  against the measured baseline value. A gate without a usable measurement
+  is unevaluated (verdict INCONCLUSIVE); undeclared measurement names are
+  reported but never veto.
+- Constraints (E): `objective.constraints` declares economic conditions
+  (`{name, metric, op gte|lte, bound: "baseline"|<number>, tolerance_pct}`);
+  distinct from gates, which are safety vetoes. Verified sr-bench compare
+  cost fields: `total_spend_usd`, `cache_neutral_cost_usd`, `cost_usd`,
+  `evaluation_cost_usd` on the baseline_targets/candidate_targets entries.
+  Unknown usage is null -> the constraint is INCONCLUSIVE (never zero).
+  Constraint evidence lands in the record's `constraints` field.
 
 ## Reporting
 
