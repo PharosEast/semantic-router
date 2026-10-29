@@ -49,7 +49,7 @@ from .contract import (
 )
 from .insights import merge_insight_refs, parse_insight_refs, resolve_insight_refs
 from .ledger import Ledger, LedgerRecord
-from .live import guards_from_rows, live_verdict_from_runs
+from .live import live_verdict_from_runs, measurements_from_rows
 from .proposers import rule_threshold, threshold_search
 from .runner import (
     RunnerEnv,
@@ -548,7 +548,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 dataset_hash=split_hash,
                 split=split_name,
                 reasons=[f"trial timeout: {exc}"],
-                gates=None,
+                # A3: replay never evaluates guards; the declared gates are
+                # recorded as explicitly not evaluated.
+                gates={gate.name: "not_evaluated" for gate in spec.gates},
                 bench_refs=[],
                 attribution_delta=None,
                 attribution_ref=args.attribution_ref,
@@ -584,7 +586,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             dataset_hash=split_hash,
             split=split_name,
             reasons=[],
-            gates=None,
+            # A3: replay never evaluates guards; the declared gates are
+            # recorded as explicitly not evaluated.
+            gates={gate.name: "not_evaluated" for gate in spec.gates},
             bench_refs=[],
             attribution_delta=(
                 attribution_delta(baseline_summary, summary)
@@ -683,11 +687,21 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
         raise ContractError("frozen_test is quarantined; pass --final for the promotion verdict")
     dataset_hash = spec.verify_workload(split=args.split)
     try:
-        guards_rows = [json.loads(line) for line in Path(args.guards).read_text(encoding="utf-8").splitlines() if line.strip()] if args.guards else []
-        guards = guards_from_rows(guards_rows)
+        raw_measurements = (
+            [
+                json.loads(line)
+                for line in Path(args.guard_measurements).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if args.guard_measurements
+            else []
+        )
         candidate_row = json.loads(Path(args.candidate).read_text(encoding="utf-8")) if args.candidate else None
-    except (ContractError, OSError, json.JSONDecodeError) as exc:
-        raise SystemExit(f"cannot load guards or candidate: {exc}") from exc
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot load guard measurements or candidate: {exc}") from exc
+    # A3: measurement schema violations are contract errors (exit 2); a
+    # `floor` key in the file must never silently override spec.gates.
+    measurements = measurements_from_rows(raw_measurements)
 
     cli = SrbenchCli(bin=args.srbench_bin, url=args.srbench_url, store=args.srbench_store, timeout_s=args.timeout)
     try:
@@ -696,7 +710,7 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             cli=cli,
             baseline_run_id=args.baseline_run_id,
             candidate_run_id=args.candidate_run_id,
-            guards=guards,
+            measurements=measurements,
         )
     except (ContractError, RuntimeError) as exc:
         raise SystemExit(f"live verdict error: {exc}") from exc
@@ -1098,7 +1112,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_live.add_argument("--baseline-run-id", required=True, help="sr-bench baseline run ID")
     p_live.add_argument("--candidate-run-id", required=True, help="sr-bench candidate run ID")
-    p_live.add_argument("--guards", default=None, help="guards JSONL (name/metric/value/floor) from model_eval")
+    p_live.add_argument(
+        "--guard-measurements",
+        default=None,
+        help="guard measurements JSONL (name/candidate/baseline only; floors come from spec.gates, A3)",
+    )
     p_live.add_argument("--candidate", default=None, help="candidate JSON file for the ledger record")
     p_live.add_argument(
         "--attribution-ref",

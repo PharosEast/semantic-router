@@ -28,6 +28,11 @@ attribution:
     code: local/model-code
     reasoning: local/model-large
 gates:
+  # A3: the contract is the only source of guard floors. live-verdict takes
+  # --guard-measurements JSONL with measurements only:
+  #   {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+  # floor: "baseline" resolves against the measured baseline value; a gate
+  # without a usable measurement is unevaluated (verdict INCONCLUSIVE).
   - name: pii-recall-floor
     metric: guard.pii.recall
     floor: baseline
