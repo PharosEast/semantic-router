@@ -70,6 +70,7 @@ from .proposers import distribution_calibration, rule_threshold, threshold_searc
 from .provenance import write_run_manifest
 from .report import render_promotion_draft, write_run_report
 from .runner import (
+    HotReloadSession,
     RunnerEnv,
     RunnerError,
     RunnerTimeoutError,
@@ -640,7 +641,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         candidates = kept
     if not candidates:
         _print_json(
-            {"evaluated": 0, "timed_out": [], "rejected": rejected, "best": None}
+            {
+                "evaluated": 0,
+                "timed_out": [],
+                "rejected": rejected,
+                "results": [],
+                "best": None,
+            }
         )
         return 2
 
@@ -659,11 +666,27 @@ def cmd_run(args: argparse.Namespace) -> int:
         mock_extra_args=(
             tuple(args.mock_extra_args.split()) if args.mock_extra_args else ()
         ),
+        reload_mode=args.reload,
+        api_key_env=args.api_key_env,
     )
 
     # A5: the per-trial budget is the contract's max_minutes_per_trial; it
     # bounds readiness wait + request loop + replay fetch for every trial.
     trial_timeout_s = spec.budget.max_minutes_per_trial * 60
+
+    # H: hot mode keeps one router alive across the whole round; the session
+    # boots from the baseline config, or the first candidate when there is
+    # no baseline, and swaps every further candidate in via PUT.
+    session: HotReloadSession | None = None
+    run_results: list[dict] = []
+    if env.reload_mode == "hot":
+        boot_source = args.baseline_config or str(candidates[0])
+        session = HotReloadSession(
+            env=env,
+            boot_source=boot_source,
+            router_model=args.router_model,
+            family=args.family,
+        )
 
     baseline_summary: dict | None = None
     if args.baseline_config:
@@ -671,23 +694,45 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"[run] evaluating baseline config: {args.baseline_config}", file=sys.stderr
         )
         try:
-            result = evaluate_candidate(
-                candidate_config=args.baseline_config,
-                cases=cases,
-                oracle_policy=spec.oracle_policy,
-                bank=bank,
-                env=env,
-                router_model=args.router_model,
-                family=args.family,
-                trial_timeout_s=trial_timeout_s,
-            )
+            if session is not None:
+                session.ensure_started()
+                result = session.evaluate(
+                    candidate_config=args.baseline_config,
+                    cases=cases,
+                    oracle_policy=spec.oracle_policy,
+                    bank=bank,
+                    trial_timeout_s=trial_timeout_s,
+                )
+            else:
+                result = evaluate_candidate(
+                    candidate_config=args.baseline_config,
+                    cases=cases,
+                    oracle_policy=spec.oracle_policy,
+                    bank=bank,
+                    env=env,
+                    router_model=args.router_model,
+                    family=args.family,
+                    trial_timeout_s=trial_timeout_s,
+                )
         except RunnerTimeoutError as exc:
+            if session is not None:
+                session.stop()  # H: no leaked router/backend on the exit path
             raise SystemExit(
                 f"baseline evaluation exceeded the trial budget: {exc}"
             ) from exc
         except (RunnerError, ContractError, OSError) as exc:
+            if session is not None:
+                session.stop()  # H: no leaked router/backend on the exit path
             raise SystemExit(f"baseline evaluation failed: {exc}") from exc
         baseline_summary = result["summary"]
+        run_results.append(
+            {
+                "path": str(args.baseline_config),
+                "reload": result.get("reload", "restart"),
+                "status": "baseline",
+                "timings": result.get("timings"),
+            }
+        )
 
     appended = []
     timeouts = []
@@ -700,16 +745,26 @@ def cmd_run(args: argparse.Namespace) -> int:
         # G2: carry the validated insight references on the record provenance.
         merge_insight_refs(entry["provenance"], insight_refs)
         try:
-            result = evaluate_candidate(
-                candidate_config=candidate_path,
-                cases=cases,
-                oracle_policy=spec.oracle_policy,
-                bank=bank,
-                env=env,
-                router_model=args.router_model,
-                family=args.family,
-                trial_timeout_s=trial_timeout_s,
-            )
+            if session is not None:
+                session.ensure_started()  # no-op while up; re-boots after a fallback
+                result = session.evaluate_with_fallback(
+                    candidate_config=candidate_path,
+                    cases=cases,
+                    oracle_policy=spec.oracle_policy,
+                    bank=bank,
+                    trial_timeout_s=trial_timeout_s,
+                )
+            else:
+                result = evaluate_candidate(
+                    candidate_config=candidate_path,
+                    cases=cases,
+                    oracle_policy=spec.oracle_policy,
+                    bank=bank,
+                    env=env,
+                    router_model=args.router_model,
+                    family=args.family,
+                    trial_timeout_s=trial_timeout_s,
+                )
         except RunnerTimeoutError as exc:
             # A5: a hung stack is never a worse recipe - record status=timeout
             # with no metrics; top_replay excludes it from the ranking.
@@ -736,13 +791,68 @@ def cmd_run(args: argparse.Namespace) -> int:
                 status="timeout",
             )
             ledger.append(record)
+            run_results.append(
+                {
+                    "path": str(candidate_path),
+                    "reload": env.reload_mode,
+                    "status": "timeout",
+                    "timings": None,
+                }
+            )
             print(
                 f"[run] {candidate_path.name}: TRIAL TIMEOUT -> ledger (status=timeout)",
                 file=sys.stderr,
             )
             continue
         except (RunnerError, ContractError, OSError) as exc:
+            if session is not None:
+                session.stop()  # H: no leaked router/backend on the exit path
             _fail(f"candidate evaluation failed for {candidate_path}: {exc}")
+
+        reload_used = result.get("reload", "restart")
+        notes = f"statuses={json.dumps(result['statuses'], ensure_ascii=False)} reload={reload_used}"
+        if result.get("reload") == "restart-fallback":
+            # H: the PUT was rejected; the ledger must say why this candidate
+            # was evaluated on a fresh router instead of the live session.
+            notes += f" fallback_reason={result.get('fallback_reason', '')}"
+
+        if result.get("incomplete"):
+            # H: the shared replay store lost or duplicated records for this
+            # candidate's request ids; no metric is trusted from a partial pull.
+            record = LedgerRecord(
+                round=args.round,
+                ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                candidate=entry,
+                tier="replay",
+                baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
+                metrics={},
+                verdict="RANKED",
+                dataset_hash=split_hash,
+                split=split_name,
+                reasons=[f"incomplete replay capture: {result['incomplete_reason']}"],
+                gates=None,
+                bench_refs=[],
+                attribution_delta=None,
+                attribution_ref=args.attribution_ref,
+                coverage_warning=True,
+                notes=notes,
+                status="incomplete",
+            )
+            ledger.append(record)
+            run_results.append(
+                {
+                    "path": str(candidate_path),
+                    "reload": reload_used,
+                    "status": "incomplete",
+                    "timings": result.get("timings"),
+                }
+            )
+            print(
+                f"[run] {candidate_path.name}: INCOMPLETE replay capture -> ledger (status=incomplete)",
+                file=sys.stderr,
+            )
+            continue
+
         summary = result["summary"]
         # A1: the replay metric is contracted in the spec (not the live metric_key)
         replay_metric = spec.objective.replay_metric
@@ -772,15 +882,26 @@ def cmd_run(args: argparse.Namespace) -> int:
             ),
             attribution_ref=args.attribution_ref,
             coverage_warning=coverage_warning,
-            notes=f"statuses={json.dumps(result['statuses'], ensure_ascii=False)}",
+            notes=notes,
         )
         stored = ledger.append(record)
         appended.append(stored)
+        run_results.append(
+            {
+                "path": str(candidate_path),
+                "reload": reload_used,
+                "status": "ranked",
+                "timings": result.get("timings"),
+            }
+        )
         accuracy_text = "n/a" if metric_value is None else f"{metric_value * 100:.2f}%"
         print(
             f"[run] {candidate_path.name}: {replay_metric}={accuracy_text} -> ledger",
             file=sys.stderr,
         )
+
+    if session is not None:
+        session.stop()
 
     best = ledger.top_replay(spec.objective.replay_metric)
     _print_json(
@@ -788,6 +909,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "evaluated": len(appended),
             "timed_out": timeouts,
             "rejected": rejected,
+            "results": run_results,
             "best": best,
         }
     )
@@ -1467,6 +1589,17 @@ def build_parser() -> argparse.ArgumentParser:
         "--mock-extra-args",
         default="",
         help="extra args passed to the mock backend (split on spaces)",
+    )
+    p_run.add_argument(
+        "--reload",
+        choices=["restart", "hot"],
+        default="restart",
+        help="candidate switching: one router restart per candidate (default) or one live router fed by PUT /api/v1/config (H)",
+    )
+    p_run.add_argument(
+        "--api-key-env",
+        default=None,
+        help="env var name holding the management API bearer token (config PUT in hot mode + replay fetch)",
     )
     p_run.add_argument("--round", type=int, default=1)
     p_run.add_argument(

@@ -161,8 +161,22 @@ def test_timeout_record_roundtrip_and_never_ranks(tmp_path):
 
 def test_timeout_status_is_the_only_allowed_one(tmp_path):
     ledger = Ledger(tmp_path / "ledger.jsonl")
-    with pytest.raises(ContractError, match="status must be 'timeout'"):
+    with pytest.raises(ContractError, match="status must be 'timeout' or 'incomplete'"):
         ledger.append(base_record(status="crashed"))
+
+
+# ---- H: incomplete capture status never ranks ----
+
+
+def test_incomplete_record_roundtrip_and_never_ranks(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    stored = ledger.append(
+        base_record(metrics={}, reasons=["incomplete replay capture: ..."], coverage_warning=True, status="incomplete")
+    )
+    assert stored["status"] == "incomplete"
+    ledger.append(base_record(metrics={"capability.score": 0.81}))
+    best = ledger.top_replay("capability.score")
+    assert best is not None and best["metrics"]["capability.score"] == 0.81
 
 
 # ---- B: split field on ledger records ----
