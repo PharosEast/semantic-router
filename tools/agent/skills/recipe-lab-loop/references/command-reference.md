@@ -22,7 +22,8 @@ for `live-verdict`.
 
 - `recipe-lab attribute --spec S [--split calib|dev] --records R
   [--cases C] --output-dir D`
-  E1/E2/E3 misroute attribution; writes `attribution.jsonl` + `report.md`.
+  E1/E2/E3 misroute attribution; writes `attribution.jsonl`, `summary.json`
+  (the summarize() result, read by `next`, G3) and `report.md`.
   The split manifest is re-hashed (A4); optional `--cases` verifies the
   attribution input against the split identity. `frozen_test` is refused.
 - `recipe-lab collect-replays --url http://127.0.0.1:8080 --cases C
@@ -50,10 +51,11 @@ for `live-verdict`.
   `difficulty gte 2.5` sites to 1.75 in one shot). Each candidate config
   ships a `<stem>.candidate.json` sidecar with kind/ref/change_summary/
   provenance/sites that `run` records in the ledger.
-- `recipe-lab run --tier replay --spec S [--split calib|dev] --cases C
+- `recipe-lab run --spec S [--split calib|dev] --cases C
   --bank B --candidates D [--baseline-config B] --proposer P --ledger L
   --output-dir D --router-bin BIN --mock-backend M [--mock-extra-args "..."]
-  [--validate [--validate-bin vllm-sr]] [--insight-refs "..."] [--round N]`
+  [--validate [--validate-bin vllm-sr]] [--attribution-ref REF]
+  [--insight-refs "..."] [--round N]`
   One router lifecycle per candidate; RANKED records land in the ledger.
   The split identity is re-hashed before any stack work (A4); the trial
   deadline is `budget.max_minutes_per_trial` (A5, timed-out candidates get
@@ -102,7 +104,17 @@ for `live-verdict`.
 - `recipe-lab ledger show|append|top`
 - `recipe-lab report --ledger L --output R` - ledger-only replay with a
   consistency check.
-- `recipe-lab next --ledger L --output C` - agent context (untrusted header).
+- `recipe-lab next --spec S --ledger L [--diagnosis diag/diagnosis.json]
+  --output C [--tail N]` - full agent context export (G3), byte-stable for
+  the same inputs. Sections: untrusted-material header; contract summary
+  (objective, replay_metric, constraints, gates, split names + hashes,
+  budget used/remaining); ledger tail; best replay candidate (ranked by
+  `objective.replay_metric` through the same `best_replay` selection as
+  `ledger top`, A2); last live verdict with reasons, gates, constraints and
+  bench_refs; latest attribution summary read through the newest record's
+  hash-verified `attribution_ref`; optional diagnosis highlights (dead/rare
+  decisions, unreachable threshold sites); and a citable insight-ref list -
+  paste those refs verbatim into `--insight-refs` when proposing (step 3).
 - `recipe-lab provenance --ledger L --output M` - recipe-lab-run-v1 manifest.
 - `recipe-lab record-draft --ledger L --output D` - promotion draft from the
   latest PASS live record (human checklist included).
