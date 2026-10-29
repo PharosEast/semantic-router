@@ -37,7 +37,7 @@ def _record_brief(record: dict[str, Any]) -> str:
     ref = candidate.get("ref", "?")
     provenance = (candidate.get("provenance") or {}).get("proposer", "?")
     return (
-        f"- round {record.get('round')} [{record.get('tier')}] {record.get('verdict')} "
+        f"- [{record.get('record_id', '-')}] round {record.get('round')} [{record.get('tier')}] {record.get('verdict')} "
         f"proposer={provenance} ref={ref} metrics={metrics}"
         + (f" reasons={record.get('reasons')}" if record.get("reasons") else "")
     )
@@ -54,7 +54,7 @@ def render_next_context(records: list[dict[str, Any]], tail: int = 10) -> str:
     lines += ["", "## Best replay-tier candidate so far", ""]
     if replay_best is not None:
         candidate = replay_best.get("candidate") or {}
-        lines.append(f"- ref: {candidate.get('ref')} (round {replay_best.get('round')})")
+        lines.append(f"- ref: {candidate.get('ref')} (round {replay_best.get('round')}, record {replay_best.get('record_id', '-')})")
         lines.append(f"- metrics: {json.dumps(replay_best.get('metrics') or {}, ensure_ascii=False)}")
         if replay_best.get("coverage_warning"):
             lines.append("- coverage_warning: some cases lacked evidence; re-verify before trusting")

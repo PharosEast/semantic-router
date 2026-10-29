@@ -65,7 +65,11 @@ def build_run_manifest(
             },
         },
         "evidence": {
-            "ledger": {"path": str(ledger_file), "content_hash": _content_hash(ledger_file)},
+            "ledger": {
+                "path": str(ledger_file),
+                "content_hash": _content_hash(ledger_file),
+                "record_ids": sorted({r["record_id"] for r in records if r.get("record_id")}),
+            },
             "bench_refs": bench_refs,
         },
         "best_replay_candidate": None if best is None else {"ref": best[0], "score": best[1]},
