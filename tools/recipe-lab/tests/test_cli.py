@@ -76,3 +76,57 @@ def test_attribute_cases_hash_match_passes(tmp_path, capsys):
         encoding="utf-8",
     )
     assert main(["attribute", "--spec", spec_path, "--records", str(records), "--cases", str(cases)]) == 0
+
+
+# ---- A1: replay_metric contract + ledger top --spec ----
+
+
+def _replay_record(ref: str, metric: str, value: float) -> dict:
+    return {
+        "round": 1,
+        "ts": "2026-10-29T00:00:00Z",
+        "candidate": {"kind": "config", "ref": ref, "change_summary": "s", "provenance": {"proposer": "p", "insight_refs": []}},
+        "tier": "replay",
+        "baseline_ref": "base@main",
+        "metrics": {metric: value},
+        "verdict": "RANKED",
+        "dataset_hash": "sha256:" + "0" * 64,
+        "reasons": [],
+        "gates": None,
+        "bench_refs": [],
+        "attribution_delta": None,
+        "attribution_ref": None,
+        "coverage_warning": False,
+        "notes": "",
+    }
+
+
+def _write_a1_spec(tmp_path) -> str:
+    spec = dict(VALID_SPEC)
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return str(spec_path)
+
+
+def test_ledger_top_spec_uses_replay_metric(tmp_path, capsys):
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text(
+        json.dumps(_replay_record("a.yaml", "routed_accuracy", 0.80)) + "\n"
+        + json.dumps(_replay_record("b.yaml", "routed_accuracy", 0.91)) + "\n",
+        encoding="utf-8",
+    )
+    spec_path = _write_a1_spec(tmp_path)
+    assert main(["ledger", "top", "--file", str(ledger), "--spec", spec_path]) == 0
+    assert json.loads(capsys.readouterr().out)["candidate"]["ref"] == "b.yaml"
+
+
+def test_ledger_top_metric_key_and_spec_are_exclusive(tmp_path, capsys):
+    ledger = tmp_path / "ledger.jsonl"
+    ledger.write_text("", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        main(["ledger", "top", "--file", str(ledger), "--metric-key", "accuracy", "--spec", "s.yaml"])
+    assert exc.value.code == 2  # argparse usage error
+    with pytest.raises(SystemExit) as exc2:  # neither given
+        main(["ledger", "top", "--file", str(ledger)])
+    assert exc2.value.code == 2
+    capsys.readouterr()

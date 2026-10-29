@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
-from recipe_lab.runner import attribution_delta, candidate_accuracy
+import pytest
+
+from recipe_lab.contract import ContractError
+from recipe_lab.runner import attribution_delta, replay_metric_value
 
 
 def test_attribution_delta_counts_fixed_errors():
@@ -27,6 +30,10 @@ def test_attribution_delta_never_negative():
     }
 
 
-def test_candidate_accuracy_rounds():
-    assert candidate_accuracy({"accuracy": 0.8333333333}, "capability.score") == 0.833333
-    assert candidate_accuracy({"accuracy": None}, "capability.score") is None
+def test_replay_metric_value_rounds_and_rejects_unknown():
+    # A1: the contracted replay metric maps to the runner's summary key
+    assert replay_metric_value({"accuracy": 0.8333333333}, "routed_accuracy") == 0.833333
+    assert replay_metric_value({"accuracy": None}, "routed_accuracy") is None
+    assert replay_metric_value({}, "routed_accuracy") is None
+    with pytest.raises(ContractError, match="unknown replay metric"):
+        replay_metric_value({"accuracy": 1.0}, "capability.score")

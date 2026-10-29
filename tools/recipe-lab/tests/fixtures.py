@@ -18,6 +18,7 @@ VALID_SPEC: dict = {
         "metric_key": "capability.score",
         "direction": "maximize",
         "min_improvement_pct": 1.0,
+        "replay_metric": "routed_accuracy",
     },
     "workload": {
         "manifest": "datasets/dev-mmlu-pro.yaml",
