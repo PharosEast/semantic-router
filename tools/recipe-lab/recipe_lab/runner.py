@@ -33,7 +33,7 @@ from typing import Any
 from .adapters.router_replay import fetch_replays, records_to_cases
 from .attribution import CaseInput, attribute, summarize
 from .bank import apply_bank
-from .contract import OraclePolicy
+from .contract import ContractError, OraclePolicy
 
 
 class RunnerError(RuntimeError):
@@ -234,7 +234,15 @@ def attribution_delta(baseline_summary: dict, candidate_summary: dict) -> dict[s
     }
 
 
-def candidate_accuracy(summary: dict, metric_key: str) -> float | None:
-    """The objective metric for a candidate: routed-outcome accuracy."""
-    accuracy = summary.get("accuracy")
-    return None if accuracy is None else round(float(accuracy), 6)
+# A1: where each contracted replay metric lives in the run summary. The
+# metric name is the ledger key, the summary key is the runner's own field.
+REPLAY_SUMMARY_KEYS = {"routed_accuracy": "accuracy"}
+
+
+def replay_metric_value(summary: dict, replay_metric: str) -> float | None:
+    """A contracted replay metric (objective.replay_metric) from a run summary."""
+    summary_key = REPLAY_SUMMARY_KEYS.get(replay_metric)
+    if summary_key is None:
+        raise ContractError(f"unknown replay metric {replay_metric!r}; known: {sorted(REPLAY_SUMMARY_KEYS)}")
+    value = summary.get(summary_key)
+    return None if value is None else round(float(value), 6)

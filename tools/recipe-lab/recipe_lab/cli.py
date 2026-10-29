@@ -21,7 +21,7 @@ from .bank import apply_bank, build_bank, load_bank, write_bank
 from .contract import ContractError, ExperimentSpec, dataset_content_hash
 from .ledger import Ledger, LedgerRecord
 from .proposers import threshold_search
-from .runner import RunnerEnv, RunnerError, attribution_delta, candidate_accuracy, evaluate_candidate
+from .runner import RunnerEnv, RunnerError, attribution_delta, evaluate_candidate, replay_metric_value
 
 
 def _print_json(value: object) -> None:
@@ -265,8 +265,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         except (RunnerError, ContractError, OSError) as exc:
             raise SystemExit(f"candidate evaluation failed for {candidate_path}: {exc}") from exc
         summary = result["summary"]
-        accuracy = candidate_accuracy(summary, spec.objective.metric_key)
-        coverage_warning = result["bank_stats"].get("no_bank_entry", 0) > 0 or accuracy is None
+        # A1: the replay metric is contracted in the spec (not the live metric_key)
+        replay_metric = spec.objective.replay_metric
+        metric_value = replay_metric_value(summary, replay_metric)
+        coverage_warning = result["bank_stats"].get("no_bank_entry", 0) > 0 or metric_value is None
         record = LedgerRecord(
             round=args.round,
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -278,7 +280,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             },
             tier="replay",
             baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
-            metrics={spec.objective.metric_key: accuracy} if accuracy is not None else {},
+            metrics={replay_metric: metric_value} if metric_value is not None else {},
             verdict="RANKED",
             dataset_hash=spec.workload.content_hash,
             reasons=[],
@@ -291,10 +293,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
         stored = ledger.append(record)
         appended.append(stored)
-        accuracy_text = "n/a" if accuracy is None else f"{accuracy * 100:.2f}%"
-        print(f"[run] {candidate_path.name}: {spec.objective.metric_key}={accuracy_text} -> ledger", file=sys.stderr)
+        accuracy_text = "n/a" if metric_value is None else f"{metric_value * 100:.2f}%"
+        print(f"[run] {candidate_path.name}: {replay_metric}={accuracy_text} -> ledger", file=sys.stderr)
 
-    best = ledger.top_replay(spec.objective.metric_key)
+    best = ledger.top_replay(spec.objective.replay_metric)
     _print_json({"evaluated": len(appended), "best": best})
     return 0
 
@@ -335,8 +337,14 @@ def cmd_ledger(args: argparse.Namespace) -> int:
         return 0
 
     if args.ledger_action == "top":
+        # A1: --spec takes the metric from objective.replay_metric;
+        # --metric-key stays for ad-hoc ranking. Exactly one is required.
+        if args.spec:
+            metric_key = _load_spec(args.spec).objective.replay_metric
+        else:
+            metric_key = args.metric_key
         try:
-            best = ledger.top_replay(args.metric_key)
+            best = ledger.top_replay(metric_key)
         except ContractError as exc:
             raise SystemExit(f"ledger contract error: {exc}") from exc
         _print_json(best if best is not None else {})
@@ -481,7 +489,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_top = ledger_sub.add_parser("top", help="best replay-tier candidate (hand-off to live tier)")
     p_top.add_argument("--file", required=True, help="path to the ledger JSONL")
-    p_top.add_argument("--metric-key", required=True, help="objective metric key to rank by")
+    top_metric = p_top.add_mutually_exclusive_group(required=True)
+    top_metric.add_argument("--metric-key", help="objective metric key to rank by (ad-hoc)")
+    top_metric.add_argument(
+        "--spec",
+        help="experiment spec YAML; rank by its objective.replay_metric (A1)",
+    )
     p_top.set_defaults(func=cmd_ledger)
 
     return parser

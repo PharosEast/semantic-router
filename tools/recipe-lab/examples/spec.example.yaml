@@ -3,6 +3,9 @@ objective:
   metric_key: capability.score
   direction: maximize
   min_improvement_pct: 1.0
+  # A1: the replay tier ranks candidates by this contracted metric (ledger key);
+  # metric_key stays the live sr-bench metric.
+  replay_metric: routed_accuracy
 workload:
   # A4 dataset identity: content_hash = "sha256:" + sha256(<manifest raw bytes>),
   # manifest is the dataset JSONL path relative to this spec file.

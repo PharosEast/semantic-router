@@ -36,6 +36,10 @@ from . import API_VERSION
 DIRECTIONS = {"minimize", "maximize"}
 PROFILES = {"smoke", "quick", "standard"}
 STACK_MODES = {"external", "serve"}
+# A1: the replay tier ranks candidates with exactly one contracted metric.
+# `metric_key` stays the live sr-bench metric; `replay_metric` is what the
+# replay ledger records and `ledger top --spec` ranks by.
+REPLAY_METRICS = {"routed_accuracy"}
 TIERS = {"replay", "preview", "live"}
 CANDIDATE_KINDS = {"config", "artifact"}
 VERDICTS = {"PASS", "FAIL", "INCONCLUSIVE", "RANKED"}
@@ -75,6 +79,7 @@ class Objective:
     metric_key: str
     direction: str
     min_improvement_pct: float
+    replay_metric: str = "routed_accuracy"
 
     @classmethod
     def from_dict(cls, raw: dict) -> "Objective":
@@ -88,13 +93,19 @@ class Objective:
         _require(direction in DIRECTIONS, f"objective.direction must be one of {sorted(DIRECTIONS)}")
         pct = _require_number(raw.get("min_improvement_pct", 0.0), "objective.min_improvement_pct")
         _require(pct >= 0, "objective.min_improvement_pct must be >= 0")
-        return cls(metric_key=metric_key, direction=direction, min_improvement_pct=pct)
+        replay_metric = raw.get("replay_metric", "routed_accuracy")
+        _require(
+            replay_metric in REPLAY_METRICS,
+            f"objective.replay_metric must be one of {sorted(REPLAY_METRICS)} (got {replay_metric!r})",
+        )
+        return cls(metric_key=metric_key, direction=direction, min_improvement_pct=pct, replay_metric=replay_metric)
 
     def to_dict(self) -> dict:
         return {
             "metric_key": self.metric_key,
             "direction": self.direction,
             "min_improvement_pct": self.min_improvement_pct,
+            "replay_metric": self.replay_metric,
         }
 
 
