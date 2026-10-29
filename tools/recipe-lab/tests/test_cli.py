@@ -8,13 +8,16 @@ progress goes to stderr; exit codes are 0 success, 1 FAIL verdict
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
+import re
+from pathlib import Path
 
 import pytest
 import yaml
 
-from recipe_lab.cli import main, verdict_exit_code
+from recipe_lab.cli import build_parser, main, verdict_exit_code
 from tests.fixtures import VALID_SPEC
 
 
@@ -291,3 +294,30 @@ def test_record_draft_without_pass_exits_2(tmp_path, capsys):
         main(["record-draft", "--ledger", str(ledger), "--output", str(tmp_path / "d.md")])
     assert exc.value.code == 2
     assert "no PASS live record" in capsys.readouterr().err
+
+
+# ---- A6: every subcommand is documented in README and the skill reference ----
+
+
+def _top_level_subcommands() -> list[str]:
+    for action in build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return sorted(action.choices)
+    raise AssertionError("build_parser() registers no subcommands")
+
+
+def test_every_subcommand_is_documented():
+    root = Path(__file__).resolve().parents[3]
+    docs = {
+        "README": (root / "tools/recipe-lab/README.md").read_text(encoding="utf-8"),
+        "command-reference.md": (
+            root / "tools/agent/skills/recipe-lab-loop/references/command-reference.md"
+        ).read_text(encoding="utf-8"),
+    }
+    missing = []
+    for name in _top_level_subcommands():
+        pattern = rf"(?<![\w-]){re.escape(name)}(?![\w-])"
+        for doc, text in docs.items():
+            if not re.search(pattern, text):
+                missing.append(f"{name}: {doc}")
+    assert not missing, "undocumented subcommands: " + ", ".join(missing)
