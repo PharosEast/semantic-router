@@ -192,6 +192,58 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
 
 - `answer_ok`: `true` / `false` / `null`（null = 无证据，按证据优先原则不计为错误）
 - `family`: 产生该判定的信号家族（`vela_classify` / `vela_decisions` / `d3`），归因按家族分列
+- `matched_decision` is the decision the router actually matched (F1 renamed
+  the earlier `pred`; reading old records with a top-level `pred` field still
+  works).
+- `truth` is either the hand-labeled expected decision for that prompt (a
+  string), or an object `{"signals": {...}}` carrying per-signal ground-truth
+  facts (F2): each fact is a label string (`"domain": "code"`), a number
+  (`"difficulty": 3`), or a numeric predicate (`"difficulty": {gte: 3}`).
+  Facts drive both the oracle policy's rule evaluation and E1 signal
+  judgment.
+- Signal evidence (`signal_values` / `signal_confidences` / `decision_tier`)
+  is carried verbatim from the replay record. Keys are `<type>:<name>` (e.g.
+  `decision:difficulty`); choice-type decision signals store one probability
+  per choice under `decision:<name>:<choice>` (e.g. `decision:domain:code`),
+  while score-type signals keep the numeric score under `decision:<name>`.
+  When reading a signal, values fall back per key from `signal_values` to
+  `signal_confidences` (matching the router's own lookup).
+
+## Oracle policy
+
+The oracle policy is declared in the experiment spec under
+`attribution.oracle_policy`; attribution never recomputes it from router
+logic. Two forms are supported (F2):
+
+```yaml
+attribution:
+  oracle_policy:
+    # form 1 (legacy): decision label -> intended model
+    math: local/model-math
+    code: local/model-code
+
+    # form 2 (F2): signal-fact rules, evaluated top-down; first match wins
+    rules:
+      - when: {domain: code, difficulty: {gte: 3}}
+        expect: {decision: domain_code_complex, models: [m/pro, m/max]}
+      - when: {domain: code}
+        expect: {decision: domain_code}
+    default: {decision: simple_general}
+```
+
+String truths resolve through the label mapping; `{"signals": ...}` truths
+evaluate the rules against the truth facts (unmatched and default-less cases
+become `policy_gap`). A truth whose signals contradict the record's observed
+signal evidence is `E1_signal` (the failing signal and its observed value are
+recorded on the row).
+
+## Signal family
+
+`family` on attribution rows is derived from the case's own signal evidence
+key type (F2): `classifier:` -> `vela_classify`, `decision:` ->
+`vela_decisions`, `projection:` -> `d3`; other key type segments surface
+verbatim. Records without signal evidence keep whatever `family` tag the
+input record carries (e.g. from `collect-replays --family`).
 
 ## 契约要点
 
@@ -201,6 +253,17 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
 - `workload` 声明三分 split（B）时必须给出 `split_rule` 文本且三分互不相交；
   旧的单数据集形态按 dev-only 处理并告警。
 - `budget.max_minutes_per_trial` 覆盖就绪等待 + 请求循环 + replay 拉取全程（A5）。
+
+| class | meaning |
+|---|---|
+| `correct` | routed as intended and answered correctly |
+| `E1_signal` | a truth signal contradicts the record's observed signal evidence (needs signal-level truth: truth = `{"signals": ...}`; F2) |
+| `decision_mismatch` | matched decision != expected decision, judged without usable signal-level truth (F1; with fully verified signal truth a decision miss is `E2_policy`) |
+| `E2_policy` | decision or routed model deviates from the oracle-policy expectation, answer wrong |
+| `E3_capability` | routing exactly as intended, answer still wrong |
+| `suboptimal_routing` | policy deviation but still a correct answer (counted, never an error) |
+| `no_evidence` | answer correctness unknown; never an error |
+| `policy_gap` | truth (label or signal facts) not covered by the declared oracle policy |
 
 ## 测试
 
