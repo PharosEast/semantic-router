@@ -6,13 +6,15 @@ invalid contracts are rejected at load time with actionable errors, never
 mid-experiment.
 
 Layout follows the recipe-lab design §5.3:
-  objective:    metric_key / direction / min_improvement_pct
+  objective:    metric_key / direction / min_improvement_pct / replay_metric
   workload:     manifest / content_hash / profile
   attribution:  oracle_policy (label -> intended model)
   gates:        [{name, metric, floor}]  floor = "baseline" | number
   budget:       rounds / max_minutes_per_trial
   stack:        mode / endpoint / baseline_ref
-  evaluation:   search_tier / final_tier
+
+A5: the `evaluation` section is retired - replay and live are separate
+commands with CLI-fixed tiers, not contracted per experiment.
 
 Dataset identity (A4): `content_hash = "sha256:" + sha256(<dataset JSONL raw
 bytes>)` and `manifest` is the path of that JSONL relative to the spec file.
@@ -108,7 +110,12 @@ class Objective:
             replay_metric in REPLAY_METRICS,
             f"objective.replay_metric must be one of {sorted(REPLAY_METRICS)} (got {replay_metric!r})",
         )
-        return cls(metric_key=metric_key, direction=direction, min_improvement_pct=pct, replay_metric=replay_metric)
+        return cls(
+            metric_key=metric_key,
+            direction=direction,
+            min_improvement_pct=pct,
+            replay_metric=replay_metric,
+        )
 
     def to_dict(self) -> dict:
         return {
@@ -270,28 +277,6 @@ class Stack:
 
 
 @dataclass(frozen=True)
-class Evaluation:
-    search_tier: str
-    final_tier: str
-
-    @classmethod
-    def from_dict(cls, raw: dict) -> Evaluation:
-        search_tier = raw.get("search_tier", "replay")
-        final_tier = raw.get("final_tier", "live")
-        _require(
-            search_tier in TIERS,
-            f"evaluation.search_tier must be one of {sorted(TIERS)}",
-        )
-        _require(
-            final_tier in TIERS, f"evaluation.final_tier must be one of {sorted(TIERS)}"
-        )
-        return cls(search_tier=search_tier, final_tier=final_tier)
-
-    def to_dict(self) -> dict:
-        return {"search_tier": self.search_tier, "final_tier": self.final_tier}
-
-
-@dataclass(frozen=True)
 class ExperimentSpec:
     api_version: str
     objective: Objective
@@ -302,9 +287,6 @@ class ExperimentSpec:
         default_factory=lambda: Budget(rounds=1, max_minutes_per_trial=120.0)
     )
     stack: Stack | None = None
-    evaluation: Evaluation = field(
-        default_factory=lambda: Evaluation(search_tier="replay", final_tier="live")
-    )
     # directory of the YAML file this spec was loaded from (from_yaml only);
     # workload.manifest resolves against it. Not part of the contract.
     spec_dir: str | None = None
@@ -333,8 +315,11 @@ class ExperimentSpec:
             if stack_raw is not None
             else None
         )
-        evaluation = Evaluation.from_dict(
-            _require_mapping(raw.get("evaluation", {}), "evaluation")
+        # A5: `evaluation` is retired - replay and live are separate commands,
+        # tiers are fixed by the CLI, not contracted per experiment.
+        _require(
+            "evaluation" not in raw,
+            "spec key 'evaluation' is retired: remove it (replay and live are separate commands now)",
         )
         return cls(
             api_version=api_version,
@@ -344,7 +329,6 @@ class ExperimentSpec:
             gates=gates,
             budget=budget,
             stack=stack,
-            evaluation=evaluation,
         )
 
     @classmethod
@@ -417,7 +401,6 @@ class ExperimentSpec:
             "attribution": {"oracle_policy": self.oracle_policy.to_dict()},
             "gates": [g.to_dict() for g in self.gates],
             "budget": self.budget.to_dict(),
-            "evaluation": self.evaluation.to_dict(),
         }
         if self.stack is not None:
             out["stack"] = self.stack.to_dict()
