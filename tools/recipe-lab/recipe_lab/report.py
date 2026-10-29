@@ -33,7 +33,7 @@ def _metrics_line(metrics: dict[str, Any]) -> str:
 
 
 def render_run_report(records: list[dict[str, Any]]) -> str:
-    lines = ["# recipe-lab run report", "", "| round | tier | verdict | metrics | gates | bench_refs |", "|---|---|---|---|---|---|"]
+    lines = ["# recipe-lab run report", "", "| record | round | tier | verdict | metrics | gates | bench_refs |", "|---|---|---|---|---|---|---|"]
     inconsistencies: list[str] = []
     hashes = sorted({r.get("dataset_hash") for r in records if r.get("dataset_hash")})
     for record in records:
@@ -41,7 +41,7 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
         gates_text = "-" if not gates else ", ".join(f"{k}={v}" for k, v in gates.items())
         refs = record.get("bench_refs") or []
         lines.append(
-            f"| {record.get('round')} | {record.get('tier')} | **{record.get('verdict')}** "
+            f"| {record.get('record_id', '-')} | {record.get('round')} | {record.get('tier')} | **{record.get('verdict')}** "
             f"| {_metrics_line(record.get('metrics') or {})} | {gates_text} | {len(refs)} ref(s) |"
         )
         if record.get("tier") == "live" and record.get("verdict") != "INCONCLUSIVE":
@@ -52,7 +52,7 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
             if len(refs) < 2:
                 inconsistencies.append(f"round {record.get('round')}: live {record.get('verdict')} with fewer than two bench_refs")
         if record.get("coverage_warning"):
-            lines.append(f"| {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - |")
+            lines.append(f"| - | {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - |")
     if len(hashes) > 1:
         lines += [
             "",
@@ -91,6 +91,7 @@ def render_promotion_draft(record: dict[str, Any]) -> str:
     lines = [
         "# Recipe promotion record (DRAFT - requires human review + Standard holdout)",
         "",
+        f"- record: `{record.get('record_id', 'unrecorded')}`",
         f"- candidate ref: `{candidate.get('ref')}` ({candidate.get('kind')})",
         f"- proposer: {provenance.get('proposer')} insight_refs={provenance.get('insight_refs')}",
         f"- dataset: {record.get('dataset_hash')}",
