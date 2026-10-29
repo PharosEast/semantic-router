@@ -32,7 +32,7 @@ recipe-lab ledger top --file ledger.jsonl --metric-key capability.score
 每行一个 JSON 对象（router_replay 适配器后续产出同此形状）：
 
 ```json
-{"case_id": "c1", "truth": "math", "pred": "code", "routed": "local/model-b",
+{"case_id": "c1", "truth": "math", "matched_decision": "code", "routed": "local/model-b",
  "family": "d3", "answer_ok": false}
 ```
 
