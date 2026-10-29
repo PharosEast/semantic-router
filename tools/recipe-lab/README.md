@@ -102,6 +102,15 @@ recipe-lab run --spec spec.yaml --split dev --cases splits/dev.jsonl \
   --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py \
   --output-dir out/ --validate
 
+# 热加载（H）：router 用 baseline 启动一次，每个候选走 PUT /api/v1/config
+# 切换并等待发布完成；候选秒级而非每次重启模型。PUT 被拒（如 listeners
+# 变更）自动回退 restart 并在台账 notes 记明原因；管理 API 认证复用
+# --api-key-env。run 输出含每个候选的 timings（switch/request/fetch 秒）。
+recipe-lab run --spec spec.yaml --split dev --cases splits/dev.jsonl \
+  --bank bank.jsonl --candidates cands/ --ledger ledger.jsonl \
+  --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py \
+  --output-dir out/ --validate --reload hot --api-key-env ROUTER_API_KEY
+
 # 台账
 recipe-lab ledger show --file ledger.jsonl --tier replay --json
 recipe-lab ledger top --file ledger.jsonl --spec spec.yaml

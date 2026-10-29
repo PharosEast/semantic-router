@@ -181,8 +181,12 @@ def validate_record(raw: dict) -> None:
         )
     if "status" in raw and raw["status"] is not None:
         _require_nonempty_str(raw["status"], "status")
-        if raw["status"] != "timeout":
-            raise ContractError(f"status must be 'timeout', got {raw['status']!r}")
+        # A5: "timeout" - the trial exceeded its budget. H: "incomplete" - the
+        # hot-reload replay pull lost or duplicated records for the candidate's
+        # request ids. Neither carries a metric and both are excluded from
+        # top_replay, so a broken capture can never rank as a worse recipe.
+        if raw["status"] not in ("timeout", "incomplete"):
+            raise ContractError(f"status must be 'timeout' or 'incomplete', got {raw['status']!r}")
 
 
 def _require_present(raw: dict, name: str) -> None:
