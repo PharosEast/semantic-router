@@ -147,15 +147,22 @@ def test_collect_replays_unlabeled_cli(tmp_path, monkeypatch):
     assert rows[0]["matched_decision"] == "d"
 
 
-def test_collect_replays_flag_rules():
+def test_collect_replays_flag_rules(capsys):
     from recipe_lab import cli
 
-    with pytest.raises(SystemExit, match="mutually exclusive"):
+    # CLI contract errors print to stderr and exit 2 (exit-code contract)
+    with pytest.raises(SystemExit) as exc:
         cli.main(
             ["collect-replays", "--url", "http://x", "--unlabeled", "--cases", "c.jsonl", "--output", "o.jsonl"]
         )
-    with pytest.raises(SystemExit, match="one of --cases|--unlabeled|is required"):
+    assert exc.value.code == 2
+    assert "--unlabeled and --cases are mutually exclusive" in capsys.readouterr().err
+
+    with pytest.raises(SystemExit) as exc:
         cli.main(["collect-replays", "--url", "http://x", "--output", "o.jsonl"])
+    assert exc.value.code == 2
+    err = capsys.readouterr().err
+    assert "one of --cases" in err and "is required" in err
 
 
 def test_fetch_replays_parses_list():
