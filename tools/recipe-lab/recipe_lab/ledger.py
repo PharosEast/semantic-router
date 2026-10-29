@@ -61,6 +61,10 @@ class LedgerRecord:
     # "timeout" when the stack exceeded budget.max_minutes_per_trial).
     # best_replay / top_replay exclude records carrying a status.
     status: str | None = None
+    # E: live-tier economic constraint evidence, name -> {metric, op, bound,
+    # baseline, candidate, bound_value, status}. Constraints are distinct
+    # from gates (safety vetoes); replay-tier records leave this empty.
+    constraints: dict | None = None
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {
@@ -90,6 +94,8 @@ class LedgerRecord:
             out["split"] = self.split
         if self.status:
             out["status"] = self.status
+        if self.constraints is not None:
+            out["constraints"] = dict(self.constraints)
         return out
 
     @classmethod
@@ -117,6 +123,7 @@ class LedgerRecord:
             notes=str(raw.get("notes", "")),
             split=raw.get("split"),
             status=raw.get("status"),
+            constraints=dict(raw["constraints"]) if raw.get("constraints") is not None else None,
         )
 
 

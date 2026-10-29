@@ -7,6 +7,7 @@ mid-experiment.
 
 Layout follows the recipe-lab design §5.3:
   objective:    metric_key / direction / min_improvement_pct / replay_metric
+                / constraints (E: economic conditions, distinct from gates)
   workload:     manifest / content_hash / profile
   attribution:  oracle_policy (label -> intended model)
   gates:        [{name, metric, floor}]  floor = "baseline" | number
@@ -140,12 +141,71 @@ def _check_split_disjointness(base: Path, workload: Workload) -> None:
                 )
 
 
+CONSTRAINT_OPS = ("gte", "lte")
+
+
+@dataclass(frozen=True)
+class Constraint:
+    """One economic constraint on the live verdict (E).
+
+    Constraints are distinct from gates: a gate is a safety veto, a
+    constraint is an economic condition (e.g. cost must not regress).
+    `bound` is either a number or the literal "baseline" (the baseline
+    arm's measured value of the same metric); `tolerance_pct` relaxes the
+    bound by that percentage in the permissive direction.
+    """
+
+    name: str
+    metric: str
+    op: str
+    bound: str | float  # "baseline" or a numeric bound
+    tolerance_pct: float = 0.0
+
+    @classmethod
+    def from_dict(cls, raw: dict, index: int) -> Constraint:
+        name = raw.get("name")
+        _require(
+            isinstance(name, str) and name.strip(),
+            f"constraints[{index}].name must be a non-empty string",
+        )
+        metric = raw.get("metric")
+        _require(
+            isinstance(metric, str) and all(part.strip() for part in metric.split(".")),
+            f"constraints[{index}].metric must be a non-empty dotted JSON key",
+        )
+        op = raw.get("op")
+        _require(
+            op in CONSTRAINT_OPS,
+            f"constraints[{index}].op must be one of {sorted(CONSTRAINT_OPS)}",
+        )
+        bound = raw.get("bound")
+        if bound != "baseline":
+            bound = _require_number(bound, f"constraints[{index}].bound")
+        tolerance = _require_number(
+            raw.get("tolerance_pct", 0.0), f"constraints[{index}].tolerance_pct"
+        )
+        _require(tolerance >= 0, f"constraints[{index}].tolerance_pct must be >= 0")
+        return cls(
+            name=name, metric=metric, op=op, bound=bound, tolerance_pct=tolerance
+        )
+
+    def to_dict(self) -> dict:
+        return {
+            "name": self.name,
+            "metric": self.metric,
+            "op": self.op,
+            "bound": self.bound,
+            "tolerance_pct": self.tolerance_pct,
+        }
+
+
 @dataclass(frozen=True)
 class Objective:
     metric_key: str
     direction: str
     min_improvement_pct: float
     replay_metric: str = "routed_accuracy"
+    constraints: tuple[Constraint, ...] = ()
 
     @classmethod
     def from_dict(cls, raw: dict) -> Objective:
@@ -172,20 +232,31 @@ class Objective:
             replay_metric in REPLAY_METRICS,
             f"objective.replay_metric must be one of {sorted(REPLAY_METRICS)} (got {replay_metric!r})",
         )
+        constraints_raw = raw.get("constraints", [])
+        _require(
+            isinstance(constraints_raw, list), "objective.constraints must be a list"
+        )
+        constraints = tuple(
+            Constraint.from_dict(c, i) for i, c in enumerate(constraints_raw)
+        )
         return cls(
             metric_key=metric_key,
             direction=direction,
             min_improvement_pct=pct,
             replay_metric=replay_metric,
+            constraints=constraints,
         )
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "metric_key": self.metric_key,
             "direction": self.direction,
             "min_improvement_pct": self.min_improvement_pct,
             "replay_metric": self.replay_metric,
         }
+        if self.constraints:
+            out["constraints"] = [c.to_dict() for c in self.constraints]
+        return out
 
 
 @dataclass(frozen=True)

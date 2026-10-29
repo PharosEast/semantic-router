@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from recipe_lab.cli import main
 from recipe_lab.contract import ContractError, ExperimentSpec
@@ -325,7 +327,7 @@ def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(monkeypatch, tmp_
     monkeypatch.setattr(
         cli,
         "live_verdict_from_runs",
-        lambda **kwargs: {"verdict": "PASS", "reasons": [], "improvement_pct": 1.0, "gates": {}, "bench_refs": ["run-a", "run-b"], "metrics": {"baseline": 0.5, "candidate": 0.6}},
+        lambda **kwargs: {"verdict": "PASS", "reasons": [], "improvement_pct": 1.0, "gates": {}, "constraints": [], "bench_refs": ["run-a", "run-b"], "metrics": {"baseline": 0.5, "candidate": 0.6}},
     )
     args = _live_verdict_args(spec_path, str(ledger_path)) + [
         "--candidate", str(sidecar),
@@ -357,6 +359,139 @@ def test_live_verdict_hash_mismatch_exits_2(tmp_path, capsys):
     rc = main(_live_verdict_args(spec_path) + ["--insight-refs", f"attr:{attr_file}@{bad_hash}"])
     assert rc == 2
     assert "hash mismatch" in capsys.readouterr().err
+
+
+# ---- E: economic constraints (live part) ----
+
+
+def _spec_with_constraints(**overrides) -> ExperimentSpec:
+    spec_dict = copy.deepcopy(VALID_SPEC)
+    spec_dict["objective"]["constraints"] = [
+        {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline", "tolerance_pct": 0.0}
+    ]
+    spec_dict["objective"].update(overrides)
+    return ExperimentSpec.from_dict(spec_dict)
+
+
+def _compare_with_costs(candidate_cost):
+    class FakeCli:
+        def compare(self, base, cand):
+            return {
+                "baseline": {"capability.score": 0.80, "total_spend_usd": 5.0},
+                "candidate": {"capability.score": 0.86, "total_spend_usd": candidate_cost},
+            }
+
+    return FakeCli()
+
+
+def test_live_verdict_constraint_within_baseline_passes():
+    result = live_verdict_from_runs(
+        spec=_spec_with_constraints(),
+        cli=_compare_with_costs(5.0),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+    )
+    assert result["verdict"] == "PASS"
+    [constraint] = result["constraints"]
+    assert constraint["status"] == "pass"
+    assert constraint["bound_value"] == 5.0
+
+
+def test_live_verdict_constraint_violated_fails():
+    result = live_verdict_from_runs(
+        spec=_spec_with_constraints(),
+        cli=_compare_with_costs(6.0),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+    )
+    assert result["verdict"] == "FAIL"
+    assert "constraint cost-not-worse violated" in result["reasons"][0]
+    assert result["constraints"][0]["status"] == "violated"
+
+
+def test_live_verdict_unknown_cost_is_inconclusive_not_zero():
+    # verified: sr-bench serializes unknown usage as null; an unevaluable
+    # constraint is missing evidence, never a violation (and never free)
+    result = live_verdict_from_runs(
+        spec=_spec_with_constraints(),
+        cli=_compare_with_costs(None),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert "not evaluable" in result["reasons"][0]
+    assert result["constraints"][0]["status"] == "not_evaluated"
+
+
+def test_guard_violation_is_listed_before_constraint_violation():
+    result = live_verdict_from_runs(
+        spec=_spec_with_constraints(),
+        cli=_compare_with_costs(6.0),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[{"name": "pii-recall-floor", "candidate": 0.5, "baseline": 0.96}],
+    )
+    assert result["verdict"] == "FAIL"
+    assert result["reasons"][0].startswith("guard floor violated")
+    assert any("constraint cost-not-worse violated" in reason for reason in result["reasons"])
+
+
+def test_numeric_bound_and_tolerance_relax_in_permissive_direction():
+    from recipe_lab.verdict import evaluate_verdict
+
+    # tolerance 10% on an lte baseline bound of 5.0 -> 5.5 allowed
+    evidence = [{"name": "c", "metric": "m", "op": "lte", "bound": "baseline", "tolerance_pct": 10.0, "baseline": 5.0, "candidate": 5.4}]
+    result = evaluate_verdict(
+        baseline_metric=0.8, candidate_metric=0.9, direction="maximize",
+        min_improvement_pct=0.0, guards=[], incomplete_reasons=[], constraints=evidence,
+    )
+    assert result.verdict == "PASS" and result.constraints[0]["bound_value"] == 5.5
+    # gte with 10% tolerance on a numeric bound of 0.9 -> 0.81 required
+    evidence = [{"name": "c", "metric": "m", "op": "gte", "bound": 0.9, "tolerance_pct": 10.0, "baseline": 1.0, "candidate": 0.85}]
+    result = evaluate_verdict(
+        baseline_metric=0.8, candidate_metric=0.9, direction="maximize",
+        min_improvement_pct=0.0, guards=[], incomplete_reasons=[], constraints=evidence,
+    )
+    assert result.verdict == "PASS" and result.constraints[0]["bound_value"] == pytest.approx(0.81)
+
+
+def test_live_cli_record_carries_constraint_evidence(monkeypatch, tmp_path, capsys):
+    from recipe_lab import cli
+
+    spec_path = _write_splits_dataset(tmp_path)
+    spec_dict = yaml.safe_load(Path(spec_path).read_text(encoding="utf-8"))
+    spec_dict["objective"]["constraints"] = [
+        {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline", "tolerance_pct": 0.0}
+    ]
+    spec_path = tmp_path / "spec-constraints.yaml"
+    spec_path.write_text(yaml.safe_dump(spec_dict), encoding="utf-8")
+
+    def fake_verdict(**kwargs):
+        return {
+            "verdict": "PASS",
+            "reasons": [],
+            "gates": {"pii-recall-floor": "pass"},
+            "constraints": [
+                {
+                    "name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte",
+                    "bound": "baseline", "tolerance_pct": 0.0,
+                    "baseline": 5.0, "candidate": 5.0, "bound_value": 5.0, "status": "pass",
+                }
+            ],
+            "bench_refs": ["run-a", "run-b"],
+            "metrics": {"baseline": 0.5, "candidate": 0.6},
+        }
+
+    monkeypatch.setattr(cli, "live_verdict_from_runs", fake_verdict)
+    ledger_path = tmp_path / "ledger.jsonl"
+    assert main(_live_verdict_args(str(spec_path), str(ledger_path)) + ["--final"]) == 0
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    constraint = rows[-1]["constraints"]["cost-not-worse"]
+    assert constraint["status"] == "pass"
+    assert constraint["candidate"] == 5.0
 
 
 # ---- B: --split quarantine gate on the CLI ----
@@ -393,6 +528,7 @@ def test_live_verdict_final_cites_frozen_test(monkeypatch, tmp_path, capsys):
             "verdict": "PASS",
             "reasons": [],
             "gates": {},
+            "constraints": [],
             "bench_refs": ["run-a", "run-b"],
             "metrics": {"baseline": 0.5, "candidate": 0.6},
         }

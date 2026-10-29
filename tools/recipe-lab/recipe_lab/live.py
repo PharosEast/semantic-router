@@ -177,6 +177,35 @@ def _pair_metrics(
     return None, None
 
 
+def _constraint_evidence(
+    comparison: Any,
+    constraints: list[Constraint],
+    incomplete: list[str],
+) -> list[dict[str, Any]]:
+    """Measure every declared constraint metric on both arms (E).
+
+    The same pairing rules as the objective metric apply (see
+    `_pair_metrics`). Unknown values stay None: sr-bench serializes
+    unknown spend as null and an unevaluable constraint is INCONCLUSIVE,
+    never zero.
+    """
+    evidence: list[dict[str, Any]] = []
+    for constraint in constraints:
+        baseline_value, candidate_value = _pair_metrics(comparison, constraint.metric, incomplete)
+        evidence.append(
+            {
+                "name": constraint.name,
+                "metric": constraint.metric,
+                "op": constraint.op,
+                "bound": constraint.bound,
+                "tolerance_pct": constraint.tolerance_pct,
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+            }
+        )
+    return evidence
+
+
 def live_verdict_from_runs(
     *,
     spec: ExperimentSpec,
@@ -198,6 +227,7 @@ def live_verdict_from_runs(
     baseline_metric, candidate_metric = _pair_metrics(comparison, spec.objective.metric_key, incomplete)
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
+    constraint_evidence = _constraint_evidence(comparison, list(spec.objective.constraints), incomplete)
     verdict = evaluate_verdict(
         baseline_metric=baseline_metric,
         candidate_metric=candidate_metric,
@@ -205,6 +235,7 @@ def live_verdict_from_runs(
         min_improvement_pct=spec.objective.min_improvement_pct,
         guards=guards,
         incomplete_reasons=incomplete,
+        constraints=constraint_evidence,
     )
     reasons = list(verdict.reasons)
     if undeclared:
@@ -221,6 +252,7 @@ def live_verdict_from_runs(
             "candidate": candidate_metric,
         },
         "gates": {g.name: ("pass" if g.passed else ("incomplete" if not g.evaluated else "fail")) for g in guards},
+        "constraints": verdict.constraints,
         "undeclared_measurements": undeclared,
         "bench_refs": [baseline_run_id, candidate_run_id],
     }
