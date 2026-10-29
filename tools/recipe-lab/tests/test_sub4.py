@@ -33,6 +33,23 @@ def test_report_replays_ledger_and_flags_missing_evidence():
     assert "Replay inconsistencies" in report
 
 
+def test_report_flags_mixed_dataset_hashes():
+    other = dict(REPLAY, round=3, dataset_hash="sha256:bb")
+    report = render_run_report([REPLAY, LIVE, other])
+    assert "Cross-dataset warning" in report
+    assert "NOT directly comparable" in report
+    assert "sha256:bb" in report
+
+
+def test_promotion_draft_from_pass_record():
+    from recipe_lab.report import render_promotion_draft
+
+    draft = render_promotion_draft(LIVE)
+    assert "DRAFT" in draft and "human review" in draft.lower()
+    assert "c1.yaml" in draft and "run-a" in draft
+    assert "Standard holdout" in draft
+
+
 def test_next_context_carries_untrusted_header():
     context = render_next_context([REPLAY, LIVE])
     assert context.startswith("# recipe-lab knowledge context")

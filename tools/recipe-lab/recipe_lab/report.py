@@ -10,6 +10,7 @@ so instead of papering over it.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from .ledger import Ledger
@@ -34,6 +35,7 @@ def _metrics_line(metrics: dict[str, Any]) -> str:
 def render_run_report(records: list[dict[str, Any]]) -> str:
     lines = ["# recipe-lab run report", "", "| round | tier | verdict | metrics | gates | bench_refs |", "|---|---|---|---|---|---|"]
     inconsistencies: list[str] = []
+    hashes = sorted({r.get("dataset_hash") for r in records if r.get("dataset_hash")})
     for record in records:
         gates = record.get("gates")
         gates_text = "-" if not gates else ", ".join(f"{k}={v}" for k, v in gates.items())
@@ -51,6 +53,16 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
                 inconsistencies.append(f"round {record.get('round')}: live {record.get('verdict')} with fewer than two bench_refs")
         if record.get("coverage_warning"):
             lines.append(f"| {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - |")
+    if len(hashes) > 1:
+        lines += [
+            "",
+            "## Cross-dataset warning",
+            "",
+            f"This ledger mixes {len(hashes)} dataset hashes; metrics across those",
+            "rounds are NOT directly comparable:",
+            "",
+        ]
+        lines += [f"- {h}" for h in hashes]
     if inconsistencies:
         lines += ["", "## Replay inconsistencies", ""]
         lines += [f"- {item}" for item in inconsistencies]
