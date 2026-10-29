@@ -1,4 +1,4 @@
-"""recipe-lab CLI: attribute / collect-replays / plan.
+"""recipe-lab CLI: plan / attribute / collect-replays.
 
 This first slice covers Sub-issue 1 (misroute attribution) plus the contract
 preview. The replay-tier loop, answer bank, proposers and the ledger arrive
