@@ -3,6 +3,7 @@ objective:
   metric_key: capability.score
   direction: maximize
   min_improvement_pct: 1.0
+  replay_metric: routed_accuracy
 workload:
   # Rendered by the smoke scripts: manifest is the labeled cases JSONL
   # (absolute, since the rendered spec lives in the run dir) and content_hash

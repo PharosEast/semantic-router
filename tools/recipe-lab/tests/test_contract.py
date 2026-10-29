@@ -21,6 +21,7 @@ def test_valid_spec_roundtrip():
     spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC))
     assert spec.objective.metric_key == "capability.score"
     assert spec.objective.direction == "maximize"
+    assert spec.objective.replay_metric == "routed_accuracy"
     assert spec.workload.profile == "quick"
     assert spec.oracle_policy.expected("math") == "local/model-math"
     assert len(spec.gates) == 1
@@ -63,6 +64,17 @@ def test_negative_min_improvement_rejected():
     raw = copy.deepcopy(VALID_SPEC)
     raw["objective"]["min_improvement_pct"] = -0.5
     with pytest.raises(ContractError, match="min_improvement_pct"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_replay_metric_default_and_reject():
+    # A1: replay_metric defaults to routed_accuracy; unknown values rejected
+    raw = copy.deepcopy(VALID_SPEC)
+    del raw["objective"]["replay_metric"]
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.objective.replay_metric == "routed_accuracy"
+    raw["objective"]["replay_metric"] = "latency_p99"
+    with pytest.raises(ContractError, match="replay_metric"):
         ExperimentSpec.from_dict(raw)
 
 
