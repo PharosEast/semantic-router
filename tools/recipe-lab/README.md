@@ -48,6 +48,7 @@ pip install -e '.[dev]'
 | `hash` | 计算题集冻结身份：sha256 原始字节（A4） |
 | `split` | 组级确定性三分 calib/dev/frozen_test（B） |
 | `attribute` | E1/E2/E3 误路由归因（`--split` + 可选 `--cases` 哈希校验） |
+| `attribute-session` | 会话级 agentic 归因：lane_flap / tool_loop_interrupted / selection_failed（sub-6 P2） |
 | `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签 |
 | `bank` | 构建 / 应用 per-case/per-model 答案库 |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
