@@ -661,6 +661,8 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             split=args.split,
             reasons=result["reasons"],
             gates=result["gates"],
+            # E: the declared constraints' measured evidence, for report replay.
+            constraints={c["name"]: c for c in result["constraints"]},
             bench_refs=result["bench_refs"],
             attribution_delta=None,
             attribution_ref=args.attribution_ref,

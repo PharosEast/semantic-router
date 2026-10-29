@@ -6,6 +6,17 @@ objective:
   # A1: the replay tier ranks candidates by this contracted metric (ledger key);
   # metric_key stays the live sr-bench metric.
   replay_metric: routed_accuracy
+  # E: economic constraints - guards (gates:) are safety vetoes, constraints
+  # are economic conditions. Verified sr-bench compare cost fields live on
+  # the baseline_targets/candidate_targets entries: total_spend_usd,
+  # cache_neutral_cost_usd, cost_usd, evaluation_cost_usd. Unknown usage is
+  # serialized as null - an unevaluable constraint is INCONCLUSIVE, never 0.
+  constraints:
+    - name: cost-not-worse
+      metric: total_spend_usd
+      op: lte
+      bound: baseline   # or a number
+      tolerance_pct: 0.0
 workload:
   # A4 dataset identity: content_hash = "sha256:" + sha256(<manifest raw bytes>),
   # manifest is the dataset JSONL path relative to this spec file.
