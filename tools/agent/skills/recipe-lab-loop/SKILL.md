@@ -27,17 +27,26 @@ Drive the closed loop with `tools/recipe-lab/recipe_lab/cli.py` (installed as
 
 1. Validate the experiment contract: `recipe-lab plan --spec spec.yaml`.
    Success: normalized spec JSON. Failure: fix the spec per the contract error.
-2. Read the evidence: `recipe-lab next --ledger ledger.jsonl --output context.md`.
-   Read the untrusted-material header and the ledger tail before proposing.
+2. Read the evidence: `recipe-lab next --spec spec.yaml --ledger ledger.jsonl
+   --output context.md` (add `--diagnosis diag/diagnosis.json` when a
+   diagnosis artifact exists). Read the untrusted-material header, then the
+   contract summary, best replay candidate, last live verdict, attribution
+   summary and the citable insight-ref list it exports (G3).
 3. Propose one candidate: edit one recipe variable in a config revision and
-   note which ledger rounds motivated it (future insight_refs).
+   cite the motivating evidence with `--insight-refs`, using the exact refs
+   from `next`'s citable list (`rec-<id>`, `bench:<run_id>`,
+   `attr:<path>@sha256:<hex>`, `diag:<path>@sha256:<hex>#<anchor>`).
 4. Validate the candidate: `vllm-sr config validate` on the revision.
    Failure: fix the config; never evaluate an invalid candidate.
-5. Evaluate in the replay tier: `recipe-lab run --tier replay --candidates <config>
-   --proposer agent:<id>` against the answer bank. Records land in the ledger.
+5. Evaluate in the replay tier: `recipe-lab run --spec spec.yaml --split dev
+   --cases <split.jsonl> --bank bank.jsonl --candidates <config>
+   --proposer agent:<id> --ledger ledger.jsonl --router-bin ... --mock-backend
+   ...` against the answer bank. Records land in the ledger.
 6. For the final gate: run sr-bench preview/live for baseline and candidate,
-   then `recipe-lab live-verdict --baseline-run-id ... --candidate-run-id ...
-   --guards guards.jsonl --ledger ledger.jsonl`.
+   then `recipe-lab live-verdict --spec spec.yaml --baseline-run-id ...
+   --candidate-run-id ... --guard-measurements measurements.jsonl
+   --candidate cand-001.json --ledger ledger.jsonl` (add `--split frozen_test
+   --final` only for the promotion verdict).
 7. Read the outcome with `recipe-lab report --ledger ledger.jsonl --output
    report.md`; stop when the objective is met, the budget is exhausted, or
    evidence is repeatedly incomplete.
