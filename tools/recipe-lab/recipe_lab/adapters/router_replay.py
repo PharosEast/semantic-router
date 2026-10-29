@@ -6,6 +6,21 @@ and exposes them through the management API:
 
     GET /api/v1/observability/replays?showDetails=true
 
+The list endpoint is paginated: `limit` (default 20, max 100) and `offset`
+query parameters, and the response body carries `data`, `has_more` and
+`next_offset` (present only while has_more is true). A single unpaginated
+GET therefore returns at most the first page and silently truncates, so
+fetch_replays follows next_offset until the list is drained.
+
+Verified against the router source (pkg/decision engine + classification
+tests): `signal_values` / `signal_confidences` keys are `<type>:<name>`,
+e.g. `decision:difficulty` or `projection:balance_reasoning`. For choice-
+type decision signals the value is stored per choice under
+`decision:<name>:<choice>` (e.g. `decision:domain:code` -> probability of
+that choice), while score-type signals keep the numeric score under
+`decision:<name>` (e.g. `decision:difficulty` -> 0..4). `decision_tier`
+carries the routing tier as an integer when present.
+
 This adapter pulls those records and joins them against a hand-labeled case
 list (prompt -> truth label) to produce attribution input records:
 
@@ -13,7 +28,13 @@ list (prompt -> truth label) to produce attribution input records:
      "routed": <record.selected_model>, "family": ..., "answer_ok": null}
 
 The row field is matched_decision (F1): with string-only truth, a mismatched
-decision is decision_mismatch, never E1_signal.
+decision is decision_mismatch, never E1_signal. Rows carry the signal
+evidence (signal_values / signal_confidences / decision_tier) verbatim so
+later diagnostics do not need another fetch.
+
+`records_to_rows` is the unlabeled path: no labels, no join, one row per
+record (including records without a prompt) for distribution and coverage
+diagnostics (Sub-issue 7's diagnose consumes these).
 
 answer_ok stays null here: correctness is joined later from saved answers
 (Sub-issue 2's answer bank). The evidence-first rule handles the null.
@@ -37,21 +58,8 @@ class ReplayFetchError(RuntimeError):
     """Raised when the management API cannot be reached or returns bad JSON."""
 
 
-def fetch_replays(
-    management_url: str,
-    *,
-    show_details: bool = True,
-    timeout: float = 30.0,
-    api_key_env: str | None = None,
-) -> list[dict[str, Any]]:
-    """Fetch replay records from the router management API.
-
-    `management_url` is the router management base URL, e.g.
-    http://127.0.0.1:8080. Returns the list of RoutingRecord dicts.
-    """
-    url = management_url.rstrip("/") + REPLAYS_PATH
-    if show_details:
-        url += "?showDetails=true"
+def _get_json(url: str, timeout: float, api_key_env: str | None) -> Any:
+    """GET one JSON document from the management API (shared error mapping)."""
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
     import os
 
@@ -59,18 +67,50 @@ def fetch_replays(
         request.add_header("Authorization", f"Bearer {os.environ[api_key_env]}")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = json.loads(response.read().decode("utf-8"))
+            return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
         raise ReplayFetchError(f"management API returned HTTP {exc.code}: {url}") from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ReplayFetchError(f"cannot reach management API at {url}: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise ReplayFetchError(f"management API returned non-JSON body: {exc}") from exc
+        raise ReplayFetchError(f"management API returned non-JSON body: {url}") from exc
 
-    records = payload.get("data", payload) if isinstance(payload, dict) else payload
-    if not isinstance(records, list):
-        raise ReplayFetchError("unexpected replay list payload: expected {'data': [...]}" )
-    return [record for record in records if isinstance(record, dict)]
+
+def fetch_replays(
+    management_url: str,
+    *,
+    show_details: bool = True,
+    timeout: float = 30.0,
+    api_key_env: str | None = None,
+    page_size: int = 50,
+) -> list[dict[str, Any]]:
+    """Fetch all replay records from the router management API.
+
+    `management_url` is the router management base URL, e.g.
+    http://127.0.0.1:8080. The endpoint pages its responses (default limit
+    20, max 100), so this follows `next_offset` while `has_more` is true;
+    a single unpaginated GET would silently truncate to the first page.
+    Returns the list of RoutingRecord dicts.
+    """
+    base = management_url.rstrip("/") + REPLAYS_PATH
+    records: list[dict[str, Any]] = []
+    offset = 0
+    while True:
+        url = f"{base}?limit={page_size}&offset={offset}"
+        if show_details:
+            url += "&showDetails=true"
+        payload = _get_json(url, timeout, api_key_env)
+        page = payload.get("data", payload) if isinstance(payload, dict) else payload
+        if not isinstance(page, list):
+            raise ReplayFetchError("unexpected replay list payload: expected {'data': [...]}" )
+        records.extend(record for record in page if isinstance(record, dict))
+        if not isinstance(payload, dict) or not payload.get("has_more"):
+            break
+        next_offset = payload.get("next_offset")
+        if next_offset is None or int(next_offset) <= offset:
+            break  # guard against a non-advancing cursor
+        offset = int(next_offset)
+    return records
 
 
 @dataclass(frozen=True)
@@ -140,8 +180,36 @@ def record_to_case(
         "family": family,
         "answer_ok": None,  # correctness is joined later from the answer bank
         "request_id": str(request_id),
+        "signal_values": _record_field(record, "signal_values", "SignalValues") or {},
+        "signal_confidences": _record_field(record, "signal_confidences", "SignalConfidences") or {},
+        "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
     }
     return row, "matched"
+
+
+def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Flatten replay records into diagnostic rows (no labels, no join).
+
+    One row per record, including records without a prompt: coverage and
+    distribution diagnostics want every request, not only labeled ones.
+    Never raises on skip reasons; callers that need the labeled join should
+    use records_to_cases instead.
+    """
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        prompt = _record_field(record, "prompt", "Prompt")
+        rows.append(
+            {
+                "request_id": str(_record_field(record, "request_id", "RequestID") or ""),
+                "matched_decision": _record_field(record, "decision", "Decision") or "",
+                "routed": _record_field(record, "selected_model", "SelectedModel") or "",
+                "prompt": prompt if isinstance(prompt, str) else "",
+                "signal_values": _record_field(record, "signal_values", "SignalValues") or {},
+                "signal_confidences": _record_field(record, "signal_confidences", "SignalConfidences") or {},
+                "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
+            }
+        )
+    return rows
 
 
 def records_to_cases(
