@@ -130,3 +130,22 @@ def test_ledger_top_metric_key_and_spec_are_exclusive(tmp_path, capsys):
         main(["ledger", "top", "--file", str(ledger)])
     assert exc2.value.code == 2
     capsys.readouterr()
+
+
+def test_run_round_beyond_budget_exits_2(tmp_path, capsys):
+    # A5: budget.rounds is a hard cap; the check fires before any stack work
+    spec_path, cases = _write_frozen_spec(tmp_path)
+    rc = main(
+        [
+            "run", "--spec", spec_path, "--round", "6",
+            "--cases", str(cases),
+            "--bank", str(tmp_path / "bank.json"),
+            "--ledger", str(tmp_path / "ledger.jsonl"),
+            "--candidates", str(tmp_path / "cands"),
+            "--router-bin", "/bin/true",
+            "--mock-backend", str(tmp_path / "mock.py"),
+            "--output-dir", str(tmp_path / "out"),
+        ]
+    )
+    assert rc == 2
+    assert "budget exhausted" in capsys.readouterr().err

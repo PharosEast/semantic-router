@@ -73,6 +73,15 @@ def test_replay_metric_default_and_reject():
         ExperimentSpec.from_dict(raw)
 
 
+def test_evaluation_section_is_retired():
+    # A5: replay and live are separate commands; the contract refuses the key
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["evaluation"] = {"search_tier": "replay", "final_tier": "live"}
+    with pytest.raises(ContractError, match="'evaluation' is retired"):
+        ExperimentSpec.from_dict(raw)
+    assert "evaluation" not in ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC)).to_dict()
+
+
 def test_empty_oracle_policy_rejected():
     raw = copy.deepcopy(VALID_SPEC)
     raw["attribution"]["oracle_policy"] = {}
