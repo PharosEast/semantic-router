@@ -23,6 +23,7 @@ SR_BUILD="${SR_BUILD:-$REPO/build}"
 ROUTER_BIN="${ROUTER_BIN:-$SR_BUILD/bin/semantic-router}"
 WORK_ROOT="${WORK_ROOT:-$REPO/.tmp-smoke-runs}"
 DATASET_DIR="${DATASET_DIR:-$WORK_ROOT/dataset/mmlu-pro}"
+PYBIN="${PYTHON_BIN:-$RL/python}"
 WORK="$WORK_ROOT/live-smoke-$(date +%m%d%H%M%S)"
 mkdir -p "$WORK"
 echo "WORK=$WORK"
@@ -38,6 +39,12 @@ trap cleanup EXIT
   --dataset-dir "$DATASET_DIR" \
   --output-dir "$WORK" \
   --config-hash 0000000000000000000000000000000000000000000000000000000000000000 || exit 1
+
+# 1b. render the experiment spec: the workload identity is the labeled cases
+#     file hashed at runtime (A4) - the template ships with placeholders
+CASES_HASH=$("$RL/recipe-lab" hash --file "$WORK/cases-mcq.jsonl" | "$PYBIN" -c "import json,sys; print(json.load(sys.stdin)['content_hash'])")
+sed -e "s|\${CASES_FILE}|$WORK/cases-mcq.jsonl|g" -e "s|\${CASES_HASH}|$CASES_HASH|g" \
+  "$ASSETS/smoke-spec.yaml.tmpl" > "$WORK/spec.yaml"
 
 # 2. mock backend with the capability table, then the router
 "$PYBIN" "$ASSETS/mock_backend.py" --port 8000 \
@@ -96,7 +103,7 @@ cat > "$WORK/candidate.json" <<'EOF'
 {"kind":"config","ref":"smoke-config@main","change_summary":"live smoke candidate","provenance":{"proposer":"threshold-search","insight_refs":[]}}
 EOF
 "$RL/recipe-lab" live-verdict \
-  --spec "$ASSETS/smoke-spec.yaml" \
+  --spec "$WORK/spec.yaml" \
   --baseline-run-id "$BASE_ID" \
   --candidate-run-id "$CAND_ID" \
   --ledger "$WORK/ledger.jsonl" \
