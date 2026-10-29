@@ -677,6 +677,11 @@ def cmd_ledger(args: argparse.Namespace) -> int:
 def cmd_live_verdict(args: argparse.Namespace) -> int:
     """Compare two sr-bench runs and record the live-tier verdict."""
     spec = _load_spec(args.spec)
+    # B: frozen_test is quarantined; only the --final promotion verdict may
+    # cite it. Every other split goes through the normal A4 re-hash gate.
+    if args.split == "frozen_test" and not args.final:
+        raise ContractError("frozen_test is quarantined; pass --final for the promotion verdict")
+    dataset_hash = spec.verify_workload(split=args.split)
     try:
         guards_rows = [json.loads(line) for line in Path(args.guards).read_text(encoding="utf-8").splitlines() if line.strip()] if args.guards else []
         guards = guards_from_rows(guards_rows)
@@ -707,7 +712,8 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             baseline_ref=args.baseline_run_id,
             metrics={spec.objective.metric_key: result["metrics"]["candidate"]},
             verdict=result["verdict"],
-            dataset_hash=spec.workload.content_hash,
+            dataset_hash=dataset_hash,
+            split=args.split,
             reasons=result["reasons"],
             gates=result["gates"],
             bench_refs=result["bench_refs"],
@@ -1079,6 +1085,17 @@ def build_parser() -> argparse.ArgumentParser:
         help="compare two sr-bench runs and record the live-tier three-state verdict",
     )
     p_live.add_argument("--spec", required=True, help="experiment spec YAML")
+    p_live.add_argument(
+        "--split",
+        default="dev",
+        choices=["calib", "dev", "frozen_test"],
+        help="workload split the sr-bench runs were produced on (B)",
+    )
+    p_live.add_argument(
+        "--final",
+        action="store_true",
+        help="promotion verdict; the only consumer allowed to cite the frozen_test split (B)",
+    )
     p_live.add_argument("--baseline-run-id", required=True, help="sr-bench baseline run ID")
     p_live.add_argument("--candidate-run-id", required=True, help="sr-bench candidate run ID")
     p_live.add_argument("--guards", default=None, help="guards JSONL (name/metric/value/floor) from model_eval")
