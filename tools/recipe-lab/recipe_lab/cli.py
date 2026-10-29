@@ -702,6 +702,17 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
     # A3: measurement schema violations are contract errors (exit 2); a
     # `floor` key in the file must never silently override spec.gates.
     measurements = measurements_from_rows(raw_measurements)
+    # G2: fail fast on unverifiable insight references (ContractError -> exit
+    # 2); a rec- reference needs the ledger it is resolved against.
+    ledger = Ledger(args.ledger) if args.ledger else None
+    insight_refs = resolve_insight_refs(parse_insight_refs(args.insight_refs), ledger)
+    candidate_row = candidate_row or {
+        "kind": "config",
+        "ref": args.candidate_run_id,
+        "change_summary": "",
+        "provenance": {"proposer": "external", "insight_refs": []},
+    }
+    merge_insight_refs(candidate_row.setdefault("provenance", {}), insight_refs)
 
     cli = SrbenchCli(bin=args.srbench_bin, url=args.srbench_url, store=args.srbench_store, timeout_s=args.timeout)
     try:
@@ -716,12 +727,10 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
         raise SystemExit(f"live verdict error: {exc}") from exc
 
     if args.ledger:
-        ledger = Ledger(args.ledger)
         record = LedgerRecord(
             round=args.round,
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-            candidate=candidate_row
-            or {"kind": "config", "ref": args.candidate_run_id, "change_summary": "", "provenance": {"proposer": "external", "insight_refs": []}},
+            candidate=candidate_row,
             tier="live",
             baseline_ref=args.baseline_run_id,
             metrics={spec.objective.metric_key: result["metrics"]["candidate"]},
@@ -1118,6 +1127,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="guard measurements JSONL (name/candidate/baseline only; floors come from spec.gates, A3)",
     )
     p_live.add_argument("--candidate", default=None, help="candidate JSON file for the ledger record")
+    p_live.add_argument(
+        "--insight-refs",
+        default=None,
+        help="comma-separated provenance refs merged into the candidate: rec-<id>, bench:<run_id>, attr:<path>@sha256:<hex>, diag:<path>@sha256:<hex>#<anchor> (G2)",
+    )
     p_live.add_argument(
         "--attribution-ref",
         default=None,

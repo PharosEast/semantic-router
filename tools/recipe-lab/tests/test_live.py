@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -264,6 +265,98 @@ def test_live_verdict_rejects_floor_in_measurement_file(tmp_path, capsys):
         == 2
     )
     assert "floor" in capsys.readouterr().err
+
+
+# ---- G2: --insight-refs on live-verdict ----
+
+
+def _seed_replay_ledger(tmp_path) -> tuple[str, str]:
+    """An empty ledger with one replay record; returns (ledger_path, record_id)."""
+    from recipe_lab.ledger import Ledger, LedgerRecord
+
+    ledger_path = tmp_path / "seed-ledger.jsonl"
+    stored = Ledger(ledger_path).append(
+        LedgerRecord(
+            round=1,
+            ts="2026-10-29T00:00:00Z",
+            candidate={"kind": "config", "ref": "seed.yaml", "change_summary": "s", "provenance": {"proposer": "p", "insight_refs": []}},
+            tier="replay",
+            baseline_ref="base@main",
+            metrics={"routed_accuracy": 0.9},
+            verdict="RANKED",
+            dataset_hash="sha256:" + "0" * 64,
+        )
+    )
+    return str(ledger_path), stored["record_id"]
+
+
+def _live_verdict_args(spec_path: str, ledger: str | None = None) -> list[str]:
+    args = ["live-verdict", "--spec", spec_path, "--baseline-run-id", "run-a", "--candidate-run-id", "run-b"]
+    if ledger:
+        args += ["--ledger", ledger]
+    return args
+
+
+def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(monkeypatch, tmp_path, capsys):
+    from recipe_lab import cli
+
+    spec_path = str(_write_splits_dataset(tmp_path))
+    seed_ledger, record_id = _seed_replay_ledger(tmp_path)
+    ledger_path = Path(seed_ledger)  # rec- refs resolve against --ledger itself
+    attr_file = tmp_path / "attr.json"
+    attr_file.write_text("{}", encoding="utf-8")
+    diag_file = tmp_path / "diagnosis.json"
+    diag_file.write_text("{}", encoding="utf-8")
+    sidecar = tmp_path / "cand.json"
+    sidecar.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1.yaml", "change_summary": "s", "provenance": {"proposer": "agent", "insight_refs": ["bench:run-a"]}}),
+        encoding="utf-8",
+    )
+    attr_hash = hashlib.sha256(attr_file.read_bytes()).hexdigest()
+    diag_hash = hashlib.sha256(diag_file.read_bytes()).hexdigest()
+    refs = ",".join(
+        [
+            record_id,
+            "bench:run-a",  # already on the sidecar -> deduped
+            f"attr:{attr_file}@sha256:{attr_hash}",
+            f"diag:{diag_file}@sha256:{diag_hash}#threshold.domain_code_complex",
+        ]
+    )
+    monkeypatch.setattr(
+        cli,
+        "live_verdict_from_runs",
+        lambda **kwargs: {"verdict": "PASS", "reasons": [], "improvement_pct": 1.0, "gates": {}, "bench_refs": ["run-a", "run-b"], "metrics": {"baseline": 0.5, "candidate": 0.6}},
+    )
+    args = _live_verdict_args(spec_path, str(ledger_path)) + [
+        "--candidate", str(sidecar),
+        "--insight-refs", refs,
+    ]
+    assert main(args) == 0
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows[-1]["candidate"]["provenance"]["insight_refs"] == [
+        "bench:run-a",
+        record_id,
+        f"attr:{attr_file}@sha256:{attr_hash}",
+        f"diag:{diag_file}@sha256:{diag_hash}#threshold.domain_code_complex",
+    ]
+
+
+def test_live_verdict_unknown_record_ref_exits_2(tmp_path, capsys):
+    seed_ledger, _ = _seed_replay_ledger(tmp_path)
+    spec_path = str(_write_splits_dataset(tmp_path))
+    rc = main(_live_verdict_args(spec_path, seed_ledger) + ["--insight-refs", "rec-000000000000"])
+    assert rc == 2
+    assert "not found in ledger" in capsys.readouterr().err
+
+
+def test_live_verdict_hash_mismatch_exits_2(tmp_path, capsys):
+    spec_path = str(_write_splits_dataset(tmp_path))
+    attr_file = tmp_path / "attr.json"
+    attr_file.write_text("{}", encoding="utf-8")
+    bad_hash = "sha256:" + "f" * 64
+    rc = main(_live_verdict_args(spec_path) + ["--insight-refs", f"attr:{attr_file}@{bad_hash}"])
+    assert rc == 2
+    assert "hash mismatch" in capsys.readouterr().err
 
 
 # ---- B: --split quarantine gate on the CLI ----
