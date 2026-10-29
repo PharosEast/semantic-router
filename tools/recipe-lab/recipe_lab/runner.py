@@ -225,9 +225,11 @@ def attribution_delta(baseline_summary: dict, candidate_summary: dict) -> dict[s
 
     e1_b, e1_c = count(baseline_summary, "E1_signal"), count(candidate_summary, "E1_signal")
     e2_b, e2_c = count(baseline_summary, "E2_policy"), count(candidate_summary, "E2_policy")
+    mm_b, mm_c = count(baseline_summary, "decision_mismatch"), count(candidate_summary, "decision_mismatch")
     return {
         "e1_fixed": max(0, e1_b - e1_c),
         "e2_fixed": max(0, e2_b - e2_c),
+        "decision_mismatch_fixed": max(0, mm_b - mm_c),
         "e3_remaining": count(candidate_summary, "E3_capability"),
     }
 
