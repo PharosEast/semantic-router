@@ -3,8 +3,8 @@
 Closed-loop experiments for semantic-router routing recipes（RSI 工作台）。
 
 本层覆盖 replay-tier 闭环：冻结题集身份（A4）→ 题集三分（B）→ 答案库与归因 →
-候选提议（信号级 / 规则级）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2）。
-live 层随 Sub-issue 3 到来。
+候选提议（信号级 / 规则级）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2），
+以及 live 层终裁 `live-verdict`（守卫以契约为准 A3、洞察引用 G2、经济约束 E）。
 
 ## 安装
 
@@ -51,6 +51,7 @@ pip install -e '.[dev]'
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
 | `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
+| `live-verdict` | 比较两个 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
 
 常用示例：
 
@@ -74,17 +75,42 @@ recipe-lab run --spec spec.yaml --split dev --cases splits/dev.jsonl \
 # 台账
 recipe-lab ledger show --file ledger.jsonl --tier replay --json
 recipe-lab ledger top --file ledger.jsonl --spec spec.yaml
+
+# live 终裁：比较两个现成 sr-bench run（守卫测量由 model_eval 离线产出）
+recipe-lab live-verdict --spec spec.yaml --baseline-run-id run-a \
+  --candidate-run-id run-b --guard-measurements measurements.jsonl \
+  --candidate cand-001.json --insight-refs rec-<id>,bench:run-a
+# 晋升终裁（唯一允许引用 frozen_test 的路径）
+recipe-lab live-verdict --spec spec.yaml --baseline-run-id run-a \
+  --candidate-run-id run-b --split frozen_test --final
 ```
 
 ## 洞察引用（--insight-refs，G2）
 
-`run` 与 `ledger append` 接受逗号分隔的 provenance 引用，合并进记录的
+`run`、`ledger append` 与 `live-verdict` 接受逗号分隔的 provenance 引用，合并进记录的
 `candidate.provenance.insight_refs`（去重）；不可验证的引用直接拒绝（exit 2）：
 
 - `rec-<id>`：台账里已存在的 record_id
 - `bench:<run_id>`：基准 run id（仅格式校验）
 - `attr:<path>@sha256:<hex>`：归因产物，哈希必须与文件字节一致
 - `diag:<path>@sha256:<hex>#<anchor>`：诊断产物，锚定到文件内某个位置
+
+## 守卫与约束（live-verdict）
+
+- **守卫以契约为准（A3）**：地板只来自 `spec.gates`（`{name, metric, floor}`）。
+  `--guard-measurements` 文件只带测量值（`name` / `candidate` / `baseline`，由 model_eval
+  守卫工具离线产出）；文件里出现 `floor` 视为绕过契约，exit 2。`floor: baseline`
+  解析为测量出的 baseline 值。缺测量 / 缺 baseline 值 / 缺 candidate 值 → 该 gate
+  未评估，裁决 INCONCLUSIVE；契约未声明的测量名列出并说明，但不参与否决；
+  `gates: []` 合法，输出显式 `"gates": {}` 并带 "no guard declared" 提示。
+  replay 记录不评守卫，声明的 gate 全部记为 `not_evaluated`。
+- **经济约束（E）**：`objective.constraints`（`{name, metric, op, bound, tolerance_pct}`，
+  op 为 `gte`/`lte`，bound 为数字或 `baseline`，tolerance 向宽松方向放宽 bound）。
+  语义与守卫区分：守卫是安全否决，约束是经济条件（如成本不得回退）。
+  已核实的 sr-bench compare 成本字段在 `baseline_targets`/`candidate_targets` 上：
+  `total_spend_usd` / `cache_neutral_cost_usd` / `cost_usd` / `evaluation_cost_usd`；
+  用量未知序列化为 null → 约束不可评估 → INCONCLUSIVE（绝不记 0，也绝不记违规）。
+  约束证据进入裁决输出与台账记录（`constraints` 字段），供报告重放。
 
 ## 记录格式（归因输入）
 
@@ -102,6 +128,7 @@ recipe-lab ledger top --file ledger.jsonl --spec spec.yaml
 
 - `objective.replay_metric` 是 replay 层唯一排序指标（A1）；旧 `evaluation` 段已退役，
   加载即报错（A5）。
+- `objective.constraints` 声明 live 层经济约束（E）；守卫地板只来自 `gates`（A3）。
 - `workload` 声明三分 split（B）时必须给出 `split_rule` 文本且三分互不相交；
   旧的单数据集形态按 dev-only 处理并告警。
 - `budget.max_minutes_per_trial` 覆盖就绪等待 + 请求循环 + replay 拉取全程（A5）。

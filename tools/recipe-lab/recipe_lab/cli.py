@@ -11,8 +11,11 @@ Subcommands:
   propose-rule-thresholds move every rule-level predicate site of one signal (C)
   run                     evaluate candidate configs in the replay tier -> ledger
   ledger                  inspect or append to the evidence ledger (append/show/top)
-
-The live tier arrives with Sub-issue 3.
+  live-verdict            compare two sr-bench runs -> PASS/FAIL/INCONCLUSIVE
+                          (guard floors from spec.gates (A3), --guard-measurements
+                          carry measurements only; --insight-refs (G2); economic
+                          constraints from objective.constraints (E); frozen_test
+                          only with --final)
 """
 
 from __future__ import annotations
