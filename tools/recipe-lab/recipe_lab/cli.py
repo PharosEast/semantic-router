@@ -1,7 +1,18 @@
-"""recipe-lab CLI: plan / attribute / collect-replays / bank / propose-thresholds / run / ledger.
+"""recipe-lab CLI.
 
-v0.1 covers Sub-issue 1 (attribution) plus contract preview, the replay-tier
-loop and ledger inspection. The live tier arrives with Sub-issue 3.
+Subcommands:
+  plan                    load and validate an experiment spec, print it normalized
+  hash                    compute the frozen dataset identity: sha256 of raw bytes (A4)
+  split                   split a labeled case list into calib/dev/frozen_test (B)
+  attribute               E1/E2/E3 misroute attribution over labeled records
+  collect-replays         pull router_replay records from the management API
+  bank                    build or apply the per-case/per-model answer bank
+  propose-thresholds      perturb one decision-signal threshold
+  propose-rule-thresholds move every rule-level predicate site of one signal (C)
+  run                     evaluate candidate configs in the replay tier -> ledger
+  ledger                  inspect or append to the evidence ledger (append/show/top)
+
+The live tier arrives with Sub-issue 3.
 """
 
 from __future__ import annotations
