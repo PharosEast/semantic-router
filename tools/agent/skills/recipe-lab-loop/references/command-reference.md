@@ -6,6 +6,14 @@ stdin. Exit codes: `0` success (for `live-verdict`: PASS), `1` FAIL verdict
 (`live-verdict` only), `2` usage, contract or tool error, and INCONCLUSIVE
 for `live-verdict`.
 
+## Contract
+
+- `recipe-lab plan --spec S`
+  Load and validate the experiment contract and print it normalized; no
+  experiment runs. Contract errors exit 2 with the reason on stderr — fix
+  the spec and re-run. Every later command re-checks the same contract, so
+  a spec that passes this command is the single source of truth for a round.
+
 ## Dataset identity and splits (stage 2)
 
 - `recipe-lab hash --file F`
