@@ -121,7 +121,7 @@ def write_splits(
             for case in split_cases_map[name]:
                 fh.write(json.dumps(case, ensure_ascii=False) + "\n")
         splits[name] = {
-            "manifest": SPLIT_FILES[name],
+            "manifest": split_file,
             "content_hash": dataset_content_hash(target),
         }
     return splits
