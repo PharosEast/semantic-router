@@ -266,7 +266,7 @@ def test_collect_replays_flag_rules():
                 "o.jsonl",
             ]
         )
-    with pytest.raises(SystemExit, match="one of --cases|--unlabeled|is required"):
+    with pytest.raises(SystemExit, match=r"one of --cases|--unlabeled|is required"):
         cli.main(["collect-replays", "--url", "http://x", "--output", "o.jsonl"])
 
 
