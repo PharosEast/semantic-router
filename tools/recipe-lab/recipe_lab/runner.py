@@ -3,8 +3,9 @@
 One candidate = one router lifecycle (recipe-lab design,
 Sub-issue 2). The runner owns no evaluation logic of its own:
 
-1. start the mock/real backend and the router with the candidate config
-   (-gateway standalone, so the OpenAI listener is served without Envoy);
+1. start the mock/real backend and the router with a per-trial port-patched
+   copy of the candidate config (-gateway standalone, so the OpenAI listener
+   is served without Envoy);
 2. wait for the decision model to report ready via the management API;
 3. send every labeled case through the router (requests only trigger
    routing; correctness always comes from the answer bank);
@@ -22,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import socket
 import subprocess
 import time
 import urllib.error
@@ -29,6 +31,8 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+import yaml
 
 from .adapters.router_replay import fetch_replays, records_to_cases
 from .attribution import CaseInput, attribute, summarize
@@ -48,14 +52,19 @@ class RunnerTimeout(RunnerError):
 
 @dataclass
 class RunnerEnv:
-    """Process-level environment for one candidate evaluation."""
+    """Process-level environment for one candidate evaluation.
+
+    Gateway and management ports are allocated per trial and patched into a
+    copy of the candidate config (see _patch_ports), so they can never collide
+    with an unrelated process or a stale router on the defaults. The mock
+    backend keeps an explicit port: configs that point at it must reference
+    the same one.
+    """
 
     router_bin: str
     mock_backend_script: str
     python_bin: str
     work_dir: Path
-    router_port: int = 8899
-    management_port: int = 8080
     backend_port: int = 8000
     ready_timeout_s: int = 300
     hf_home: str | None = None
@@ -66,6 +75,38 @@ class RunnerEnv:
 def _http_json(url: str, timeout: float = 10.0) -> Any:
     with urllib.request.urlopen(url, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8"))
+
+
+def _free_port() -> int:
+    """Reserve an ephemeral TCP port (bind-and-release race is negligible)."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+def _patch_ports(candidate_config: Path, work_dir: Path) -> tuple[Path, int, int]:
+    """Copy the candidate config into work_dir with per-trial ports patched in.
+
+    The router binds its gateway listener(s) and the management API from the
+    config itself, so fixed defaults (8899/8080) collide with anything already
+    on those ports - and worse, a stale router on the defaults answers the
+    readiness probe for a router that never started. Returns (patched config
+    path, primary gateway port, management port).
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    config = yaml.safe_load(candidate_config.read_text(encoding="utf-8"))
+    router_port = 0
+    for listener in config.get("listeners") or []:
+        listener["port"] = _free_port()
+        if not router_port:
+            router_port = listener["port"]
+    if not router_port:
+        raise RunnerError(f"candidate config has no gateway listeners: {candidate_config}")
+    management_port = _free_port()
+    config.setdefault("management_api", {})["port"] = management_port
+    patched = work_dir / f"{candidate_config.name}.patched.yaml"
+    patched.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+    return patched, router_port, management_port
 
 
 def _wait_model_runtime_ready(
@@ -141,9 +182,9 @@ def evaluate_candidate(
     RunnerTimeout; processes are always cleaned up in `finally`.
     """
     env.work_dir.mkdir(parents=True, exist_ok=True)
-    management_url = f"http://127.0.0.1:{env.management_port}"
-    router_url = f"http://127.0.0.1:{env.router_port}"
-    backend_url = f"http://127.0.0.1:{env.backend_port}"
+    patched_config, router_port, management_port = _patch_ports(Path(candidate_config), env.work_dir)
+    management_url = f"http://127.0.0.1:{management_port}"
+    router_url = f"http://127.0.0.1:{router_port}"
     deadline = time.monotonic() + trial_timeout_s if trial_timeout_s is not None else None
 
     def remaining_s() -> float | None:
@@ -158,7 +199,7 @@ def evaluate_candidate(
     try:
         # the router writes startup state (ready flag) next to its config file;
         # clear the previous candidate's state so we only see fresh readiness
-        status_file = Path(candidate_config).parent / "router-runtime.json"
+        status_file = patched_config.parent / "router-runtime.json"
         if status_file.exists():
             status_file.unlink(missing_ok=True)
 
@@ -182,7 +223,7 @@ def evaluate_candidate(
             [
                 env.router_bin,
                 "-config",
-                str(candidate_config),
+                str(patched_config),
                 "-gateway",
                 "standalone",
             ],

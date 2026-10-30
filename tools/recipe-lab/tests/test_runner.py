@@ -6,11 +6,14 @@ import sys
 from pathlib import Path
 
 import pytest
+import yaml
 
 from recipe_lab.contract import ContractError, OraclePolicy
 from recipe_lab.runner import (
     RunnerEnv,
+    RunnerError,
     RunnerTimeout,
+    _patch_ports,
     attribution_delta,
     evaluate_candidate,
     replay_metric_value,
@@ -60,7 +63,13 @@ def test_evaluate_candidate_trial_timeout(tmp_path):
     mock = Path(tmp_path) / "mock.py"
     mock.write_text("import time\nmock_port = 0\ntime.sleep(60)\n")
     cfg = Path(tmp_path) / "candidate.yaml"
-    cfg.write_text("version: v0.2\n")
+    cfg.write_text(
+        "version: v0.2\n"
+        "listeners:\n"
+        "  - name: http\n"
+        "    address: 0.0.0.0\n"
+        "    port: 8899\n"
+    )
     env = RunnerEnv(
         router_bin=str(router),
         mock_backend_script=str(mock),
@@ -77,3 +86,31 @@ def test_evaluate_candidate_trial_timeout(tmp_path):
             env=env,
             trial_timeout_s=2.0,
         )
+
+
+# ---- per-trial port allocation ----
+
+
+def test_patch_ports_assigns_per_trial_ports(tmp_path):
+    """Gateway + management ports are re-assigned per trial; the original
+    candidate file stays untouched."""
+    cfg = Path(tmp_path) / "candidate.yaml"
+    cfg.write_text(
+        "version: v0.2\n"
+        "listeners:\n"
+        "  - name: http\n"
+        "    address: 0.0.0.0\n"
+        "    port: 8899\n"
+    )
+    patched, router_port, management_port = _patch_ports(cfg, Path(tmp_path) / "work")
+    patched_config = yaml.safe_load(patched.read_text(encoding="utf-8"))
+    assert patched_config["listeners"][0]["port"] == router_port != 8899
+    assert patched_config["management_api"]["port"] == management_port
+    assert yaml.safe_load(cfg.read_text(encoding="utf-8"))["listeners"][0]["port"] == 8899
+
+
+def test_patch_ports_rejects_config_without_listeners(tmp_path):
+    cfg = Path(tmp_path) / "candidate.yaml"
+    cfg.write_text("version: v0.2\n")
+    with pytest.raises(RunnerError, match="no gateway listeners"):
+        _patch_ports(cfg, Path(tmp_path) / "work")
