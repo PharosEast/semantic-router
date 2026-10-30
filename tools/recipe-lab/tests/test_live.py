@@ -16,6 +16,7 @@ from recipe_lab.live import (
     live_verdict_from_runs,
     measurements_from_rows,
     resolve_gates,
+    verify_live,
 )
 
 from tests.fixtures import VALID_SPEC
@@ -321,6 +322,344 @@ def test_live_verdict_rejects_floor_in_measurement_file(tmp_path, capsys):
         == 2
     )
     assert "floor" in capsys.readouterr().err
+
+
+# ---- I: verify - sr-bench-driven AB/BA orchestration ----
+
+
+def _verify_spec():
+    spec_dict = copy.deepcopy(VALID_SPEC)
+    spec_dict["objective"]["constraints"] = [
+        {
+            "name": "cost-not-worse",
+            "metric": "total_spend_usd",
+            "op": "lte",
+            "bound": "baseline",
+            "tolerance_pct": 0.0,
+        },
+    ]
+    return ExperimentSpec.from_dict(spec_dict)
+
+
+class VerifyStub:
+    """Scripted stand-in for SrbenchCli: deterministic run documents."""
+
+    def __init__(
+        self,
+        *,
+        preview_status: str = "completed",
+        candidate_statuses: list[str] | None = None,
+        baseline_statuses: list[str] | None = None,
+        compare_values: dict | None = None,
+        baseline_doc: dict | None = None,
+    ):
+        self.baseline_doc = baseline_doc or {
+            "id": "run-base",
+            "status": "completed",
+            "manifest": {"manifest_id": "m1"},
+        }
+        self.preview_status = preview_status
+        self.candidate_statuses = list(candidate_statuses or [])
+        self.baseline_statuses = list(baseline_statuses or [])
+        self.compare_values = dict(compare_values or {})
+        self.preview_report_payload = {
+            "summary": {
+                "targets": [
+                    {"selected_models": {"local/model-a": 7, "local/model-b": 5}}
+                ]
+            }
+        }
+        self.events: list[tuple] = []
+        self.manifest_runs = 0
+        self.compares: list[tuple] = []
+        self._cand = 0
+
+    def show(self, run_id):
+        self.events.append(("show", run_id))
+        return self.baseline_doc
+
+    def candidate_plan(
+        self, baseline_run_id, *, targets, mode="live", name=None, hypothesis=""
+    ):
+        self.events.append(("plan", mode))
+        if mode == "preview":
+            return {"id": "run-preview", "status": self.preview_status}
+        self._cand += 1
+        status = (
+            self.candidate_statuses.pop(0) if self.candidate_statuses else "completed"
+        )
+        return {"id": f"run-cand-{self._cand}", "status": status}
+
+    def report(self, run_id, out_path):
+        self.events.append(("report", run_id))
+        return self.preview_report_payload
+
+    def run_manifest(self, manifest_path):
+        self.manifest_runs += 1
+        self.events.append(("manifest",))
+        status = (
+            self.baseline_statuses.pop(0) if self.baseline_statuses else "completed"
+        )
+        return {"id": f"run-base-trial-{self.manifest_runs}", "status": status}
+
+    def compare(self, base, cand):
+        self.compares.append((base, cand))
+        return dict(self.compare_values)
+
+
+def _compare_values(
+    base: float, cand: float, spend: tuple[float, float] = (5.0, 4.8)
+) -> dict:
+    # default spend does not violate the cost-not-worse constraint (lte
+    # baseline 5.0), so tests can target the metric/gate path in isolation
+    return {
+        "baseline": {"capability.score": base, "total_spend_usd": spend[0]},
+        "candidate": {"capability.score": cand, "total_spend_usd": spend[1]},
+    }
+
+
+def test_verify_live_pass_flow(tmp_path):
+    stub = VerifyStub(
+        candidate_statuses=["completed", "completed"],
+        baseline_statuses=["completed", "completed"],
+        compare_values=_compare_values(0.80, 0.86),
+    )
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=2,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+    assert result["verdict"] == "PASS"
+    assert result["metrics"] == {"baseline": 0.80, "candidate": 0.86}
+    assert result["gates"] == {"pii-recall-floor": "pass"}
+    assert result["preview"]["distribution"] == {"local/model-a": 7, "local/model-b": 5}
+    # AB/BA: preview first, then each pair runs baseline and candidate arms
+    # in alternating order (schedule: base0, cand0, cand1, base1)
+    assert stub.events == [
+        ("show", "run-base"),
+        ("plan", "preview"),
+        ("report", "run-preview"),
+        ("manifest",),
+        ("plan", "live"),
+        ("plan", "live"),
+        ("manifest",),
+    ]
+    assert stub.manifest_runs == 2
+    assert len(stub.compares) == 2
+    assert result["abba_summary"]["baseline"]["median"] == 0.80
+    assert result["abba_summary"]["candidate"]["median"] == 0.86
+    assert (
+        len(result["bench_refs"]) == 1 + 1 + 4
+    )  # baseline + preview + both arms of both reps
+    assert "run-base" in result["bench_refs"] and "run-preview" in result["bench_refs"]
+
+
+def test_verify_live_incomplete_pair_is_inconclusive(tmp_path):
+    stub = VerifyStub(
+        candidate_statuses=["completed", "failed"],
+        baseline_statuses=["completed", "completed"],
+        compare_values=_compare_values(0.80, 0.86),
+    )
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=2,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert any("pair 1" in reason for reason in result["reasons"])  # reps are 0-indexed
+    # only the complete pair is compared; no numbers are invented for the broken one
+    assert len(stub.compares) == 1
+
+
+def test_verify_live_baseline_arm_failure_is_inconclusive(tmp_path):
+    stub = VerifyStub(
+        baseline_statuses=["failed", "completed"],
+        compare_values=_compare_values(0.80, 0.86),
+    )
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=2,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert any("baseline ended 'failed'" in reason for reason in result["reasons"])
+
+
+def test_verify_live_constraint_median_over_pairs(tmp_path):
+    # spend medians 5.0 vs 5.75 across two pairs -> constraint violated -> FAIL
+    stub = VerifyStub(
+        candidate_statuses=["completed", "completed"],
+        baseline_statuses=["completed", "completed"],
+    )
+    stub.compare_values_by_call = {
+        0: _compare_values(0.80, 0.86, spend=(5.0, 5.5)),
+        1: _compare_values(0.80, 0.86, spend=(5.0, 6.0)),
+    }
+
+    def compare(base, cand):
+        index = len(stub.compares)
+        stub.compares.append((base, cand))
+        return dict(stub.compare_values_by_call[index])
+
+    stub.compare = compare
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=2,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+    assert result["verdict"] == "FAIL"
+    evidence = result["constraints"][0]
+    assert evidence["baseline"] == 5.0 and evidence["candidate"] == 5.75
+    assert evidence["status"] == "violated"
+    assert any(
+        "constraint cost-not-worse violated" in reason for reason in result["reasons"]
+    )
+
+
+def test_verify_live_constraint_unmeasured_pair_stays_unevaluated(tmp_path):
+    # one pair broken -> the constraint is measured in 1 of 2 pairs -> None
+    stub = VerifyStub(
+        candidate_statuses=["completed", "failed"],
+        baseline_statuses=["completed", "completed"],
+        compare_values=_compare_values(0.80, 0.86),
+    )
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=2,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    evidence = result["constraints"][0]
+    assert evidence["baseline"] is None and evidence["candidate"] is None
+    assert any("measured in 1 of 2 pairs" in reason for reason in result["reasons"])
+
+
+def test_verify_live_preview_failure_is_diagnostic_only(tmp_path):
+    stub = VerifyStub(
+        preview_status="failed", compare_values=_compare_values(0.80, 0.86)
+    )
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+    assert result["verdict"] == "PASS"  # a failed preview produces no quality numbers
+    assert any("preview" in reason for reason in result["reasons"])
+    assert "distribution" not in result["preview"]
+
+
+def test_verify_live_baseline_must_be_completed(tmp_path):
+    stub = VerifyStub(
+        baseline_doc={
+            "id": "run-base",
+            "status": "failed",
+            "manifest": {"manifest_id": "m1"},
+        }
+    )
+    with pytest.raises(ContractError, match="not completed"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+
+
+def test_verify_live_baseline_must_expose_manifest(tmp_path):
+    stub = VerifyStub(baseline_doc={"id": "run-base", "status": "completed"})
+    with pytest.raises(ContractError, match="does not expose its frozen manifest"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+
+
+def test_verify_live_needs_at_least_one_repetition(tmp_path):
+    with pytest.raises(ContractError, match="at least one repetition"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=VerifyStub(),
+            baseline_run_id="run-base",
+            targets=["mom-router"],
+            repetitions=0,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+
+
+def test_verify_cli_requires_targets(tmp_path, capsys):
+    spec_path = str(_write_splits_dataset(tmp_path))
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(
+        json.dumps(
+            {
+                "kind": "config",
+                "ref": "config-rev",
+                "change_summary": "t",
+                "provenance": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "verify",
+                "--spec",
+                spec_path,
+                "--baseline-run-id",
+                "run-a",
+                "--candidate",
+                str(candidate),
+            ]
+        )
+        == 2
+    )
+    assert "MoM target ids" in capsys.readouterr().err
 
 
 # ---- G2: --insight-refs on live-verdict ----

@@ -26,14 +26,26 @@ Verified cost fields (E): sr-bench compare exposes per-arm spend on the
 usage is serialized as `null` (with a `total_cost_comparison_reason`),
 so a constraint on an unknown cost must be unevaluated (INCONCLUSIVE),
 never zero.
+
+Live `verify` orchestration (I): `verify_live` drives sr-bench end to end
+for one candidate - a preview run (routing distribution into the ledger
+notes) plus `repetitions` AB/BA pairs, where each pair re-runs the
+baseline's frozen manifest AND submits a fresh candidate-plan, so drift
+spreads across both arms. Per-pair compare feeds descriptive medians and
+ranges (abba.paired_summary); the verdict reuses `evaluate_verdict`, and
+any incomplete pair makes the whole verdict INCONCLUSIVE.
 """
 
 from __future__ import annotations
 
+import json
+import statistics
 from collections.abc import Sequence
+from pathlib import Path
 from typing import Any
 
-from .contract import Constraint, ContractError, ExperimentSpec, Gate
+from . import abba
+from .contract import ContractError, ExperimentSpec, Gate
 from .srbench import SrbenchCli, extract_metric_values
 from .verdict import GuardResult, evaluate_verdict
 
@@ -283,6 +295,232 @@ def live_verdict_from_runs(
         "constraints": verdict.constraints,
         "undeclared_measurements": undeclared,
         "bench_refs": [baseline_run_id, candidate_run_id],
+    }
+    if not spec.gates:
+        result["gates_note"] = "no guard declared"
+    return result
+
+
+def extract_routing_distribution(report: Any) -> dict[str, int]:
+    """Merge every `selected_models` counter in a preview report (I).
+
+    The preview report carries per-target routing distributions as
+    `selected_models` (model -> case count, verified in sr-bench's
+    report builder). Depth-first merge keeps us decoupled from the exact
+    nesting; a report without any counter (or a raw-text payload) yields
+    an empty dict - missing evidence is reported, never guessed.
+    """
+    distribution: dict[str, int] = {}
+
+    def walk(node: Any) -> None:
+        if isinstance(node, dict):
+            selected = node.get("selected_models")
+            if isinstance(selected, dict):
+                for model, count in selected.items():
+                    if isinstance(count, (int, float)) and not isinstance(count, bool):
+                        distribution[str(model)] = distribution.get(
+                            str(model), 0
+                        ) + int(count)
+            for value in node.values():
+                walk(value)
+        elif isinstance(node, list):
+            for item in node:
+                walk(item)
+
+    walk(report)
+    return distribution
+
+
+def verify_live(
+    *,
+    spec: ExperimentSpec,
+    cli: SrbenchCli,
+    baseline_run_id: str,
+    targets: list[str],
+    repetitions: int,
+    measurements: list[dict[str, Any]],
+    incomplete_reasons: list[str] | None = None,
+    work_dir: str | Path,
+) -> dict[str, Any]:
+    """Drive sr-bench for one candidate and decide the live verdict (I).
+
+    Per repetition, BOTH arms are measured live in AB/BA order: the
+    baseline arm re-runs the baseline run's frozen manifest, the candidate
+    arm is a fresh `candidate-plan` (inheriting the same frozen protocol
+    and questions). Each completed pair is compared immediately; medians
+    and ranges stay descriptive (abba.paired_summary). The final verdict
+    reuses `evaluate_verdict` with the per-label medians - any incomplete
+    pair, missing metric, or unmeasurable constraint lands in
+    `incomplete_reasons` and turns the verdict INCONCLUSIVE.
+
+    `targets` are the registered sr-bench MoM target ids the router is
+    serving the candidate config on. The preview run is diagnostic only:
+    a failed preview is recorded in the reasons but does not fail the
+    verdict (it produces no quality numbers anyway).
+    """
+    if repetitions < 1:
+        raise ContractError("verify needs at least one repetition")
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    baseline_doc = cli.show(baseline_run_id)
+    if not isinstance(baseline_doc, dict):
+        raise ContractError(
+            f"baseline run {baseline_run_id} did not return a run document"
+        )
+    if baseline_doc.get("status") != "completed":
+        raise ContractError(
+            f"baseline run {baseline_run_id} is {baseline_doc.get('status')!r}, not completed; "
+            "AB/BA pairs must inherit a terminal completed baseline protocol"
+        )
+    manifest = baseline_doc.get("manifest")
+    if not isinstance(manifest, dict):
+        raise ContractError(
+            f"baseline run {baseline_run_id} does not expose its frozen manifest"
+        )
+    manifest_path = work_dir / "baseline-manifest.json"
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+
+    incomplete = list(incomplete_reasons or [])
+    diagnostics: list[str] = []
+    bench_refs = [baseline_run_id]
+
+    # preview first: routing distribution for the ledger notes (no quality).
+    # Diagnostic only - a failed preview is recorded but never fails the
+    # verdict, since the pairs below carry all quality evidence.
+    preview_run = cli.candidate_plan(baseline_run_id, targets=targets, mode="preview")
+    preview_id = preview_run.get("id")
+    preview_info: dict[str, Any] = {
+        "run_id": preview_id,
+        "status": preview_run.get("status"),
+    }
+    bench_refs.append(preview_id)
+    if preview_run.get("status") == "completed":
+        preview_info["distribution"] = extract_routing_distribution(
+            cli.report(preview_id, work_dir / "preview-report.json")
+        )
+    else:
+        diagnostics.append(
+            f"preview run {preview_id} ended {preview_run.get('status')!r}; no routing distribution"
+        )
+
+    # AB/BA pairs: both arms live, alternating execution order per repetition
+    trials: dict[int, dict[str, Any]] = {}
+    for label, rep in abba.schedule(repetitions):
+        arm = trials.setdefault(rep, {})
+        if label == abba.BASELINE:
+            run = cli.run_manifest(manifest_path)
+        else:
+            run = cli.candidate_plan(baseline_run_id, targets=targets, mode="live")
+        arm[label] = {"run_id": run.get("id"), "status": run.get("status")}
+        bench_refs.append(run.get("id"))
+
+    # per-pair compare + metric/constraint pairing
+    metric_key = spec.objective.metric_key
+    rows: list[dict[str, Any]] = []
+    constraint_values: dict[str, list[tuple[float | None, float | None]]] = {
+        constraint.name: [] for constraint in spec.objective.constraints
+    }
+    for rep in sorted(trials):
+        base_run = trials[rep].get(abba.BASELINE, {})
+        cand_run = trials[rep].get(abba.CANDIDATE, {})
+        if (
+            base_run.get("status") != "completed"
+            or cand_run.get("status") != "completed"
+        ):
+            incomplete.append(
+                f"pair {rep}: baseline ended {base_run.get('status')!r}, candidate ended {cand_run.get('status')!r}"
+            )
+            continue
+        comparison = cli.compare(base_run["run_id"], cand_run["run_id"])
+        baseline_value, candidate_value = _pair_metrics(
+            comparison, metric_key, incomplete
+        )
+        if baseline_value is not None:
+            rows.append(
+                {"label": abba.BASELINE, "metrics": {metric_key: baseline_value}}
+            )
+        if candidate_value is not None:
+            rows.append(
+                {"label": abba.CANDIDATE, "metrics": {metric_key: candidate_value}}
+            )
+        for constraint in spec.objective.constraints:
+            constraint_values[constraint.name].append(
+                _pair_metrics(comparison, constraint.metric, incomplete)
+            )
+
+    summary = abba.paired_summary(rows, metric_key)
+    baseline_metric = (
+        summary[abba.BASELINE]["median"] if summary[abba.BASELINE] else None
+    )
+    candidate_metric = (
+        summary[abba.CANDIDATE]["median"] if summary[abba.CANDIDATE] else None
+    )
+
+    # constraints: median over pairs; any unmeasured pair stays unevaluated
+    constraint_evidence: list[dict[str, Any]] = []
+    for constraint in spec.objective.constraints:
+        pairs = constraint_values[constraint.name]
+        measured = [(b, c) for b, c in pairs if b is not None and c is not None]
+        if repetitions and len(measured) == repetitions:
+            baseline_c = statistics.median(b for b, _ in measured)
+            candidate_c = statistics.median(c for _, c in measured)
+        else:
+            incomplete.append(
+                f"constraint {constraint.name}: measured in {len(measured)} of {repetitions} pairs"
+            )
+            baseline_c = candidate_c = None
+        constraint_evidence.append(
+            {
+                "name": constraint.name,
+                "metric": constraint.metric,
+                "op": constraint.op,
+                "bound": constraint.bound,
+                "tolerance_pct": constraint.tolerance_pct,
+                "baseline": baseline_c,
+                "candidate": candidate_c,
+            }
+        )
+
+    guards, undeclared = resolve_gates(spec.gates, measurements)
+    verdict = evaluate_verdict(
+        baseline_metric=baseline_metric,
+        candidate_metric=candidate_metric,
+        direction=spec.objective.direction,
+        min_improvement_pct=spec.objective.min_improvement_pct,
+        guards=guards,
+        incomplete_reasons=incomplete,
+        constraints=constraint_evidence,
+    )
+    reasons = list(verdict.reasons)
+    reasons.extend(diagnostics)
+    if undeclared:
+        reasons.append(
+            "undeclared guard measurements ignored (not declared in spec.gates): "
+            + ", ".join(undeclared)
+        )
+    result: dict[str, Any] = {
+        "verdict": verdict.verdict,
+        "reasons": reasons,
+        "improvement_pct": verdict.improvement_pct,
+        "metrics": {
+            "baseline": baseline_metric,
+            "candidate": candidate_metric,
+        },
+        "gates": {
+            g.name: (
+                "pass" if g.passed else ("incomplete" if not g.evaluated else "fail")
+            )
+            for g in guards
+        },
+        "constraints": verdict.constraints,
+        "undeclared_measurements": undeclared,
+        "bench_refs": bench_refs,
+        "trials": {str(rep): trials[rep] for rep in sorted(trials)},
+        "abba_summary": summary,
+        "preview": preview_info,
     }
     if not spec.gates:
         result["gates_note"] = "no guard declared"

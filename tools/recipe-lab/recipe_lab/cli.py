@@ -18,6 +18,10 @@ Subcommands:
                           carry measurements only; --insight-refs (G2); economic
                           constraints from objective.constraints (E); frozen_test
                           only with --final)
+  verify                  drive sr-bench end to end for one candidate (I):
+                          preview routing + repetitions of AB/BA pairs (fresh
+                          baseline manifest run vs fresh candidate-plan) -> per-pair
+                          compare -> medians/ranges -> PASS/FAIL/INCONCLUSIVE
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -64,7 +69,7 @@ from .diagnose import (
 )
 from .insights import merge_insight_refs, parse_insight_refs, resolve_insight_refs
 from .ledger import Ledger, LedgerRecord
-from .live import live_verdict_from_runs, measurements_from_rows
+from .live import live_verdict_from_runs, measurements_from_rows, verify_live
 from .next import write_next_context
 from .proposers import distribution_calibration, rule_threshold, threshold_search
 from .provenance import write_run_manifest
@@ -1169,6 +1174,103 @@ def cmd_record_draft(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_verify(args: argparse.Namespace) -> int:
+    """Drive sr-bench end to end for one candidate (I).
+
+    Preview routing first, then `--repetitions` AB/BA pairs (each pair
+    re-runs the baseline's frozen manifest AND submits a fresh
+    candidate-plan), per-pair compare, descriptive medians/ranges, and the
+    shared three-state verdict. Any incomplete pair -> INCONCLUSIVE.
+    """
+    spec = _load_spec(args.spec)
+    # B: frozen_test is quarantined; only the --final promotion verdict may
+    # cite it. Every other split goes through the normal A4 re-hash gate.
+    if args.split == "frozen_test" and not args.final:
+        raise ContractError("frozen_test is quarantined; pass --final for the promotion verdict")
+    dataset_hash = spec.verify_workload(split=args.split)
+    try:
+        raw_measurements = (
+            [
+                json.loads(line)
+                for line in Path(args.guard_measurements).read_text(encoding="utf-8").splitlines()
+                if line.strip()
+            ]
+            if args.guard_measurements
+            else []
+        )
+        candidate_row = json.loads(Path(args.candidate).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise SystemExit(f"cannot load guard measurements or candidate: {exc}") from exc
+    # A3: measurement schema violations are contract errors (exit 2); a
+    # `floor` key in the file must never silently override spec.gates.
+    measurements = measurements_from_rows(raw_measurements)
+    # G2: fail fast on unverifiable insight references (ContractError -> exit
+    # 2); a rec- reference needs the ledger it is resolved against.
+    ledger = Ledger(args.ledger) if args.ledger else None
+    insight_refs = resolve_insight_refs(parse_insight_refs(args.insight_refs), ledger)
+    merge_insight_refs(candidate_row.setdefault("provenance", {}), insight_refs)
+    # sr-bench MoM target ids the router is serving the candidate on: the
+    # CLI flag wins; otherwise the candidate file must carry srbench_targets.
+    if args.candidate_targets:
+        targets = [t.strip() for t in args.candidate_targets.split(",") if t.strip()]
+    else:
+        targets = candidate_row.get("srbench_targets")
+    if not isinstance(targets, list) or not targets or not all(isinstance(t, str) and t.strip() for t in targets):
+        raise ContractError(
+            "verify needs sr-bench MoM target ids: pass --candidate-targets "
+            "(comma-separated) or add a non-empty srbench_targets list to the candidate JSON"
+        )
+    work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="rl-verify-"))
+    cli = SrbenchCli(bin=args.srbench_bin, url=args.srbench_url, store=args.srbench_store, timeout_s=args.timeout)
+    try:
+        result = verify_live(
+            spec=spec,
+            cli=cli,
+            baseline_run_id=args.baseline_run_id,
+            targets=targets,
+            repetitions=args.repetitions,
+            measurements=measurements,
+            work_dir=work_dir,
+        )
+    except (ContractError, RuntimeError) as exc:
+        raise SystemExit(f"verify error: {exc}") from exc
+
+    if args.ledger:
+        preview = result.get("preview") or {}
+        notes_parts = [
+            f"baseline={result['metrics']['baseline']}",
+            f"repetitions={args.repetitions}",
+        ]
+        if preview.get("run_id"):
+            notes_parts.append(f"preview_run={preview['run_id']}")
+        distribution = preview.get("distribution")
+        if distribution:
+            notes_parts.append("routing_distribution=" + json.dumps(distribution, sort_keys=True, ensure_ascii=False))
+        record = LedgerRecord(
+            round=args.round,
+            ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            candidate=candidate_row,
+            tier="live",
+            baseline_ref=args.baseline_run_id,
+            metrics={spec.objective.metric_key: result["metrics"]["candidate"]},
+            verdict=result["verdict"],
+            dataset_hash=dataset_hash,
+            split=args.split,
+            reasons=result["reasons"],
+            gates=result["gates"],
+            # E: the declared constraints' measured evidence, for report replay.
+            constraints={c["name"]: c for c in result["constraints"]},
+            bench_refs=result["bench_refs"],
+            attribution_delta=None,
+            attribution_ref=args.attribution_ref,
+            coverage_warning=False,
+            notes="; ".join(notes_parts),
+        )
+        ledger.append(record)
+    _print_json(result)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="recipe-lab",
@@ -1714,6 +1816,63 @@ def build_parser() -> argparse.ArgumentParser:
     p_live.add_argument("--timeout", type=float, default=3600.0)
     p_live.add_argument("--round", type=int, default=1)
     p_live.set_defaults(func=cmd_live_verdict)
+
+    p_verify = sub.add_parser(
+        "verify",
+        help="drive sr-bench end to end: preview + AB/BA repetitions -> live verdict (I)",
+    )
+    p_verify.add_argument("--spec", required=True, help="experiment spec YAML")
+    p_verify.add_argument(
+        "--split",
+        default="dev",
+        choices=["calib", "dev", "frozen_test"],
+        help="workload split the sr-bench baseline run was produced on (B)",
+    )
+    p_verify.add_argument(
+        "--final",
+        action="store_true",
+        help="promotion verdict; the only consumer allowed to cite the frozen_test split (B)",
+    )
+    p_verify.add_argument("--baseline-run-id", required=True, help="terminal completed sr-bench baseline run ID")
+    p_verify.add_argument("--candidate", required=True, help="candidate JSON file for the ledger record")
+    p_verify.add_argument(
+        "--candidate-targets",
+        default=None,
+        help="comma-separated sr-bench MoM target ids serving the candidate; falls back to the candidate JSON's srbench_targets",
+    )
+    p_verify.add_argument(
+        "--repetitions",
+        type=int,
+        default=3,
+        help="number of AB/BA pairs (default 3); each pair re-runs the baseline manifest and a fresh candidate-plan",
+    )
+    p_verify.add_argument(
+        "--work-dir",
+        default=None,
+        help="scratch directory for the extracted baseline manifest and preview report (default: a temp dir)",
+    )
+    p_verify.add_argument(
+        "--guard-measurements",
+        default=None,
+        help="guard measurements JSONL (name/candidate/baseline only; floors come from spec.gates, A3)",
+    )
+    p_verify.add_argument(
+        "--insight-refs",
+        default=None,
+        help="comma-separated provenance refs merged into the candidate: rec-<id>, bench:<run_id>, attr:<path>@sha256:<hex>, diag:<path>@sha256:<hex>#<anchor> (G2)",
+    )
+    p_verify.add_argument(
+        "--attribution-ref",
+        default=None,
+        help="attribution artifact this round is based on (path@hash); recorded in the ledger",
+    )
+    p_verify.add_argument("--ledger", default=None, help="ledger JSONL to append the live record to")
+    p_verify.add_argument("--srbench-bin", default="vllm-sr")
+    p_verify.add_argument("--srbench-url", default=None)
+    p_verify.add_argument("--srbench-store", default=None)
+    p_verify.add_argument("--timeout", type=float, default=3600.0)
+    p_verify.add_argument("--round", type=int, default=1)
+    p_verify.set_defaults(func=cmd_verify)
 
     p_ledger = sub.add_parser("ledger", help="inspect or append to the evidence ledger")
     ledger_sub = p_ledger.add_subparsers(dest="ledger_action", required=True)
