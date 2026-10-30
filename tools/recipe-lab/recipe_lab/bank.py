@@ -5,9 +5,15 @@ then joined into attribution records by (case_id, routed model). The join is
 what turns replay-tier `no_evidence` rows into CORRECT / E2 / E3 outcomes
 without generating any new answers.
 
-Grading: each case carries `expected_contains` (a case-insensitive substring
-the correct answer must include). Cheap, deterministic, auditable; a real
-judge (model_eval mcq_judge) can replace it behind the same interface later.
+Grading: the per-case grader is dispatched by `case["grader"]` (I). The
+default is `contains` (case-insensitive substring against
+`expected_contains`) - cheap, deterministic, auditable. `mcq` grades
+multiple-choice answers by comparing the extracted option letter against
+`case["expected"]`; verified (I): src/training/model_eval/mcq_judge.py is
+importable as a plain function module (`extract_letter`, stdlib-only,
+`__main__`-guarded), so grading calls it in-process and never shells out;
+when the module is not on sys.path the error says so instead of failing
+the grade silently.
 """
 
 from __future__ import annotations
@@ -20,6 +26,8 @@ from pathlib import Path
 from typing import Any
 
 from .contract import ContractError
+
+_MCQ_LETTER: Any = None
 
 
 @dataclass(frozen=True)
@@ -38,10 +46,55 @@ class BankEntry:
         }
 
 
-def grade(answer: str, expected_contains: str | None) -> bool | None:
-    if expected_contains is None:
+def _load_mcq_letter() -> Any:
+    """Lazy-import mcq_judge.extract_letter (I, verified importable).
+
+    Result is cached; tests may monkeypatch the module-level `_MCQ_LETTER`
+    to grade without the training package on sys.path.
+    """
+    global _MCQ_LETTER
+    if _MCQ_LETTER is None:
+        try:
+            from training.model_eval.mcq_judge import extract_letter  # type: ignore
+        except ImportError as exc:
+            raise ContractError(
+                "the mcq grader needs src/ on sys.path to import "
+                "training.model_eval.mcq_judge.extract_letter (verified importable); "
+                f"import failed: {exc}"
+            ) from exc
+        _MCQ_LETTER = extract_letter
+    return _MCQ_LETTER
+
+
+def grade(answer: str, case: dict[str, Any]) -> bool | None:
+    """Grade one answer against its case's declared grader (I).
+
+    - grader "contains" (default when the case carries `expected_contains`):
+      case-insensitive substring match; `expected_contains: null` means the
+      case declares no grading rule -> None.
+    - grader "mcq": `case["expected"]` is the correct option letter; the
+      model answer's letter is extracted with mcq_judge.extract_letter. An
+      unextractable letter is a wrong answer, never unevaluated - the
+      sr-bench mcq_judge convention (no_answer counts as wrong).
+    - any other grader name is a ContractError (never silently ungraded).
+    """
+    grader = case.get("grader")
+    if grader is None:
+        grader = "contains" if case.get("expected_contains") is not None else "none"
+    if grader == "none":
         return None
-    return expected_contains.strip().lower() in answer.strip().lower()
+    if grader == "contains":
+        expected = case.get("expected_contains")
+        if expected is None:
+            return None
+        return str(expected).strip().lower() in answer.strip().lower()
+    if grader == "mcq":
+        expected = case.get("expected")
+        if expected is None:
+            return None
+        letter = _load_mcq_letter()(answer)
+        return letter == str(expected).strip().upper()
+    raise ContractError(f"case {case.get('case_id', '?')!r}: unknown grader {grader!r}")
 
 
 def _chat_once(endpoint: str, model: str, prompt: str, timeout: float) -> str:
@@ -87,7 +140,6 @@ def build_bank(
     """Query every case against every model directly (no router) and grade."""
     entries: list[BankEntry] = []
     for case in cases:
-        expected = case.get("expected_contains")
         for model in models:
             answer = _chat_once(endpoint, model, case["prompt"], timeout)
             entries.append(
@@ -95,7 +147,7 @@ def build_bank(
                     case_id=case["case_id"],
                     model=model,
                     answer=answer,
-                    answer_ok=grade(answer, expected),
+                    answer_ok=grade(answer, case),
                 )
             )
     return entries

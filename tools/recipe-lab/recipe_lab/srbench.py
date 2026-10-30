@@ -3,10 +3,19 @@
 Thin, honest wrapper around `vllm-sr benchmark`: recipe-lab owns the loop,
 sr-bench owns evaluation - this module only shells out, parses, and reads.
 
-- compare: JSON when the CLI emits it; otherwise the raw text is returned
-  under {"raw": ...} so callers can record what actually happened instead
-  of guessing.
-- report: written to a file via --output, then read back.
+Verified against the actual CLI (I, src/vllm-sr/cli/commands/benchmark.py):
+
+- `preview` and `run` take `--manifest <path>` (never a run id) and, without
+  `--detach`, block until the run finishes and print its report. This module
+  always submits with `--detach` (returns the run document immediately) and
+  then polls `show <run_id>` until the status is terminal, so the caller -
+  not a black-box CLI wait - owns the loop and can record per-trial state.
+- `candidate-plan <baseline_run_id> --target <id> (--target ...)* [--mode
+  live|preview] [--name] [--hypothesis]` reuses a terminal baseline's frozen
+  protocol; `--target` is required and repeatable, and the service response
+  is the new run document (submitted, executing asynchronously).
+- terminal run states: completed / failed / cancelled / interrupted
+  (cli/sr_bench/store.py TERMINAL).
 
 Metric extraction is a recursive key search - sr-bench payloads are nested
 and versioned, and hard-coding one path would couple us to a schema that
@@ -18,15 +27,20 @@ from __future__ import annotations
 
 import json
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from .contract import ContractError
 
 
 class SrbenchError(RuntimeError):
     """Raised when the sr-bench CLI cannot be executed or parsed."""
+
+
+# Verified: the sr-bench service marks these run states terminal.
+TERMINAL_RUN_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 
 @dataclass
@@ -74,13 +88,73 @@ class SrbenchCli:
     ) -> dict[str, Any] | str:
         return self.run_command(["compare", baseline_run_id, candidate_run_id])
 
-    def preview(self, run_id: str) -> dict[str, Any] | str:
-        """Routing-distribution diagnosis for a run (no quality numbers)."""
-        return self.run_command(["preview", run_id])
+    def show(self, run_id: str) -> dict[str, Any] | str:
+        """One run document (status, manifest, ...); no evidence paging."""
+        return self.run_command(["show", run_id])
 
-    def candidate_plan(self, baseline_run_id: str) -> dict[str, Any] | str:
-        """Reuse a terminal baseline's frozen protocol for a candidate run."""
-        return self.run_command(["candidate-plan", baseline_run_id])
+    def wait_for_run(self, run_id: str, *, poll_interval_s: float = 2.0) -> dict[str, Any]:
+        """Poll `show` until the run reaches a terminal state (I).
+
+        The caller owns the loop, so each trial's outcome is observable and
+        recordable. Returns the final run document; a non-dict payload, a
+        missing status, or a non-terminal status that stops updating is an
+        SrbenchError, never a guessed state.
+        """
+        while True:
+            doc = self.show(run_id)
+            if not isinstance(doc, dict):
+                raise SrbenchError(f"sr-bench show {run_id} did not return a run document")
+            status = doc.get("status")
+            if status is None:
+                raise SrbenchError(f"sr-bench run {run_id} carries no status")
+            if status in TERMINAL_RUN_STATES:
+                return doc
+            time.sleep(poll_interval_s)
+
+    def _submit_and_wait(self, payload: Any, what: str) -> dict[str, Any]:
+        run_id = payload.get("id") if isinstance(payload, dict) else None
+        if not run_id or not isinstance(run_id, str):
+            raise SrbenchError(f"sr-bench did not return a run id for {what}: {payload!r}")
+        return self.wait_for_run(run_id)
+
+    def run_manifest(self, manifest_path: str | Path) -> dict[str, Any]:
+        """Submit one frozen manifest (`run --manifest --detach`) and wait."""
+        payload = self.run_command(["run", "--manifest", str(manifest_path), "--detach"])
+        return self._submit_and_wait(payload, f"run --manifest {manifest_path}")
+
+    def preview(self, manifest_path: str | Path) -> dict[str, Any]:
+        """Submit one preview manifest (routing only, no quality) and wait."""
+        payload = self.run_command(["preview", "--manifest", str(manifest_path), "--detach"])
+        return self._submit_and_wait(payload, f"preview --manifest {manifest_path}")
+
+    def candidate_plan(
+        self,
+        baseline_run_id: str,
+        *,
+        targets: Iterable[str],
+        mode: str = "live",
+        name: str | None = None,
+        hypothesis: str = "",
+    ) -> dict[str, Any]:
+        """Reuse a terminal baseline's frozen protocol for a new run (I).
+
+        `targets` are registered MoM target ids (the CLI requires at least
+        one `--target`); the response is the submitted run document, waited
+        to a terminal state here.
+        """
+        target_list = list(targets)
+        if not target_list:
+            raise SrbenchError("candidate-plan requires at least one target id")
+        args = ["candidate-plan", baseline_run_id]
+        for target in target_list:
+            args += ["--target", target]
+        args += ["--mode", mode]
+        if name:
+            args += ["--name", name]
+        if hypothesis:
+            args += ["--hypothesis", hypothesis]
+        payload = self.run_command(args)
+        return self._submit_and_wait(payload, f"candidate-plan {baseline_run_id}")
 
     def experiment(self, args: list[str]) -> dict[str, Any] | str:
         """Group baselines/routing-checks/candidates (create, attach, show...)."""

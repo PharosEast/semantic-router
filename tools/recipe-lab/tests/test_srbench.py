@@ -29,11 +29,9 @@ def test_compare_parses_json_stdout():
 
 
 def test_compare_nonzero_exit_raises():
-    with (
-        fake_run(returncode=3, stderr="boom"),
-        pytest.raises(SrbenchError, match="returned 3"),
-    ):
-        SrbenchCli().compare("run-a", "run-b")
+    with fake_run(returncode=3, stderr="boom"):
+        with pytest.raises(SrbenchError, match="returned 3"):
+            SrbenchCli().compare("run-a", "run-b")
 
 
 def test_compare_non_json_is_kept_raw():
@@ -61,15 +59,66 @@ def test_report_reads_written_file(tmp_path):
     assert result["quality"]["accuracy"] == 0.83
 
 
-def test_preview_candidate_plan_experiment_arg_shapes():
-    """The thin wrappers pass the right sr-bench subcommand and arguments."""
-    with fake_run(stdout="{}") as run_mock:
-        SrbenchCli().preview("run-a")
-        cmd = run_mock.call_args[0][0]
-        assert cmd[2:] == ["preview", "run-a"]
-    with fake_run(stdout="{}") as run_mock:
-        SrbenchCli().candidate_plan("run-base")
-        assert run_mock.call_args[0][0][2:] == ["candidate-plan", "run-base"]
+def _completed(stdout: str):
+    completed = mock.MagicMock()
+    completed.returncode = 0
+    completed.stdout = stdout
+    completed.stderr = ""
+    return completed
+
+
+def _sequence(stdouts: list[str]):
+    return mock.patch("subprocess.run", side_effect=[_completed(s) for s in stdouts])
+
+
+def test_preview_run_candidate_plan_arg_shapes(tmp_path):
+    """The thin wrappers pass the right sr-bench subcommand and arguments (I)."""
+    manifest = tmp_path / "m.json"
+    manifest.write_text("{}", encoding="utf-8")
+    doc = json.dumps({"id": "run-x", "status": "completed"})
+    submitted = json.dumps({"id": "run-x"})
+    # preview: submit --detach, then poll show until terminal
+    with _sequence([submitted, doc]) as run_mock:
+        SrbenchCli().preview(manifest)
+        assert run_mock.call_args_list[0][0][0][2:] == [
+            "preview",
+            "--manifest",
+            str(manifest),
+            "--detach",
+        ]
+        assert run_mock.call_args_list[1][0][0][2:] == ["show", "run-x"]
+    # run --manifest: same submit-then-poll shape
+    with _sequence([submitted, doc]) as run_mock:
+        SrbenchCli().run_manifest(manifest)
+        assert run_mock.call_args_list[0][0][0][2:] == [
+            "run",
+            "--manifest",
+            str(manifest),
+            "--detach",
+        ]
+    # candidate-plan: required repeatable --target, --mode, name/hypothesis
+    with _sequence([submitted, doc]) as run_mock:
+        SrbenchCli().candidate_plan(
+            "run-base",
+            targets=["mom-a", "mom-b"],
+            mode="live",
+            name="trial",
+            hypothesis="h",
+        )
+        assert run_mock.call_args_list[0][0][0][2:] == [
+            "candidate-plan",
+            "run-base",
+            "--target",
+            "mom-a",
+            "--target",
+            "mom-b",
+            "--mode",
+            "live",
+            "--name",
+            "trial",
+            "--hypothesis",
+            "h",
+        ]
     with fake_run(stdout="{}") as run_mock:
         SrbenchCli().experiment(["attach", "exp-1", "--run", "run-a"])
         assert run_mock.call_args[0][0][2:] == [
@@ -79,3 +128,39 @@ def test_preview_candidate_plan_experiment_arg_shapes():
             "--run",
             "run-a",
         ]
+
+
+def test_candidate_plan_requires_targets():
+    with pytest.raises(SrbenchError, match="at least one target"):
+        SrbenchCli().candidate_plan("run-base", targets=[])
+
+
+def test_wait_for_run_polls_until_terminal():
+    responses = [
+        json.dumps({"id": "run-x", "status": "queued"}),
+        json.dumps({"id": "run-x", "status": "running"}),
+        json.dumps({"id": "run-x", "status": "completed"}),
+    ]
+    with _sequence(responses) as run_mock, mock.patch("time.sleep") as sleep_mock:
+        doc = SrbenchCli().wait_for_run("run-x")
+    assert doc["status"] == "completed"
+    assert sleep_mock.call_count == 2  # slept between the two non-terminal polls
+    assert [c[0][0][2:] for c in run_mock.call_args_list] == [["show", "run-x"]] * 3
+
+
+def test_wait_for_run_rejects_non_document():
+    with _sequence(["not json"]):
+        with pytest.raises(SrbenchError, match="did not return a run document"):
+            SrbenchCli().wait_for_run("run-x")
+
+
+def test_wait_for_run_rejects_missing_status():
+    with _sequence([json.dumps({"id": "run-x"})]):
+        with pytest.raises(SrbenchError, match="no status"):
+            SrbenchCli().wait_for_run("run-x")
+
+
+def test_submit_without_run_id_is_an_error():
+    with _sequence([json.dumps({"error": "nope"})]):
+        with pytest.raises(SrbenchError, match="did not return a run id"):
+            SrbenchCli().run_manifest("m.json")
