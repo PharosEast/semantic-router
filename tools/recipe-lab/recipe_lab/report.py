@@ -15,8 +15,6 @@ from typing import Any
 
 from .ledger import Ledger
 
-_MIN_LIVE_BENCH_REFS = 2  # a decisive live record must carry at least two bench refs
-
 _HONESTY_FOOTER = (
     "Replayed from the recipe-lab ledger only. Metrics are descriptive; "
     "statistical significance is not established. A PASS is a recommendation, "
@@ -29,12 +27,14 @@ def _metrics_line(metrics: dict[str, Any]) -> str:
         return "n/a"
     parts = []
     for key, value in metrics.items():
+        # E2: cost values (routed_cost_index and any live cost metric) are
+        # relative amounts, not fractions - they must never render as percents.
         text = (
             "n/a"
             if value is None
             else (
                 f"{value * 100:.2f}%"
-                if isinstance(value, float) and value <= 1
+                if isinstance(value, float) and value <= 1 and "cost" not in key
                 else str(value)
             )
         )
@@ -42,12 +42,28 @@ def _metrics_line(metrics: dict[str, Any]) -> str:
     return ", ".join(parts)
 
 
+def _constraints_line(constraints: dict[str, Any] | None) -> str:
+    """E2: every constraint's evidence, name -> status (candidate / bound)."""
+    if not constraints:
+        return "-"
+    parts = []
+    for name, evidence in constraints.items():
+        candidate = evidence.get("candidate")
+        bound = evidence.get("bound_value")
+        parts.append(
+            f"{name}={evidence.get('status', '?')} "
+            f"(candidate={'-' if candidate is None else candidate}, "
+            f"bound={'-' if bound is None else bound})"
+        )
+    return ", ".join(parts)
+
+
 def render_run_report(records: list[dict[str, Any]]) -> str:
     lines = [
         "# recipe-lab run report",
         "",
-        "| record | round | tier | verdict | metrics | gates | bench_refs |",
-        "|---|---|---|---|---|---|---|",
+        "| record | round | tier | verdict | metrics | constraints | gates | bench_refs |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     inconsistencies: list[str] = []
     hashes = sorted({r.get("dataset_hash") for r in records if r.get("dataset_hash")})
@@ -59,7 +75,7 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
         refs = record.get("bench_refs") or []
         lines.append(
             f"| {record.get('record_id', '-')} | {record.get('round')} | {record.get('tier')} | **{record.get('verdict')}** "
-            f"| {_metrics_line(record.get('metrics') or {})} | {gates_text} | {len(refs)} ref(s) |"
+            f"| {_metrics_line(record.get('metrics') or {})} | {_constraints_line(record.get('constraints'))} | {gates_text} | {len(refs)} ref(s) |"
         )
         if record.get("tier") == "live" and record.get("verdict") != "INCONCLUSIVE":
             # replay-consistency: a decisive live record must carry complete
@@ -68,13 +84,18 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
                 inconsistencies.append(
                     f"round {record.get('round')}: live {record.get('verdict')} without gates"
                 )
-            if len(refs) < _MIN_LIVE_BENCH_REFS:
+            if len(refs) < 2:
                 inconsistencies.append(
                     f"round {record.get('round')}: live {record.get('verdict')} with fewer than two bench_refs"
                 )
         if record.get("coverage_warning"):
             lines.append(
-                f"| - | {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - |"
+                f"| - | {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - | - |"
+            )
+        if record.get("constraint_warning"):
+            lines.append(
+                f"| - | {record.get('round')} | note | constraint_warning | a declared constraint is violated under the "
+                "replay cost proxy; excluded from best_replay | - | - | - |"
             )
     if len(hashes) > 1:
         lines += [

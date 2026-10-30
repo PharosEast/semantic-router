@@ -54,5 +54,17 @@ stack:
   mode: external
   endpoint: http://127.0.0.1:8899
   baseline_ref: config-revision@main
+# E2: optional replay cost proxy - model name -> relative cost (positive
+# numbers; the absolute scale is arbitrary). Declaring it makes `run` record
+# routed_cost_index (mean relative cost over answered samples) per replay
+# record, proxy-evaluate the declared constraints, flag violations with
+# constraint_warning, and exclude warned candidates from best_replay. Without
+# it, replay does no constraint work and cost is adjudicated only in the
+# live tier.
+cost_model:
+  local/model-large: 10
+  local/model-math: 3
+  local/model-code: 3
+  local/model-small: 1
 # A5: no `evaluation` section - replay and live are separate commands with
 # CLI-fixed tiers.

@@ -102,6 +102,20 @@ def _contract_summary(spec: ExperimentSpec, records: list[dict[str, Any]]) -> li
             )
     else:
         lines.append("- constraints: none declared")
+    # E2: cost proxy availability decides what replay does with constraints.
+    if spec.cost_model is not None:
+        entries = ", ".join(f"{model}={_num(cost)}" for model, cost in sorted(spec.cost_model.items()))
+        lines.append(f"- cost_model (replay cost proxy): {entries}")
+        if objective.constraints:
+            lines.append(
+                "- cost constraints: proxy-evaluated in replay on routed_cost_index; "
+                "constraint-violating candidates carry constraint_warning and are excluded from best_replay"
+            )
+    elif objective.constraints:
+        lines.append(
+            "- cost constraints: replay does not adjudicate them (no cost_model); "
+            "cost is adjudicated only in the live tier"
+        )
     if spec.gates:
         lines.append("- gates:")
         for gate in spec.gates:

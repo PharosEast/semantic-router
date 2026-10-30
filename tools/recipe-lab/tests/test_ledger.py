@@ -232,3 +232,57 @@ def test_ledger_show_json_shows_record_ids(tmp_path, capsys):
     assert main(["ledger", "show", "--file", str(ledger.path), "--json"]) == 0
     printed = json.loads(capsys.readouterr().out)
     assert printed[0]["record_id"].startswith("rec-")
+
+
+# ---- E2: replay cost-proxy constraint_warning ----
+
+
+def _constraint_evidence(status: str = "violated") -> dict:
+    return {
+        "cost-not-worse": {
+            "name": "cost-not-worse",
+            "metric": "total_spend_usd",
+            "op": "lte",
+            "bound": "baseline",
+            "tolerance_pct": 0.0,
+            "baseline": 5.0,
+            "candidate": 5.5,
+            "bound_value": 5.0,
+            "status": status,
+            "proxy": "routed_cost_index",
+        }
+    }
+
+
+def test_constraint_warning_roundtrip_and_excluded_from_top(tmp_path):
+    # E2: a constraint-violating replay candidate is recorded with the warning
+    # plus its proxy evidence, and never wins the ranking hand-off.
+    warned = base_record(
+        metrics={"routed_accuracy": 0.99},
+        constraint_warning=True,
+        constraints=_constraint_evidence(),
+        reasons=["constraint cost-not-worse violated (replay cost proxy)"],
+    )
+    clean = base_record(
+        metrics={"routed_accuracy": 0.80},
+    )
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    stored = ledger.append(warned)
+    assert stored["constraint_warning"] is True
+    assert stored["constraints"]["cost-not-worse"]["proxy"] == "routed_cost_index"
+    ledger.append(clean)
+    top = ledger.top_replay("routed_accuracy")
+    assert top["metrics"]["routed_accuracy"] == 0.80  # the warned 0.99 never ranks
+    assert not top.get("constraint_warning")
+
+
+def test_constraint_warning_must_be_bool(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    with pytest.raises(ContractError, match="constraint_warning must be a boolean"):
+        ledger.append(base_record(constraint_warning="yes"))
+
+
+def test_constraint_warning_absent_by_default(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    stored = ledger.append(base_record())
+    assert "constraint_warning" not in stored

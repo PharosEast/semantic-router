@@ -190,6 +190,16 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
   `total_spend_usd` / `cache_neutral_cost_usd` / `cost_usd` / `evaluation_cost_usd`；
   用量未知序列化为 null → 约束不可评估 → INCONCLUSIVE（绝不记 0，也绝不记违规）。
   约束证据进入裁决输出与台账记录（`constraints` 字段），供报告重放。
+- **replay 成本代理（E2）**：可选顶层 `cost_model`（模型名 → 相对成本，必须为正数）。
+  声明后 `run` 在每个 replay 记录的 `metrics` 里追加 `routed_cost_index` =
+  已作答样本（`answer_ok` 非 null）按路由模型相对成本求均值；未作答 / no_bank_entry
+  不计。路由到 `cost_model` 未覆盖的模型时指标不可计算（未知成本绝不记 0），
+  记入 `reasons`。有 `cost_model` 时 replay 按该代理评估全部已声明约束：越界候选
+  标 `constraint_warning: true` 并附约束证据（`proxy: routed_cost_index`，
+  `bound: baseline` 解析为 baseline 臂的代理值，未评 baseline 时 not_evaluated），
+  `best_replay` / `ledger top` / `next` 的最优候选一律排除越界记录。
+  没有 `cost_model` 时 replay 不做约束，`next` 契约摘要提示"成本仅在 live 档裁决"。
+  报告列出主指标、`routed_cost_index` 与每个约束的状态 / 候选值 / bound 值。
 
 ## 记录格式（归因输入）
 
@@ -265,6 +275,7 @@ input record carries (e.g. from `collect-replays --family`).
   "default": {...}?}`。条件按标签串、有限数值或 `gte|lte|gt|lt` 谓词映射匹配信号事实
   （路由器语义：`gte` 在值小于 bound 时不命中）；首条命中的规则生效，缺省兜底
   `default`，两者都不覆盖的真值是 policy gap。
+- 顶层 `cost_model`（E2）是可选的 replay 成本代理声明；缺省时 replay 不评约束。
 - `workload` 声明三分 split（B）时必须给出 `split_rule` 文本且三分互不相交；
   旧的单数据集形态按 dev-only 处理并告警。
 - `budget.max_minutes_per_trial` 覆盖就绪等待 + 请求循环 + replay 拉取全程（A5）。

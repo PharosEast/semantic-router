@@ -71,8 +71,12 @@ def _improvement_pct(baseline: float, candidate: float, direction: str) -> float
     return (candidate - baseline) / baseline * 100.0
 
 
-def _resolve_constraint(constraint: dict[str, Any]) -> dict[str, Any]:
+def resolve_constraint(constraint: dict[str, Any]) -> dict[str, Any]:
     """Status and resolved bound for one constraint evidence entry (E).
+
+    Shared by the live verdict and the replay cost proxy (E2): the replay
+    tier feeds the same evidence shape with the routed_cost_index proxy
+    substituted for the live sr-bench measurement.
 
     `constraint` carries the declared fields (name/metric/op/bound/
     tolerance_pct) plus the measured `baseline` and `candidate` values
@@ -134,7 +138,7 @@ def evaluate_verdict(
     unevaluated = [g.name for g in guards if not g.evaluated]
     if unevaluated:
         reasons.append("guard evaluation incomplete: " + ", ".join(unevaluated))
-    resolved_constraints = [_resolve_constraint(c) for c in (constraints or [])]
+    resolved_constraints = [resolve_constraint(c) for c in (constraints or [])]
     for constraint in resolved_constraints:
         if constraint["status"] == "not_evaluated":
             reasons.append(

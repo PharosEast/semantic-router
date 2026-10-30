@@ -13,6 +13,9 @@ Layout follows the recipe-lab design §5.3:
   gates:        [{name, metric, floor}]  floor = "baseline" | number
   budget:       rounds / max_minutes_per_trial
   stack:        mode / endpoint / baseline_ref
+  cost_model:   optional model -> relative-cost map (E2); the replay tier
+                uses it to compute the routed_cost_index proxy and to warn
+                on constraint-violating candidates
 
 A5: the `evaluation` section is retired - replay and live are separate
 commands with CLI-fixed tiers, not contracted per experiment.
@@ -649,6 +652,35 @@ class Budget:
         }
 
 
+def _check_cost_model(raw: Any) -> dict[str, float] | None:
+    """E2: optional top-level `cost_model` - model name -> relative cost.
+
+    The replay tier's cost proxy (routed_cost_index) averages these relative
+    numbers over answered samples, so every value must be a finite positive
+    number (a zero or negative cost would corrupt the index, and an empty
+    map cannot proxy anything)."""
+    if raw is None:
+        return None
+    _require(
+        isinstance(raw, dict),
+        "cost_model must be a mapping of model name -> relative cost",
+    )
+    _require(
+        bool(raw),
+        "cost_model must not be empty (omit the key when there is no cost model)",
+    )
+    out: dict[str, float] = {}
+    for model, value in raw.items():
+        _require(
+            isinstance(model, str) and model.strip(),
+            f"cost_model keys must be non-empty model names (got {model!r})",
+        )
+        cost = _require_number(value, f"cost_model[{model!r}]")
+        _require(cost > 0, f"cost_model[{model!r}] must be > 0 (relative cost)")
+        out[model] = cost
+    return out
+
+
 @dataclass(frozen=True)
 class Stack:
     mode: str
@@ -692,6 +724,8 @@ class ExperimentSpec:
         default_factory=lambda: Budget(rounds=1, max_minutes_per_trial=120.0)
     )
     stack: Stack | None = None
+    # E2: optional model -> relative-cost map for the replay cost proxy.
+    cost_model: dict[str, float] | None = None
     # directory of the YAML file this spec was loaded from (from_yaml only);
     # workload.manifest resolves against it. Not part of the contract.
     spec_dir: str | None = None
@@ -720,6 +754,7 @@ class ExperimentSpec:
             if stack_raw is not None
             else None
         )
+        cost_model = _check_cost_model(raw.get("cost_model"))
         # A5: `evaluation` is retired - replay and live are separate commands,
         # tiers are fixed by the CLI, not contracted per experiment.
         _require(
@@ -734,6 +769,7 @@ class ExperimentSpec:
             gates=gates,
             budget=budget,
             stack=stack,
+            cost_model=cost_model,
         )
 
     @classmethod
@@ -825,6 +861,8 @@ class ExperimentSpec:
         }
         if self.stack is not None:
             out["stack"] = self.stack.to_dict()
+        if self.cost_model is not None:
+            out["cost_model"] = dict(self.cost_model)
         return out
 
 

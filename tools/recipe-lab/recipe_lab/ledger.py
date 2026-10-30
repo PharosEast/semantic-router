@@ -61,10 +61,16 @@ class LedgerRecord:
     # "timeout" when the stack exceeded budget.max_minutes_per_trial).
     # best_replay / top_replay exclude records carrying a status.
     status: str | None = None
-    # E: live-tier economic constraint evidence, name -> {metric, op, bound,
-    # baseline, candidate, bound_value, status}. Constraints are distinct
-    # from gates (safety vetoes); replay-tier records leave this empty.
+    # E: economic constraint evidence, name -> {metric, op, bound, baseline,
+    # candidate, bound_value, status}. Constraints are distinct from gates
+    # (safety vetoes). Live records carry the measured sr-bench evidence;
+    # E2 replay records carry the cost-proxy evidence (proxy:
+    # routed_cost_index) whenever a cost_model is declared.
     constraints: dict | None = None
+    # E2: replay-tier cost-proxy warning - a candidate whose routed_cost_index
+    # violates a declared constraint. best_replay / top_replay exclude warned
+    # candidates from the ranking hand-off.
+    constraint_warning: bool = False
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {
@@ -96,6 +102,8 @@ class LedgerRecord:
             out["status"] = self.status
         if self.constraints is not None:
             out["constraints"] = dict(self.constraints)
+        if self.constraint_warning:
+            out["constraint_warning"] = True
         return out
 
     @classmethod
@@ -126,6 +134,7 @@ class LedgerRecord:
             constraints=(
                 dict(raw["constraints"]) if raw.get("constraints") is not None else None
             ),
+            constraint_warning=bool(raw.get("constraint_warning", False)),
         )
 
 
@@ -189,6 +198,8 @@ def validate_record(raw: dict) -> None:
             raise ContractError(
                 f"status must be 'timeout' or 'incomplete', got {raw['status']!r}"
             )
+    if "constraint_warning" in raw and not isinstance(raw["constraint_warning"], bool):
+        raise ContractError("constraint_warning must be a boolean")
 
 
 def _require_present(raw: dict, name: str) -> None:
@@ -205,8 +216,10 @@ def best_replay(records: list[dict], metric_key: str) -> dict | None:
     """A2: pure best-replay selection over raw ledger records.
 
     Highest ``metrics[metric_key]`` among tier "replay" / verdict "RANKED"
-    records; coverage_warning records and A5 status records (a trial that
-    produced no usable metric) are excluded. Ties keep the earliest record.
+    records; coverage_warning records, A5 status records (a trial that
+    produced no usable metric) and E2 constraint_warning records (a
+    candidate that violates a declared constraint under the replay cost
+    proxy) are excluded. Ties keep the earliest record.
     Shared by ``Ledger.top_replay`` and the ``next`` context export so the
     hand-off to the live tier and the agent context always agree.
     """
@@ -218,6 +231,10 @@ def best_replay(records: list[dict], metric_key: str) -> dict | None:
         if raw.get("coverage_warning"):
             continue
         if raw.get("status"):  # A5: a trial that produced no metric never ranks
+            continue
+        if raw.get(
+            "constraint_warning"
+        ):  # E2: a constraint-violating candidate never ranks
             continue
         value = raw.get("metrics", {}).get(metric_key)
         if not isinstance(value, (int, float)) or isinstance(value, bool):

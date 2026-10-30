@@ -72,6 +72,7 @@ from .adapters.router_replay import (
 from .attribution import CaseInput, attribute, summarize
 from .bank import apply_bank
 from .contract import ContractError, OraclePolicy
+from .verdict import resolve_constraint
 
 
 class RunnerError(RuntimeError):
@@ -848,6 +849,76 @@ def attribution_delta(
 # A1: where each contracted replay metric lives in the run summary. The
 # metric name is the ledger key, the summary key is the runner's own field.
 REPLAY_SUMMARY_KEYS = {"routed_accuracy": "accuracy"}
+
+# E2: ledger key of the replay cost proxy. It is a secondary metric (recorded
+# alongside objective.replay_metric whenever cost_model is declared), never a
+# ranking metric: the replay tier ranks on the contracted replay_metric only.
+COST_PROXY_METRIC = "routed_cost_index"
+
+
+def routed_cost_index(rows: list[dict], cost_model: dict[str, float]) -> tuple[float | None, list[str]]:
+    """E2: mean relative cost of the routed models over answered samples.
+
+    Only answered rows count (`answer_ok` is not None; unanswered /
+    no_bank_entry rows carry no routing outcome and are excluded). A routed
+    model missing from cost_model makes the index incomputable - unknown
+    cost is never counted as zero (the sr-bench rule) - and the missing
+    model names are returned so the caller can record the reason.
+    Returns (index, unknown_models); index is None when nothing usable
+    remains (no answered rows or any unknown model).
+    """
+    known: list[float] = []
+    unknown: set[str] = set()
+    for row in rows:
+        if row.get("answer_ok") is None:
+            continue
+        model = row.get("routed")
+        cost = cost_model.get(model)
+        if cost is None:
+            unknown.add(str(model))
+        else:
+            known.append(float(cost))
+    if unknown or not known:
+        return None, sorted(unknown)
+    return round(sum(known) / len(known), 6), []
+
+
+def replay_constraint_evidence(
+    constraints,
+    candidate_index: float | None,
+    baseline_index: float | None,
+) -> tuple[list[dict], bool]:
+    """E2: evaluate the declared constraints against the cost proxy.
+
+    Every declared constraint is proxied: the replay tier has exactly one
+    economic measurement (routed_cost_index), so the declared live metric
+    name is preserved for provenance and `proxy` records the substitution.
+    `bound: "baseline"` resolves against the baseline arm's proxy value
+    (None when no baseline config was evaluated -> not_evaluated, never a
+    guess). Returns (evidence list, constraint_warning) where the warning
+    is True when any constraint is violated under the proxy.
+    """
+    evidence: list[dict] = []
+    warning = False
+    for constraint in constraints:
+        resolved = resolve_constraint(
+            {
+                "name": constraint.name,
+                "metric": constraint.metric,
+                "op": constraint.op,
+                "bound": constraint.bound,
+                "tolerance_pct": constraint.tolerance_pct,
+                # replay proxy substitution: both arms measured on the proxy
+                "baseline": baseline_index if constraint.bound == "baseline" else None,
+                "candidate": candidate_index,
+                "proxy": COST_PROXY_METRIC,
+            }
+        )
+        if resolved["status"] == "violated":
+            resolved["reason"] = f"constraint {constraint.name} violated (replay cost proxy)"
+            warning = True
+        evidence.append(resolved)
+    return evidence, warning
 
 
 def replay_metric_value(summary: dict, replay_metric: str) -> float | None:
