@@ -230,7 +230,7 @@ def test_run_round_beyond_budget_exits_2(tmp_path, capsys):
 def test_run_records_declared_gates_as_not_evaluated(monkeypatch, tmp_path):
     # A3: replay never evaluates guards; every declared gate lands in the
     # replay record as explicitly not evaluated (never null).
-    from recipe_lab import cli
+    from recipe_lab import cli  # noqa: PLC0415
 
     spec_path, cases = _write_frozen_spec(tmp_path)
     bank = tmp_path / "bank.jsonl"
@@ -241,23 +241,45 @@ def test_run_records_declared_gates_as_not_evaluated(monkeypatch, tmp_path):
 
     def fake_evaluate(**kwargs):
         # the runner's summary key for routed_accuracy is "accuracy" (A1)
-        return {"summary": {"accuracy": 0.9}, "statuses": {"ok": 1}, "bank_stats": {"no_bank_entry": 0}}
+        return {
+            "summary": {"accuracy": 0.9},
+            "statuses": {"ok": 1},
+            "bank_stats": {"no_bank_entry": 0},
+        }
 
     monkeypatch.setattr(cli, "evaluate_candidate", fake_evaluate)
     ledger_path = tmp_path / "ledger.jsonl"
     assert (
         main(
             [
-                "run", "--spec", spec_path, "--round", "1",
-                "--cases", str(cases), "--bank", str(bank),
-                "--ledger", str(ledger_path), "--candidates", str(cands),
-                "--router-bin", "/bin/true", "--mock-backend", str(tmp_path / "mock.py"),
-                "--output-dir", str(tmp_path / "out"),
+                "run",
+                "--spec",
+                spec_path,
+                "--round",
+                "1",
+                "--cases",
+                str(cases),
+                "--bank",
+                str(bank),
+                "--ledger",
+                str(ledger_path),
+                "--candidates",
+                str(cands),
+                "--router-bin",
+                "/bin/true",
+                "--mock-backend",
+                str(tmp_path / "mock.py"),
+                "--output-dir",
+                str(tmp_path / "out"),
             ]
         )
         == 0
     )
-    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert rows[-1]["gates"] == {"pii-recall-floor": "not_evaluated"}
     assert rows[-1]["metrics"] == {"routed_accuracy": 0.9}
 

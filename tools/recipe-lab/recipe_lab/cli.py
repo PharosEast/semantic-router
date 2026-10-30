@@ -687,19 +687,27 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
     # B: frozen_test is quarantined; only the --final promotion verdict may
     # cite it. Every other split goes through the normal A4 re-hash gate.
     if args.split == "frozen_test" and not args.final:
-        raise ContractError("frozen_test is quarantined; pass --final for the promotion verdict")
+        raise ContractError(
+            "frozen_test is quarantined; pass --final for the promotion verdict"
+        )
     dataset_hash = spec.verify_workload(split=args.split)
     try:
         raw_measurements = (
             [
                 json.loads(line)
-                for line in Path(args.guard_measurements).read_text(encoding="utf-8").splitlines()
+                for line in Path(args.guard_measurements)
+                .read_text(encoding="utf-8")
+                .splitlines()
                 if line.strip()
             ]
             if args.guard_measurements
             else []
         )
-        candidate_row = json.loads(Path(args.candidate).read_text(encoding="utf-8")) if args.candidate else None
+        candidate_row = (
+            json.loads(Path(args.candidate).read_text(encoding="utf-8"))
+            if args.candidate
+            else None
+        )
     except (OSError, json.JSONDecodeError) as exc:
         raise SystemExit(f"cannot load guard measurements or candidate: {exc}") from exc
     # A3: measurement schema violations are contract errors (exit 2); a
@@ -717,7 +725,12 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
     }
     merge_insight_refs(candidate_row.setdefault("provenance", {}), insight_refs)
 
-    cli = SrbenchCli(bin=args.srbench_bin, url=args.srbench_url, store=args.srbench_store, timeout_s=args.timeout)
+    cli = SrbenchCli(
+        bin=args.srbench_bin,
+        url=args.srbench_url,
+        store=args.srbench_store,
+        timeout_s=args.timeout,
+    )
     try:
         result = live_verdict_from_runs(
             spec=spec,
@@ -1124,14 +1137,20 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="promotion verdict; the only consumer allowed to cite the frozen_test split (B)",
     )
-    p_live.add_argument("--baseline-run-id", required=True, help="sr-bench baseline run ID")
-    p_live.add_argument("--candidate-run-id", required=True, help="sr-bench candidate run ID")
+    p_live.add_argument(
+        "--baseline-run-id", required=True, help="sr-bench baseline run ID"
+    )
+    p_live.add_argument(
+        "--candidate-run-id", required=True, help="sr-bench candidate run ID"
+    )
     p_live.add_argument(
         "--guard-measurements",
         default=None,
         help="guard measurements JSONL (name/candidate/baseline only; floors come from spec.gates, A3)",
     )
-    p_live.add_argument("--candidate", default=None, help="candidate JSON file for the ledger record")
+    p_live.add_argument(
+        "--candidate", default=None, help="candidate JSON file for the ledger record"
+    )
     p_live.add_argument(
         "--insight-refs",
         default=None,
@@ -1142,7 +1161,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="attribution artifact this round is based on (path@hash); recorded in the ledger",
     )
-    p_live.add_argument("--ledger", default=None, help="ledger JSONL to append the live record to")
+    p_live.add_argument(
+        "--ledger", default=None, help="ledger JSONL to append the live record to"
+    )
     p_live.add_argument("--srbench-bin", default="vllm-sr")
     p_live.add_argument("--srbench-url", default=None)
     p_live.add_argument("--srbench-store", default=None)
