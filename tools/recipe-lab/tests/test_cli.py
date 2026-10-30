@@ -292,6 +292,65 @@ def test_run_records_declared_gates_as_not_evaluated(monkeypatch, tmp_path):
     assert rows[-1]["metrics"] == {"routed_accuracy": 0.9}
 
 
+# ---- S5: run --proposer is a closed vocabulary plus agent:<id> ----
+
+
+@pytest.mark.parametrize(
+    "tag",
+    ["threshold-search", "rule-threshold", "distribution-calibration", "bootstrap", "agent:claude-1", "agent:a.b_c-d"],
+)
+def test_run_proposer_parses_valid_tags(tag):
+    args = build_parser().parse_args(
+        [
+            "run", "--spec", "s.yaml", "--cases", "c.jsonl", "--bank", "b.jsonl",
+            "--candidates", "x.yaml", "--ledger", "l.jsonl", "--output-dir", "o",
+            "--router-bin", "r", "--mock-backend", "m", "--proposer", tag,
+        ]
+    )
+    assert args.proposer == tag
+
+
+@pytest.mark.parametrize("tag", ["Agent1", "agent:", "agent:UPPER", "external", "agent:sp ace"])
+def test_run_proposer_rejects_invalid_tags(tag, capsys):
+    with pytest.raises(SystemExit) as exc:
+        main(["run", "--proposer", tag, "--spec", "s.yaml"])
+    assert exc.value.code == 2
+    assert "invalid --proposer" in capsys.readouterr().err
+
+
+def test_run_agent_proposer_lands_in_ledger_provenance(monkeypatch, tmp_path):
+    # S5: a self-authored candidate tagged agent:<id> keeps the tag verbatim.
+    from recipe_lab import cli
+
+    spec_path, cases = _write_frozen_spec(tmp_path)
+    bank = tmp_path / "bank.jsonl"
+    bank.write_text("", encoding="utf-8")
+    cands = tmp_path / "cands"
+    cands.mkdir()
+    (cands / "cand-1.yaml").write_text("kind: config\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "evaluate_candidate",
+        lambda **kwargs: {"summary": {"accuracy": 0.9}, "statuses": {"ok": 1}, "bank_stats": {"no_bank_entry": 0}},
+    )
+    ledger_path = tmp_path / "ledger.jsonl"
+    assert (
+        main(
+            [
+                "run", "--spec", spec_path, "--round", "1",
+                "--cases", str(cases), "--bank", str(bank),
+                "--ledger", str(ledger_path), "--candidates", str(cands),
+                "--proposer", "agent:claude-loop",
+                "--router-bin", "/bin/true", "--mock-backend", str(tmp_path / "mock.py"),
+                "--output-dir", str(tmp_path / "out"),
+            ]
+        )
+        == 0
+    )
+    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert rows[-1]["candidate"]["provenance"]["proposer"] == "agent:claude-loop"
+
+
 # ---- B: --split handling + the split command ----
 
 

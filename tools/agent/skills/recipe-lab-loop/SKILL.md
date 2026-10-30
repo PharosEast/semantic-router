@@ -36,6 +36,10 @@ Drive the closed loop with `tools/recipe-lab/recipe_lab/cli.py` (installed as
    cite the motivating evidence with `--insight-refs`, using the exact refs
    from `next`'s citable list (`rec-<id>`, `bench:<run_id>`,
    `attr:<path>@sha256:<hex>`, `diag:<path>@sha256:<hex>#<anchor>`).
+   When you authored the candidate config yourself (not a proposer output),
+   evaluate it with `--proposer agent:<id>` in step 5; the id is lowercase
+   `[a-z0-9._-]` (e.g. `agent:claude-loop`) and is recorded verbatim in the
+   ledger provenance.
 4. Validate the candidate: `vllm-sr config validate` on the revision.
    Failure: fix the config; never evaluate an invalid candidate.
 5. Evaluate in the replay tier: `recipe-lab run --spec spec.yaml --split dev

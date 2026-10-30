@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
@@ -390,6 +391,32 @@ def _resolve_candidates(value: str) -> list[Path]:
     if path.is_dir():
         return sorted(path.glob("*.yaml"))
     return [Path(part.strip()) for part in value.split(",") if part.strip()]
+
+
+# S5: run --proposer is a closed vocabulary plus the agent-authored form.
+_PROPOSER_TAGS = (
+    "threshold-search",
+    "rule-threshold",
+    "distribution-calibration",
+    "bootstrap",
+)
+
+
+def _proposer_arg(value: str) -> str:
+    """Validate the run --proposer provenance tag (S5).
+
+    A candidate the agent authored itself must be tagged ``agent:<id>`` with
+    id matching [a-z0-9._-]+, so ledger rows stay filterable per author.
+    """
+    if value in _PROPOSER_TAGS or re.fullmatch(r"agent:[a-z0-9._-]+", value):
+        return value
+    raise argparse.ArgumentTypeError(
+        "invalid --proposer "
+        + repr(value)
+        + ": expected one of "
+        + ", ".join(_PROPOSER_TAGS)
+        + " or agent:<id> (id: [a-z0-9._-]+)"
+    )
 
 
 def _candidate_entry(
@@ -1127,8 +1154,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument(
         "--proposer",
+        type=_proposer_arg,
         default="threshold-search",
-        help="provenance tag for the candidates",
+        help="provenance tag for the candidates: threshold-search | rule-threshold | distribution-calibration | bootstrap | agent:<id>",
     )
     p_run.add_argument(
         "--attribution-ref",
