@@ -535,7 +535,7 @@ def test_verify_exit_code_follows_verdict(
     tmp_path, capsys, monkeypatch, verdict, expected
 ):
     # I: verify shares the live-verdict exit-code contract (0/1/2).
-    import recipe_lab.cli as cli_module
+    import recipe_lab.cli as cli_module  # noqa: PLC0415
 
     spec_path, _ = _write_frozen_spec(tmp_path)
     candidate = tmp_path / "candidate.json"

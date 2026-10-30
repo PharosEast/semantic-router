@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+
 import pytest
 from recipe_lab.bank import BankEntry, apply_bank, grade, load_bank, write_bank
 from recipe_lab.contract import ContractError
@@ -36,7 +37,7 @@ def test_grade_mcq_uses_extracted_letter(monkeypatch):
 
 def test_grade_mcq_requires_judge_module(monkeypatch):
     monkeypatch.setattr("recipe_lab.bank._MCQ_LETTER", None)
-    import builtins
+    import builtins  # noqa: PLC0415
 
     real_import = builtins.__import__
 
@@ -46,7 +47,7 @@ def test_grade_mcq_requires_judge_module(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    with pytest.raises(ContractError, match="mcq grader needs src/ on sys.path"):
+    with pytest.raises(ContractError, match=r"mcq grader needs src/ on sys\.path"):
         grade("Option A", {"grader": "mcq", "expected": "A", "case_id": "c1"})
 
 
@@ -107,7 +108,7 @@ def _real_mcq_available() -> bool:
     if repo_src.is_dir() and str(repo_src) not in sys.path:
         sys.path.insert(0, str(repo_src))
     try:
-        import training.model_eval.mcq_judge  # noqa: F401
+        import training.model_eval.mcq_judge  # noqa: F401, PLC0415
 
         return True
     except ImportError:
@@ -120,7 +121,7 @@ def _real_mcq_available() -> bool:
 )
 def test_grade_mcq_with_real_judge():
     # verified (I): mcq_judge is importable as a plain function module
-    from training.model_eval.mcq_judge import extract_letter  # noqa: F401
+    from training.model_eval.mcq_judge import extract_letter  # noqa: F401, PLC0415
 
     case = {"grader": "mcq", "expected": "B", "case_id": "c2"}
     assert grade("Answer: B", case) is True
