@@ -41,8 +41,12 @@ def test_load_bank_rejects_duplicate_key(tmp_path):
 
 def test_apply_bank_joins_by_routed_model():
     bank = {
-        ("c1", "m-a"): BankEntry(case_id="c1", model="m-a", answer="ok", answer_ok=True),
-        ("c1", "m-b"): BankEntry(case_id="c1", model="m-b", answer="bad", answer_ok=False),
+        ("c1", "m-a"): BankEntry(
+            case_id="c1", model="m-a", answer="ok", answer_ok=True
+        ),
+        ("c1", "m-b"): BankEntry(
+            case_id="c1", model="m-b", answer="bad", answer_ok=False
+        ),
     }
     rows = [
         {"case_id": "c1", "routed": "m-a"},
@@ -52,5 +56,7 @@ def test_apply_bank_joins_by_routed_model():
     merged, stats = apply_bank(rows, bank)
     assert merged[0]["answer_ok"] is True
     assert merged[1]["answer_ok"] is False
-    assert merged[2]["answer_ok"] is None  # evidence-first: missing entry stays no-evidence
+    assert (
+        merged[2]["answer_ok"] is None
+    )  # evidence-first: missing entry stays no-evidence
     assert stats == {"joined": 2, "no_bank_entry": 1}
