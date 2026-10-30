@@ -77,13 +77,15 @@ class CaseInput:
     family: str | None = None
 
     @classmethod
-    def from_dict(cls, raw: dict, lineno: int) -> "CaseInput":
+    def from_dict(cls, raw: dict, lineno: int) -> CaseInput:
         if "matched_decision" not in raw and "pred" in raw:
             # pre-F1 field name; kept readable for compatibility (F1)
             raw = {**raw, "matched_decision": raw["pred"]}
         for name in REQUIRED_FIELDS:
             if name not in raw:
-                raise ContractError(f"attribution record line {lineno} is missing required field: {name}")
+                raise ContractError(
+                    f"attribution record line {lineno} is missing required field: {name}"
+                )
         answer_ok = raw["answer_ok"]
         if answer_ok is not None and not isinstance(answer_ok, bool):
             raise ContractError(
@@ -92,10 +94,14 @@ class CaseInput:
             )
         for name in ("case_id", "truth", "matched_decision", "routed"):
             if not isinstance(raw[name], str) or not raw[name].strip():
-                raise ContractError(f"attribution record line {lineno}: {name} must be a non-empty string")
+                raise ContractError(
+                    f"attribution record line {lineno}: {name} must be a non-empty string"
+                )
         family = raw.get("family")
         if family is not None and (not isinstance(family, str) or not family.strip()):
-            raise ContractError(f"attribution record line {lineno}: family must be a non-empty string when present")
+            raise ContractError(
+                f"attribution record line {lineno}: family must be a non-empty string when present"
+            )
         return cls(
             case_id=raw["case_id"],
             truth=raw["truth"],
@@ -106,7 +112,7 @@ class CaseInput:
         )
 
 
-def classify_case(case: "CaseInput | dict", policy: OraclePolicy) -> dict[str, Any]:
+def classify_case(case: CaseInput | dict, policy: OraclePolicy) -> dict[str, Any]:
     """Classify one case into the attribution taxonomy (branch-explicit).
 
     Accepts a CaseInput or a raw record dict."""
@@ -147,19 +153,23 @@ def load_records(path: str | Path) -> list[CaseInput]:
         raise ContractError(f"attribution records file not found: {path}")
     cases: list[CaseInput] = []
     with path.open("r", encoding="utf-8") as fh:
-        for lineno, line in enumerate(fh, 1):
-            line = line.strip()
+        for lineno, raw_line in enumerate(fh, 1):
+            line = raw_line.strip()
             if not line:
                 continue
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"attribution records line {lineno} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"attribution records line {lineno} is not valid JSON: {exc}"
+                ) from exc
             cases.append(CaseInput.from_dict(raw, lineno))
     return cases
 
 
-def attribute(cases: list[CaseInput], policy: OraclePolicy, dataset_hash: str = "") -> list[dict[str, Any]]:
+def attribute(
+    cases: list[CaseInput], policy: OraclePolicy, dataset_hash: str = ""
+) -> list[dict[str, Any]]:
     rows = [classify_case(c, policy) for c in cases]
     for row in rows:
         if dataset_hash:
@@ -180,7 +190,9 @@ def summarize(rows: list[dict[str, Any]], top_k: int = 5) -> dict[str, Any]:
     mm_confusion = Counter((r["truth"], r["matched_decision"]) for r in mm_rows)
     e2_rows = [r for r in rows if r["error_class"] == E2_POLICY]
     deviations = Counter((r["routed"], r["expected"]) for r in e2_rows)
-    e3_by_family = Counter(r.get("family") or "unknown" for r in rows if r["error_class"] == E3_CAPABILITY)
+    e3_by_family = Counter(
+        r.get("family") or "unknown" for r in rows if r["error_class"] == E3_CAPABILITY
+    )
     e1_by_family = Counter(r.get("family") or "unknown" for r in e1_rows)
 
     return {
@@ -192,13 +204,16 @@ def summarize(rows: list[dict[str, Any]], top_k: int = 5) -> dict[str, Any]:
         "e1_by_family": dict(e1_by_family),
         "e3_by_family": dict(e3_by_family),
         "e1_confusion_top": [
-            {"truth": t, "matched_decision": m, "count": n} for (t, m), n in confusion.most_common(top_k)
+            {"truth": t, "matched_decision": m, "count": n}
+            for (t, m), n in confusion.most_common(top_k)
         ],
         "decision_mismatch_top": [
-            {"truth": t, "matched_decision": m, "count": n} for (t, m), n in mm_confusion.most_common(top_k)
+            {"truth": t, "matched_decision": m, "count": n}
+            for (t, m), n in mm_confusion.most_common(top_k)
         ],
         "e2_deviations_top": [
-            {"routed": r, "expected": e, "count": n} for (r, e), n in deviations.most_common(top_k)
+            {"routed": r, "expected": e, "count": n}
+            for (r, e), n in deviations.most_common(top_k)
         ],
     }
 
@@ -206,7 +221,9 @@ def summarize(rows: list[dict[str, Any]], top_k: int = 5) -> dict[str, Any]:
 def render_markdown(summary: dict[str, Any], dataset_hash: str = "") -> str:
     counts = summary["class_counts"]
     accuracy = summary["accuracy"]
-    accuracy_text = f"{accuracy * 100:.2f}%" if accuracy is not None else "N/A (no answered cases)"
+    accuracy_text = (
+        f"{accuracy * 100:.2f}%" if accuracy is not None else "N/A (no answered cases)"
+    )
     lines = [
         "# Misroute attribution report",
         "",
@@ -225,14 +242,20 @@ def render_markdown(summary: dict[str, Any], dataset_hash: str = "") -> str:
     lines += ["", "## E1 by signal family", ""]
     if summary["e1_by_family"]:
         for family, n in sorted(summary["e1_by_family"].items()):
-            hint = "threshold neighborhoods" if family == "vela_classify" else "question-text edits (signal-question engineering, later proposer)"
+            hint = (
+                "threshold neighborhoods"
+                if family == "vela_classify"
+                else "question-text edits (signal-question engineering, later proposer)"
+            )
             lines.append(f"- `{family}`: {n} cases -> directional hint: {hint}")
     else:
         lines.append("- none")
     lines += ["", "## E1 confusion pairs (top)", ""]
     if summary["e1_confusion_top"]:
         for item in summary["e1_confusion_top"]:
-            lines.append(f"- `{item['truth']}` -> `{item['matched_decision']}`: {item['count']}")
+            lines.append(
+                f"- `{item['truth']}` -> `{item['matched_decision']}`: {item['count']}"
+            )
     else:
         lines.append("- none (E1 needs signal-level truth, F2)")
     lines += ["", "## decision_mismatch confusion pairs (top)", ""]
@@ -246,13 +269,17 @@ def render_markdown(summary: dict[str, Any], dataset_hash: str = "") -> str:
     lines += ["", "## E2 routing deviations (top)", ""]
     if summary["e2_deviations_top"]:
         for item in summary["e2_deviations_top"]:
-            lines.append(f"- routed `{item['routed']}` but policy expects `{item['expected']}`: {item['count']}")
+            lines.append(
+                f"- routed `{item['routed']}` but policy expects `{item['expected']}`: {item['count']}"
+            )
     else:
         lines.append("- none")
     lines += ["", "## E3 by signal family", ""]
     if summary["e3_by_family"]:
         for family, n in sorted(summary["e3_by_family"].items()):
-            lines.append(f"- `{family}`: {n} cases (routing not at fault; candidate new-signal area)")
+            lines.append(
+                f"- `{family}`: {n} cases (routing not at fault; candidate new-signal area)"
+            )
     else:
         lines.append("- none")
     return "\n".join(lines) + "\n"

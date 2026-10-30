@@ -40,7 +40,9 @@ VALID_SPEC: dict = {
 }
 
 
-def make_case(case_id: str, truth: str, matched_decision: str, routed: str, answer_ok, family=None) -> dict:
+def make_case(
+    case_id: str, truth: str, matched_decision: str, routed: str, answer_ok, family=None
+) -> dict:
     return {
         "case_id": case_id,
         "truth": truth,

@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from recipe_lab.attribution import (
     CORRECT,
     DECISION_MISMATCH,
@@ -24,6 +23,7 @@ from recipe_lab.attribution import (
     write_jsonl,
 )
 from recipe_lab.contract import ContractError
+
 from tests.fixtures import ATTRIBUTION_CASES, POLICY, make_case
 
 
@@ -59,7 +59,13 @@ def test_e1_never_produced_from_string_truth():
 def test_legacy_pred_field_still_readable():
     # records written before F1 use "pred"; they must keep loading
     row = classify_case(
-        {"case_id": "x", "truth": "math", "pred": "code", "routed": "m", "answer_ok": False},
+        {
+            "case_id": "x",
+            "truth": "math",
+            "pred": "code",
+            "routed": "m",
+            "answer_ok": False,
+        },
         POLICY,
     )
     assert row["error_class"] == DECISION_MISMATCH
@@ -68,12 +74,16 @@ def test_legacy_pred_field_still_readable():
 
 def test_evidence_first_no_evidence_with_deviation():
     # answer unknown + routing deviates -> NO_EVIDENCE (never counted as an error)
-    row = classify_case(make_case("x", "math", "math", "local/model-code", None), POLICY)
+    row = classify_case(
+        make_case("x", "math", "math", "local/model-code", None), POLICY
+    )
     assert row["error_class"] == NO_EVIDENCE
 
 
 def test_policy_gap_precedes_everything():
-    row = classify_case(make_case("x", "no-such-label", "also-wrong", "m", None), POLICY)
+    row = classify_case(
+        make_case("x", "no-such-label", "also-wrong", "m", None), POLICY
+    )
     assert row["error_class"] == POLICY_GAP
     assert row["expected"] is None
 
@@ -92,10 +102,16 @@ def test_summary_math():
     assert summary["class_counts"][DECISION_MISMATCH] == 1
     assert summary["class_counts"][E1_SIGNAL] == 0  # E1 needs signal-level truth (F1)
     # decision mismatch pair: truth=math matched as code
-    assert {"truth": "math", "matched_decision": "code", "count": 1} in summary["decision_mismatch_top"]
+    assert {"truth": "math", "matched_decision": "code", "count": 1} in summary[
+        "decision_mismatch_top"
+    ]
     assert summary["e1_confusion_top"] == []
     # E2 deviation: routed code, expected model-math
-    assert {"routed": "local/model-code", "expected": "local/model-math", "count": 1} in summary["e2_deviations_top"]
+    assert {
+        "routed": "local/model-code",
+        "expected": "local/model-math",
+        "count": 1,
+    } in summary["e2_deviations_top"]
     assert summary["e1_by_family"] == {}
 
 
@@ -129,7 +145,15 @@ def test_write_jsonl_roundtrip(tmp_path):
 def test_load_records_rejects_bad_answer_ok(tmp_path):
     path = tmp_path / "records.jsonl"
     path.write_text(
-        json.dumps({"case_id": "a", "truth": "math", "pred": "math", "routed": "m", "answer_ok": "yes"}),
+        json.dumps(
+            {
+                "case_id": "a",
+                "truth": "math",
+                "pred": "math",
+                "routed": "m",
+                "answer_ok": "yes",
+            }
+        ),
         encoding="utf-8",
     )
     with pytest.raises(ContractError, match="answer_ok"):

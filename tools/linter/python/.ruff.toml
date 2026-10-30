@@ -182,3 +182,5 @@ ignore = [
 "src/vllm-sr/tests/test_latency_validation.py" = ["I001"]
 "src/vllm-sr/tests/test_plugin_parsing.py" = ["I001", "RUF043"]
 "src/vllm-sr/tests/test_setup_bootstrap.py" = ["I001", "UP015"]
+
+"tools/recipe-lab/tests/*.py" = ["PLR2004", "PLC0415"]
