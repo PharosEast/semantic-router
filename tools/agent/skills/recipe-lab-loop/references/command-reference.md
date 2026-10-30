@@ -13,6 +13,15 @@ for `live-verdict`.
   experiment runs. Contract errors exit 2 with the reason on stderr — fix
   the spec and re-run. Every later command re-checks the same contract, so
   a spec that passes this command is the single source of truth for a round.
+- `attribution.oracle_policy` (F2) takes exactly one of two forms: a
+  label -> model mapping, or a rules/default mapping
+  `{"rules": [{"when": {<signal>: <condition>}, "expect": {"decision":
+  <decision>, "models": [<model>, ...]?}}, ...],
+  "default": {"decision": ...}?}`. A condition matches one signal fact by
+  label string, finite number, or a numeric predicate mapping over
+  `gte|lte|gt|lt` (router semantics: `gte` fails when the value is below
+  the bound). The first matching rule wins, the optional default covers
+  the rest, and truth no rule covers is a policy gap.
 
 ## Dataset identity and splits (stage 2)
 

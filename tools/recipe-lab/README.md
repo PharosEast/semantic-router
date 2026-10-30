@@ -5,7 +5,7 @@ Closed-loop experiments for semantic-router routing recipes（RSI 工作台）�
 本层覆盖 replay-tier 闭环：冻结题集身份（A4）→ 题集三分（B）→ 答案库与归因 →
 候选提议（信号级 / 规则级 / 分布校准）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2），
 以及 live 层终裁 `live-verdict`（守卫以契约为准 A3、洞察引用 G2、经济约束 E）。
-另含无需标注的分布诊断（D）。
+另含无需标注的分布诊断（D）、oracle policy 的规则/默认形态（F2）。
 
 ## 安装
 
@@ -250,6 +250,11 @@ input record carries (e.g. from `collect-replays --family`).
 - `objective.replay_metric` 是 replay 层唯一排序指标（A1）；旧 `evaluation` 段已退役，
   加载即报错（A5）。
 - `objective.constraints` 声明 live 层经济约束（E）；守卫地板只来自 `gates`（A3）。
+- `attribution.oracle_policy`（F2）取两种形态之一：label → model 映射，或
+  `{"rules": [{"when": {<信号>: <条件>}, "expect": {decision, models?}}, ...],
+  "default": {...}?}`。条件按标签串、有限数值或 `gte|lte|gt|lt` 谓词映射匹配信号事实
+  （路由器语义：`gte` 在值小于 bound 时不命中）；首条命中的规则生效，缺省兜底
+  `default`，两者都不覆盖的真值是 policy gap。
 - `workload` 声明三分 split（B）时必须给出 `split_rule` 文本且三分互不相交；
   旧的单数据集形态按 dev-only 处理并告警。
 - `budget.max_minutes_per_trial` 覆盖就绪等待 + 请求循环 + replay 拉取全程（A5）。
