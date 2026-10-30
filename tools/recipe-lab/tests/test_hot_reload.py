@@ -23,11 +23,9 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from recipe_lab.adapters.router_replay import CaseJoin, records_to_cases_by_request_id
 from recipe_lab.bank import BankEntry
 from recipe_lab.contract import OraclePolicy
-from recipe_lab.ledger import Ledger
 from recipe_lab.runner import (
     HotReloadSession,
     RunnerEnv,
@@ -35,7 +33,9 @@ from recipe_lab.runner import (
     request_id_for_case,
 )
 
-POLICY = OraclePolicy.from_dict({"math": "local/model-math", "code": "local/model-code"})
+POLICY = OraclePolicy.from_dict(
+    {"math": "local/model-math", "code": "local/model-code"}
+)
 
 CASES = [
     {"case_id": "c1", "prompt": "prompt one", "truth": "code"},
@@ -186,7 +186,9 @@ gateway.serve_forever()
 def _seed_state(path: Path) -> None:
     """Write the fake router's initial shared state file."""
     path.write_text(
-        json.dumps({"records": [], "put_count": 0, "pending_hash_polls": 0, "drop_next": False}),
+        json.dumps(
+            {"records": [], "put_count": 0, "pending_hash_polls": 0, "drop_next": False}
+        ),
         encoding="utf-8",
     )
 
@@ -247,7 +249,6 @@ def hot_stack(tmp_path):
     yield _StateView(state_path), env
 
 
-
 def _candidate(path: Path, marker: str = "") -> Path:
     """Write a minimal candidate config with one gateway listener.
 
@@ -271,7 +272,6 @@ def _candidate(path: Path, marker: str = "") -> Path:
     return path
 
 
-
 # ---- pure helpers ----
 
 
@@ -282,8 +282,16 @@ def test_candidate_tag_and_request_ids():
 
 def test_records_join_by_request_id():
     records = [
-        {"request_id": "rl-aa11-c1", "decision": "code", "selected_model": "local/model-code"},
-        {"request_id": "rl-aa11-c2", "decision": "math", "selected_model": "local/model-math"},
+        {
+            "request_id": "rl-aa11-c1",
+            "decision": "code",
+            "selected_model": "local/model-code",
+        },
+        {
+            "request_id": "rl-aa11-c2",
+            "decision": "math",
+            "selected_model": "local/model-math",
+        },
         {"request_id": "other-candidate", "decision": "x", "selected_model": "y"},
         {"decision": "no-id"},
     ]
@@ -308,10 +316,14 @@ def test_hot_reload_success_put_pending_and_request_ids(tmp_path, hot_stack):
     cand_a = _candidate(cands / "a.yaml")
     cand_b = _candidate(cands / "b.yaml", "# hot-pending")  # 202 -> hash poll
 
-    session = HotReloadSession(env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3")
+    session = HotReloadSession(
+        env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3"
+    )
     try:
         session.ensure_started()
-        r1 = session.evaluate(candidate_config=cand_a, cases=CASES, oracle_policy=POLICY, bank=BANK)
+        r1 = session.evaluate(
+            candidate_config=cand_a, cases=CASES, oracle_policy=POLICY, bank=BANK
+        )
         assert r1["reload"] == "hot"
         assert r1["statuses"] == {"c1": 200, "c2": 200}
         assert r1["timings"]["switch_s"] == 0.0  # boot config: no PUT needed
@@ -324,13 +336,17 @@ def test_hot_reload_success_put_pending_and_request_ids(tmp_path, hot_stack):
             request_id_for_case(tag_a, "c2"),
         }
 
-        r2 = session.evaluate(candidate_config=cand_b, cases=CASES, oracle_policy=POLICY, bank=BANK)
+        r2 = session.evaluate(
+            candidate_config=cand_b, cases=CASES, oracle_policy=POLICY, bank=BANK
+        )
         assert state.put_count == 1  # only the second candidate PUTs
         assert r2["timings"]["switch_s"] > 0
         assert r2["summary"]["accuracy"] == EXPECTED_ACCURACY
         tag_b = candidate_tag(cand_b.read_text(encoding="utf-8"))
         assert tag_b != tag_a
-        assert any(rec["request_id"].startswith(f"rl-{tag_b}-") for rec in state.records)
+        assert any(
+            rec["request_id"].startswith(f"rl-{tag_b}-") for rec in state.records
+        )
         assert len(r2["rows"]) == 2  # candidate A's records never leak in
     finally:
         session.stop()
@@ -344,12 +360,19 @@ def test_hot_reload_rejected_put_falls_back_to_restart(tmp_path, hot_stack):
     cand_rej = _candidate(cands / "rej.yaml", "# hot-reject")
     cand_c = _candidate(cands / "c.yaml")
 
-    session = HotReloadSession(env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3")
+    session = HotReloadSession(
+        env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3"
+    )
     try:
         session.ensure_started()
-        session.evaluate(candidate_config=cand_a, cases=CASES, oracle_policy=POLICY, bank=BANK)
+        session.evaluate(
+            candidate_config=cand_a, cases=CASES, oracle_policy=POLICY, bank=BANK
+        )
         result = session.evaluate_with_fallback(
-            candidate_config=cand_rej, cases=CASES, oracle_policy=POLICY, bank=BANK,
+            candidate_config=cand_rej,
+            cases=CASES,
+            oracle_policy=POLICY,
+            bank=BANK,
         )
         assert result["reload"] == "restart-fallback"
         assert "409" in result["fallback_reason"]
@@ -359,7 +382,9 @@ def test_hot_reload_rejected_put_falls_back_to_restart(tmp_path, hot_stack):
 
         # the next candidate re-boots the session hot from the boot source
         session.ensure_started()
-        after = session.evaluate(candidate_config=cand_c, cases=CASES, oracle_policy=POLICY, bank=BANK)
+        after = session.evaluate(
+            candidate_config=cand_c, cases=CASES, oracle_policy=POLICY, bank=BANK
+        )
         assert after["reload"] == "hot"
         assert state.put_count == 2  # rejected PUT + post-fallback PUT
         assert after["summary"]["accuracy"] == EXPECTED_ACCURACY
@@ -368,17 +393,23 @@ def test_hot_reload_rejected_put_falls_back_to_restart(tmp_path, hot_stack):
 
 
 def test_hot_reload_count_mismatch_records_incomplete(tmp_path, hot_stack):
-    state, env = hot_stack
+    _state, env = hot_stack
     cands = tmp_path / "cands"
     cands.mkdir()
     cand_a = _candidate(cands / "a.yaml")
     cand_drop = _candidate(cands / "drop.yaml", "# hot-drop")
 
-    session = HotReloadSession(env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3")
+    session = HotReloadSession(
+        env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3"
+    )
     try:
         session.ensure_started()
-        session.evaluate(candidate_config=cand_a, cases=CASES, oracle_policy=POLICY, bank=BANK)
-        result = session.evaluate(candidate_config=cand_drop, cases=CASES, oracle_policy=POLICY, bank=BANK)
+        session.evaluate(
+            candidate_config=cand_a, cases=CASES, oracle_policy=POLICY, bank=BANK
+        )
+        result = session.evaluate(
+            candidate_config=cand_drop, cases=CASES, oracle_policy=POLICY, bank=BANK
+        )
         assert result["incomplete"] is True
         assert "rows for 2 cases" in result["incomplete_reason"]
         assert "summary" not in result and "rows" not in result
@@ -387,17 +418,22 @@ def test_hot_reload_count_mismatch_records_incomplete(tmp_path, hot_stack):
 
 
 def test_hot_reload_failed_activation_falls_back(tmp_path, hot_stack):
-    state, env = hot_stack
+    _state, env = hot_stack
     cands = tmp_path / "cands"
     cands.mkdir()
     cand_a = _candidate(cands / "a.yaml")
     cand_fail = _candidate(cands / "fail.yaml", "# hot-fail")
 
-    session = HotReloadSession(env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3")
+    session = HotReloadSession(
+        env=env, boot_source=cand_a, router_model="vllm-sr/auto", family="d3"
+    )
     try:
         session.ensure_started()
         result = session.evaluate_with_fallback(
-            candidate_config=cand_fail, cases=CASES, oracle_policy=POLICY, bank=BANK,
+            candidate_config=cand_fail,
+            cases=CASES,
+            oracle_policy=POLICY,
+            bank=BANK,
         )
         assert result["reload"] == "restart-fallback"
         assert "failed" in result["fallback_reason"]

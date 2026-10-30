@@ -186,7 +186,9 @@ def validate_record(raw: dict) -> None:
         # request ids. Neither carries a metric and both are excluded from
         # top_replay, so a broken capture can never rank as a worse recipe.
         if raw["status"] not in ("timeout", "incomplete"):
-            raise ContractError(f"status must be 'timeout' or 'incomplete', got {raw['status']!r}")
+            raise ContractError(
+                f"status must be 'timeout' or 'incomplete', got {raw['status']!r}"
+            )
 
 
 def _require_present(raw: dict, name: str) -> None:
