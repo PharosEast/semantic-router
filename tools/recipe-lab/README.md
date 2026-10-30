@@ -105,7 +105,7 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
 2. 契约摘要：objective、replay_metric、constraints、gates、split 名称与哈希、预算已用/剩余轮数；
 3. 台账尾部 + 最好 replay 候选（A2：按 `objective.replay_metric` 经共享的
    `ledger.best_replay` 选取，coverage_warning 与超时记录不参与，与 `ledger top` 一致）
-   + 最近一次 live 裁决及原因；
+   - 最近一次 live 裁决及原因；
 4. 最近一次归因摘要：各类别计数、E1 / decision_mismatch / E2 top-5 —— 从最新记录的
    `attribution_ref`（`<path>@sha256:<hex>`）校验哈希后读取 `summary.json`，哈希不符 exit 2；
 5. 诊断要点（`--diagnosis` 时）：dead / rare 决策、unreachable 阈值位点；
