@@ -18,7 +18,10 @@ RULES_POLICY = OraclePolicy.from_dict(
         "rules": [
             {
                 "when": {"domain": "code", "difficulty": {"gte": 3}},
-                "expect": {"decision": "domain_code_complex", "models": ["m/pro", "m/max"]},
+                "expect": {
+                    "decision": "domain_code_complex",
+                    "models": ["m/pro", "m/max"],
+                },
             },
             {
                 "when": {"domain": "code"},
@@ -104,7 +107,11 @@ def make_signal_case(
         "routed": routed,
         "answer_ok": answer_ok,
         **({"signal_values": signal_values} if signal_values is not None else {}),
-        **({"signal_confidences": signal_confidences} if signal_confidences is not None else {}),
+        **(
+            {"signal_confidences": signal_confidences}
+            if signal_confidences is not None
+            else {}
+        ),
     }
 
 
@@ -166,6 +173,7 @@ def pilot_rows_jsonl() -> str:
     import json
 
     return "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in pilot_rows())
+
 
 # F2 cases over RULES_POLICY; truth facts vs observed signal evidence.
 # Choice-type decision evidence stores one probability per choice
