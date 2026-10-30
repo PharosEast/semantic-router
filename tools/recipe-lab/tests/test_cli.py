@@ -484,3 +484,57 @@ def test_every_subcommand_is_documented():
             if not re.search(pattern, text):
                 missing.append(f"{name}: {doc}")
     assert not missing, "undocumented subcommands: " + ", ".join(missing)
+
+
+# ---- A6 reverse: every documented invocation exists in the CLI ----
+
+
+def _top_level_parser_map() -> dict:
+    for action in build_parser()._actions:
+        if isinstance(action, argparse._SubParsersAction):
+            return dict(action.choices)
+    raise AssertionError("build_parser() registers no subcommands")
+
+
+def _documented_invocations() -> list:
+    """(doc, args) for every recipe-lab invocation the docs teach."""
+    root = Path(__file__).resolve().parents[3]
+    docs = {
+        "README": (root / "tools/recipe-lab/README.md").read_text(encoding="utf-8"),
+        "command-reference.md": (
+            root / "tools/agent/skills/recipe-lab-loop/references/command-reference.md"
+        ).read_text(encoding="utf-8"),
+    }
+    found = []
+    for doc, text in docs.items():
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("recipe-lab "):
+                found.append((doc, stripped[len("recipe-lab "):]))
+        for m in re.finditer(r"`recipe-lab\s+([^`\n]+)`", text):
+            found.append((doc, m.group(1).strip()))
+    return found
+
+
+def test_every_documented_invocation_exists():
+    parsers = _top_level_parser_map()
+    unknown = []
+    for doc, invocation in _documented_invocations():
+        tokens = invocation.split()
+        if not tokens:
+            continue
+        name = tokens[0].rstrip(".")
+        if not re.fullmatch(r"[a-z][a-z0-9-]*", name):
+            continue  # flags, placeholders and prose are not subcommands
+        if name not in parsers:
+            unknown.append(f"{doc}: recipe-lab {name}")
+            continue
+        sub_names = set()
+        for action in parsers[name]._actions:
+            if isinstance(action, argparse._SubParsersAction):
+                sub_names = set(action.choices)
+        if len(tokens) > 1 and re.fullmatch(r"[a-z][a-z0-9|]*", tokens[1]) and sub_names:
+            for action in tokens[1].split("|"):
+                if action not in sub_names:
+                    unknown.append(f"{doc}: recipe-lab {name} {action}")
+    assert not unknown, "documented but nonexistent invocations: " + ", ".join(unknown)
