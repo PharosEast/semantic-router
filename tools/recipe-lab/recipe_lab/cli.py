@@ -1268,7 +1268,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
         )
         ledger.append(record)
     _print_json(result)
-    return 0
+    return verdict_exit_code(result["verdict"])
 
 
 def build_parser() -> argparse.ArgumentParser:

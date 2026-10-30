@@ -528,6 +528,46 @@ def test_verdict_exit_code_mapping():
     assert verdict_exit_code("INCONCLUSIVE") == EXIT_CONTRACT_ERROR
 
 
+@pytest.mark.parametrize("verdict,expected", [("PASS", 0), ("FAIL", 1), ("INCONCLUSIVE", 2)])
+def test_verify_exit_code_follows_verdict(tmp_path, capsys, monkeypatch, verdict, expected):
+    # I: verify shares the live-verdict exit-code contract (0/1/2).
+    import recipe_lab.cli as cli_module
+
+    spec_path, _ = _write_frozen_spec(tmp_path)
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1", "srbench_targets": ["tgt-1"]}),
+        encoding="utf-8",
+    )
+    fake = {
+        "verdict": verdict,
+        "metrics": {"candidate": 0.7, "baseline": 0.8},
+        "reasons": [],
+        "gates": [],
+        "constraints": [],
+        "bench_refs": [],
+    }
+    monkeypatch.setattr(cli_module, "verify_live", lambda **kwargs: fake)
+    monkeypatch.setattr(cli_module, "SrbenchCli", lambda **kwargs: object())
+    assert (
+        main(
+            [
+                "verify",
+                "--spec",
+                spec_path,
+                "--baseline-run-id",
+                "run-b",
+                "--candidate",
+                str(candidate),
+                "--work-dir",
+                str(tmp_path / "work"),
+            ]
+        )
+        == expected
+    )
+    assert json.loads(capsys.readouterr().out)["verdict"] == verdict
+
+
 def test_plan_prints_single_json_document(tmp_path, capsys):
     spec = _write_spec(tmp_path)
     assert main(["plan", "--spec", spec]) == 0
