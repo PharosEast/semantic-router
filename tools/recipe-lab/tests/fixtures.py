@@ -84,6 +84,7 @@ ATTRIBUTION_CASES: list[dict] = [
 
 # ---- sub-issue 7: BUG-3 pilot-shaped diagnostic rows (D) ----
 
+
 def pilot_difficulty_values() -> list[float]:
     """344 ascending difficulty scores shaped like the BUG-3 pilot (appendix
     A of sub-issue-7): range [0.08, 1.87], 74 values below 1, nothing at or
@@ -101,7 +102,12 @@ def pilot_rows() -> list[dict]:
     """Unlabeled diagnostic rows for the agent-recipe fixture: the strong
     lanes (domain_code_complex / complex_general) never fire, every row
     carries a difficulty score plus a per-choice domain confidence."""
-    decisions = ["simple_math_fast_path", "domain_code", "medium_general", "simple_general"]
+    decisions = [
+        "simple_math_fast_path",
+        "domain_code",
+        "medium_general",
+        "simple_general",
+    ]
     rows = []
     for index, value in enumerate(pilot_difficulty_values()):
         rows.append(

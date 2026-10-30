@@ -97,7 +97,7 @@ def signal_key_name(key: str) -> str:
     docstring).
     """
     parts = key.split(":")
-    return parts[1] if len(parts) >= 2 else key
+    return parts[1] if len(parts) > 1 else key
 
 
 def _numeric(value: Any) -> bool:
@@ -119,7 +119,9 @@ def _comparator(row: dict[str, Any], signal_name: str) -> float | None:
     if _numeric(raw):
         return float(raw)
     prefix = f"decision:{signal_name}:"
-    candidates = [float(v) for k, v in values.items() if str(k).startswith(prefix) and _numeric(v)]
+    candidates = [
+        float(v) for k, v in values.items() if str(k).startswith(prefix) and _numeric(v)
+    ]
     return max(candidates) if candidates else None
 
 
@@ -190,7 +192,9 @@ def _histogram(sample: list[float], lo: float, hi: float) -> dict[str, Any]:
     return {"edges": edges, "counts": counts}
 
 
-def signal_distribution(rows: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+def signal_distribution(
+    rows: list[dict[str, Any]], config: dict[str, Any]
+) -> dict[str, Any]:
     """Per signal_values key: quantiles, histogram and range utilization.
 
     One entry per key actually present in the rows (choice signals list one
@@ -241,7 +245,9 @@ def signal_distribution(rows: list[dict[str, Any]], config: dict[str, Any]) -> d
             width = hi - lo
             entry["range"] = [_num(lo), _num(hi)]
             entry["range_utilization"] = (
-                _num((percentile(sample, 95) - percentile(sample, 5)) / width) if width > 0 else None
+                _num((percentile(sample, 95) - percentile(sample, 5)) / width)
+                if width > 0
+                else None
             )
         else:
             entry["range"] = None
@@ -251,7 +257,9 @@ def signal_distribution(rows: list[dict[str, Any]], config: dict[str, Any]) -> d
     return {"signals": signals}
 
 
-def threshold_reachability(rows: list[dict[str, Any]], config: dict[str, Any]) -> dict[str, Any]:
+def threshold_reachability(
+    rows: list[dict[str, Any]], config: dict[str, Any]
+) -> dict[str, Any]:
     """Traffic share satisfying every decision-rule predicate site.
 
     Sites are grouped by (signal, op, value): the set a rule-threshold
@@ -287,15 +295,22 @@ def threshold_reachability(rows: list[dict[str, Any]], config: dict[str, Any]) -
                 "negated": site.negated,
                 "satisfied": satisfied,
                 "evaluated": evaluated,
-                "satisfied_pct": _num(satisfied / evaluated * 100.0) if evaluated else None,
-                "status": "unobserved" if not evaluated else ("unreachable" if satisfied == 0 else "reachable"),
+                "satisfied_pct": (
+                    _num(satisfied / evaluated * 100.0) if evaluated else None
+                ),
+                "status": (
+                    "unobserved"
+                    if not evaluated
+                    else ("unreachable" if satisfied == 0 else "reachable")
+                ),
             }
         )
     groups: dict[tuple[str, str, float], dict[str, Any]] = {}
-    for site, record in zip(sites, records):
+    for site, record in zip(sites, records, strict=False):
         key = (site.signal, site.op, site.value)
         group = groups.setdefault(
-            key, {"signal": site.signal, "op": site.op, "value": site.value, "sites": []}
+            key,
+            {"signal": site.signal, "op": site.op, "value": site.value, "sites": []},
         )
         group["sites"].append(record)
     group_list = []
@@ -332,18 +347,25 @@ def load_diagnostic_rows(path: str | Path) -> list[dict[str, Any]]:
         raise ContractError(f"diagnostic rows file not found: {path}")
     rows: list[dict[str, Any]] = []
     with path.open("r", encoding="utf-8") as fh:
-        for lineno, line in enumerate(fh, 1):
-            line = line.strip()
+        for lineno, raw_line in enumerate(fh, 1):
+            line = raw_line.strip()
             if not line:
                 continue
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"diagnostic rows line {lineno} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"diagnostic rows line {lineno} is not valid JSON: {exc}"
+                ) from exc
             if not isinstance(raw, dict):
-                raise ContractError(f"diagnostic rows line {lineno} must be a JSON object")
+                raise ContractError(
+                    f"diagnostic rows line {lineno} must be a JSON object"
+                )
             rows.append(raw)
-    if not any(isinstance(row.get("signal_values"), dict) and row["signal_values"] for row in rows):
+    if not any(
+        isinstance(row.get("signal_values"), dict) and row["signal_values"]
+        for row in rows
+    ):
         raise ContractError(
             "rows carry no signal_values; re-collect with 'collect-replays --unlabeled' "
             "(pre-adapter snapshots cannot be diagnosed)"
@@ -372,7 +394,9 @@ def build_diagnosis(
     and finally the small-sample warning (traffic representativeness,
     sub-issue 7 §2.4: quantiles are only as good as the traffic behind them).
     """
-    coverage = decision_coverage(rows, config, expect_rare=expect_rare, rare_pct=rare_pct)
+    coverage = decision_coverage(
+        rows, config, expect_rare=expect_rare, rare_pct=rare_pct
+    )
     distribution = signal_distribution(rows, config)
     reachability = threshold_reachability(rows, config)
 
@@ -380,7 +404,13 @@ def build_diagnosis(
     for name in coverage["dead_decisions"]:
         alerts.append({"type": "dead_decision", "decision": name})
     for item in coverage["rare_decisions"]:
-        alerts.append({"type": "rare_decision", "decision": item["decision"], "hit_pct": item["hit_pct"]})
+        alerts.append(
+            {
+                "type": "rare_decision",
+                "decision": item["decision"],
+                "hit_pct": item["hit_pct"],
+            }
+        )
     for signal in distribution["signals"]:
         utilization = signal["range_utilization"]
         if utilization is not None and utilization < utilization_warn:
@@ -393,7 +423,9 @@ def build_diagnosis(
                     "warn_below": _num(utilization_warn),
                 }
             )
-    unreachable_groups = [g for g in reachability["groups"] if g["status"] == "unreachable"]
+    unreachable_groups = [
+        g for g in reachability["groups"] if g["status"] == "unreachable"
+    ]
     for group in unreachable_groups:
         alerts.append(
             {
@@ -405,7 +437,13 @@ def build_diagnosis(
             }
         )
     if len(rows) < min_sample:
-        alerts.append({"type": "small_sample", "samples": len(rows), "min_recommended": min_sample})
+        alerts.append(
+            {
+                "type": "small_sample",
+                "samples": len(rows),
+                "min_recommended": min_sample,
+            }
+        )
 
     return {
         "kind": DIAGNOSIS_KIND,
@@ -424,7 +462,12 @@ def build_diagnosis(
         "dead_decisions": coverage["dead_decisions"],
         "rare_decisions": coverage["rare_decisions"],
         "unreachable_sites": [
-            {"decision": site["decision"], "signal": site["signal"], "op": site["op"], "threshold": site["value"]}
+            {
+                "decision": site["decision"],
+                "signal": site["signal"],
+                "op": site["op"],
+                "threshold": site["value"],
+            }
             for group in unreachable_groups
             for site in group["sites"]
         ],
@@ -441,13 +484,17 @@ def load_diagnosis(path: str | Path) -> dict[str, Any]:
     except OSError as exc:
         raise ContractError(f"cannot read diagnosis file {str(path)!r}: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise ContractError(f"diagnosis file is not valid JSON: {path} ({exc})") from exc
+        raise ContractError(
+            f"diagnosis file is not valid JSON: {path} ({exc})"
+        ) from exc
     if not isinstance(diagnosis, dict) or diagnosis.get("kind") != DIAGNOSIS_KIND:
         raise ContractError(f"{path} is not a {DIAGNOSIS_KIND} artifact")
     return diagnosis
 
 
-def write_diagnosis(diagnosis: dict[str, Any], output_dir: str | Path) -> tuple[Path, Path]:
+def write_diagnosis(
+    diagnosis: dict[str, Any], output_dir: str | Path
+) -> tuple[Path, Path]:
     """Write diagnosis.json and diagnosis.md; same input, same bytes."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -499,7 +546,13 @@ def render_markdown(diagnosis: dict[str, Any]) -> str:
     else:
         lines.append("- none")
 
-    lines += ["", "## Decision coverage", "", "| decision | hits | share % | status |", "|---|---|---|---|"]
+    lines += [
+        "",
+        "## Decision coverage",
+        "",
+        "| decision | hits | share % | status |",
+        "|---|---|---|---|",
+    ]
     for entry in coverage.get("decisions", []):
         flag = " (expected-rare)" if entry.get("expected_rare") else ""
         lines.append(
@@ -526,10 +579,17 @@ def render_markdown(diagnosis: dict[str, Any]) -> str:
         counts = signal["histogram"]["counts"]
         lines += ["", "| from | to | count |", "|---|---|---|"]
         for index, count in enumerate(counts):
-            lines.append(f"| {_fmt(edges[index])} | {_fmt(edges[index + 1])} | {count} |")
+            lines.append(
+                f"| {_fmt(edges[index])} | {_fmt(edges[index + 1])} | {count} |"
+            )
         lines.append("")
 
-    lines += ["## Threshold reachability", "", "| decision | predicate | negated | satisfied | evaluated | share % | status |", "|---|---|---|---|---|---|---|"]
+    lines += [
+        "## Threshold reachability",
+        "",
+        "| decision | predicate | negated | satisfied | evaluated | share % | status |",
+        "|---|---|---|---|---|---|---|",
+    ]
     for site in reachability.get("sites", []):
         predicate = f"{site['signal']} {site['op']} {_fmt(site['value'])}"
         lines.append(

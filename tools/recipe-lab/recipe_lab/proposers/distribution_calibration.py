@@ -36,9 +36,7 @@ from ..diagnose import DIAGNOSIS_KIND, percentile
 from ..insights import resolve_insight_refs
 from . import rule_threshold
 
-_ANCHOR_SAFE = set(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-"
-)
+_ANCHOR_SAFE = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
 
 
 @dataclass(frozen=True)
@@ -112,11 +110,15 @@ def calibrated_quantiles(
 def _anchor(name: str) -> str:
     # the diag anchor charset forbids colons (G2 regex): refuse instead of mangling
     if not name or any(ch not in _ANCHOR_SAFE for ch in name):
-        raise ContractError(f"cannot build a diag anchor for name {name!r}: restricted charset")
+        raise ContractError(
+            f"cannot build a diag anchor for name {name!r}: restricted charset"
+        )
     return name
 
 
-def _site_refs(candidate: rule_threshold.RuleThresholdCandidate, diagnosis_ref: str) -> tuple[str, ...]:
+def _site_refs(
+    candidate: rule_threshold.RuleThresholdCandidate, diagnosis_ref: str
+) -> tuple[str, ...]:
     """One insight ref per moved site: diag:<path>@sha256:<hex>#threshold.<decision>.<signal>."""
     if not diagnosis_ref.startswith("diag:") or "@sha256:" not in diagnosis_ref:
         raise ContractError(
@@ -207,8 +209,10 @@ def write_calibrated_candidates(
 ) -> list[Path]:
     """Write each candidate like the rule-level proposer does, then stamp the
     sidecar with the calibration basis and its diagnosis insight refs."""
-    paths = rule_threshold.write_candidates([p.candidate for p in proposals], output_dir)
-    for proposal, path in zip(proposals, paths):
+    paths = rule_threshold.write_candidates(
+        [p.candidate for p in proposals], output_dir
+    )
+    for proposal, path in zip(proposals, paths, strict=False):
         sidecar_path = path.with_suffix(".candidate.json")
         sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
         sidecar["change_summary"] = proposal.basis
