@@ -18,13 +18,23 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from .contract import LIVE_VERDICTS, REPLAY_VERDICTS, SPLIT_NAMES, TIERS, ContractError
 
-COMMON_REQUIRED = ("round", "ts", "candidate", "tier", "baseline_ref", "metrics", "verdict", "dataset_hash")
+COMMON_REQUIRED = (
+    "round",
+    "ts",
+    "candidate",
+    "tier",
+    "baseline_ref",
+    "metrics",
+    "verdict",
+    "dataset_hash",
+)
 
 
 @dataclass(frozen=True)
@@ -83,7 +93,7 @@ class LedgerRecord:
         return out
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "LedgerRecord":
+    def from_dict(cls, raw: dict) -> LedgerRecord:
         validate_record(raw)
         return cls(
             round=int(raw["round"]),
@@ -97,7 +107,11 @@ class LedgerRecord:
             reasons=[str(r) for r in raw.get("reasons", [])],
             gates=dict(raw["gates"]) if raw.get("gates") is not None else None,
             bench_refs=[str(r) for r in raw.get("bench_refs", [])],
-            attribution_delta=dict(raw["attribution_delta"]) if raw.get("attribution_delta") is not None else None,
+            attribution_delta=(
+                dict(raw["attribution_delta"])
+                if raw.get("attribution_delta") is not None
+                else None
+            ),
             attribution_ref=raw.get("attribution_ref"),
             coverage_warning=bool(raw.get("coverage_warning", False)),
             notes=str(raw.get("notes", "")),
@@ -134,10 +148,14 @@ def validate_record(raw: dict) -> None:
     if tier == "live":
         gates = raw.get("gates")
         if not isinstance(gates, dict):
-            raise ContractError("live-tier records must carry a 'gates' mapping (guard-floor results)")
+            raise ContractError(
+                "live-tier records must carry a 'gates' mapping (guard-floor results)"
+            )
         bench_refs = raw.get("bench_refs")
         if not isinstance(bench_refs, list):
-            raise ContractError("live-tier records must carry a 'bench_refs' list (sr-bench run/compare IDs)")
+            raise ContractError(
+                "live-tier records must carry a 'bench_refs' list (sr-bench run/compare IDs)"
+            )
         if verdict != "INCONCLUSIVE" and not bench_refs:
             raise ContractError(
                 "live records with a concluded verdict must reference at least one sr-bench run "
@@ -148,9 +166,10 @@ def validate_record(raw: dict) -> None:
             raise ContractError(f"{optional_list} must be a list")
     if "attribution_ref" in raw and raw["attribution_ref"] is not None:
         _require_nonempty_str(raw["attribution_ref"], "attribution_ref")
-    if "split" in raw and raw["split"] is not None:
-        if raw["split"] not in SPLIT_NAMES:
-            raise ContractError(f"split must be one of {sorted(SPLIT_NAMES)}, got {raw['split']!r}")
+    if "split" in raw and raw["split"] is not None and raw["split"] not in SPLIT_NAMES:
+        raise ContractError(
+            f"split must be one of {sorted(SPLIT_NAMES)}, got {raw['split']!r}"
+        )
     if "status" in raw and raw["status"] is not None:
         _require_nonempty_str(raw["status"], "status")
         if raw["status"] != "timeout":
@@ -199,14 +218,16 @@ class Ledger:
             return []
         records: list[dict] = []
         with self.path.open("r", encoding="utf-8") as fh:
-            for lineno, line in enumerate(fh, 1):
-                line = line.strip()
+            for lineno, raw_line in enumerate(fh, 1):
+                line = raw_line.strip()
                 if not line:
                     continue
                 try:
                     raw = json.loads(line)
                 except json.JSONDecodeError as exc:
-                    raise ContractError(f"ledger {self.path} line {lineno} is not valid JSON: {exc}") from exc
+                    raise ContractError(
+                        f"ledger {self.path} line {lineno} is not valid JSON: {exc}"
+                    ) from exc
                 # G1: pre-record_id ledgers get the same id rule applied on read
                 if "record_id" not in raw:
                     raw["record_id"] = compute_record_id(raw)
@@ -232,7 +253,11 @@ class Ledger:
                 continue
             if round_no is not None and raw.get("round") != round_no:
                 continue
-            if proposer is not None and raw.get("candidate", {}).get("provenance", {}).get("proposer") != proposer:
+            if (
+                proposer is not None
+                and raw.get("candidate", {}).get("provenance", {}).get("proposer")
+                != proposer
+            ):
                 continue
             out.append(raw)
         return out

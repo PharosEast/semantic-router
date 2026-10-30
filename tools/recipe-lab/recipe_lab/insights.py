@@ -28,7 +28,9 @@ if TYPE_CHECKING:
 _REC_RE = re.compile(r"^rec-[0-9a-f]{12}$")
 _BENCH_RE = re.compile(r"^bench:[A-Za-z0-9][A-Za-z0-9._-]*$")
 _ATTR_RE = re.compile(r"^(?P<path>.+)@sha256:(?P<hex>[0-9a-f]{64})$")
-_DIAG_RE = re.compile(r"^(?P<path>.+)@sha256:(?P<hex>[0-9a-f]{64})#(?P<anchor>[A-Za-z0-9._/-]+)$")
+_DIAG_RE = re.compile(
+    r"^(?P<path>.+)@sha256:(?P<hex>[0-9a-f]{64})#(?P<anchor>[A-Za-z0-9._/-]+)$"
+)
 
 
 def parse_insight_refs(raw: str | None) -> list[str]:
@@ -64,21 +66,29 @@ def merge_insight_refs(provenance: dict, refs: list[str]) -> None:
 def _check_ref(ref: str, ledger: Ledger | None) -> None:
     if ref.startswith("rec-"):
         if not _REC_RE.match(ref):
-            raise ContractError(f"malformed insight ref {ref!r}: record ids look like rec-<12 hex>")
+            raise ContractError(
+                f"malformed insight ref {ref!r}: record ids look like rec-<12 hex>"
+            )
         if ledger is None:
-            raise ContractError(f"insight ref {ref!r} needs a ledger to resolve against")
+            raise ContractError(
+                f"insight ref {ref!r} needs a ledger to resolve against"
+            )
         ids = {row.get("record_id") for row in ledger.read()}
         if ref not in ids:
             raise ContractError(f"insight ref {ref!r} not found in ledger")
         return
     if ref.startswith("bench:"):
         if not _BENCH_RE.match(ref):
-            raise ContractError(f"malformed insight ref {ref!r}: expected bench:<run_id>")
+            raise ContractError(
+                f"malformed insight ref {ref!r}: expected bench:<run_id>"
+            )
         return
     if ref.startswith("attr:"):
         match = _ATTR_RE.match(ref[len("attr:") :])
         if not match:
-            raise ContractError(f"malformed insight ref {ref!r}: expected attr:<path>@sha256:<64 hex>")
+            raise ContractError(
+                f"malformed insight ref {ref!r}: expected attr:<path>@sha256:<64 hex>"
+            )
     elif ref.startswith("diag:"):
         match = _DIAG_RE.match(ref[len("diag:") :])
         if not match:

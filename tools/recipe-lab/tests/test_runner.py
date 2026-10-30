@@ -7,12 +7,11 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from recipe_lab.contract import ContractError, OraclePolicy
 from recipe_lab.runner import (
     RunnerEnv,
     RunnerError,
-    RunnerTimeout,
+    RunnerTimeoutError,
     _patch_ports,
     attribution_delta,
     evaluate_candidate,
@@ -21,8 +20,22 @@ from recipe_lab.runner import (
 
 
 def test_attribution_delta_counts_fixed_errors():
-    baseline = {"class_counts": {"E1_signal": 3, "E2_policy": 2, "E3_capability": 5, "decision_mismatch": 4}}
-    candidate = {"class_counts": {"E1_signal": 1, "E2_policy": 2, "E3_capability": 6, "decision_mismatch": 1}}
+    baseline = {
+        "class_counts": {
+            "E1_signal": 3,
+            "E2_policy": 2,
+            "E3_capability": 5,
+            "decision_mismatch": 4,
+        }
+    }
+    candidate = {
+        "class_counts": {
+            "E1_signal": 1,
+            "E2_policy": 2,
+            "E3_capability": 6,
+            "decision_mismatch": 1,
+        }
+    }
     assert attribution_delta(baseline, candidate) == {
         "e1_fixed": 2,
         "e2_fixed": 0,
@@ -44,7 +57,9 @@ def test_attribution_delta_never_negative():
 
 def test_replay_metric_value_rounds_and_rejects_unknown():
     # A1: the contracted replay metric maps to the runner's summary key
-    assert replay_metric_value({"accuracy": 0.8333333333}, "routed_accuracy") == 0.833333
+    assert (
+        replay_metric_value({"accuracy": 0.8333333333}, "routed_accuracy") == 0.833333
+    )
     assert replay_metric_value({"accuracy": None}, "routed_accuracy") is None
     assert replay_metric_value({}, "routed_accuracy") is None
     with pytest.raises(ContractError, match="unknown replay metric"):
@@ -55,7 +70,7 @@ def test_replay_metric_value_rounds_and_rejects_unknown():
 
 
 def test_evaluate_candidate_trial_timeout(tmp_path):
-    """A stack that never becomes ready must surface as RunnerTimeout within
+    """A stack that never becomes ready must surface as RunnerTimeoutError within
     the budget deadline, not as a generic not-ready failure."""
     router = Path(tmp_path) / "router.sh"
     router.write_text("#!/bin/sh\nsleep 60\n")
@@ -77,7 +92,7 @@ def test_evaluate_candidate_trial_timeout(tmp_path):
         work_dir=Path(tmp_path) / "work",
         ready_timeout_s=30,
     )
-    with pytest.raises(RunnerTimeout, match="trial exceeded"):
+    with pytest.raises(RunnerTimeoutError, match="trial exceeded"):
         evaluate_candidate(
             candidate_config=cfg,
             cases=[{"case_id": "c1", "prompt": "p", "truth": "math"}],
@@ -106,7 +121,9 @@ def test_patch_ports_assigns_per_trial_ports(tmp_path):
     patched_config = yaml.safe_load(patched.read_text(encoding="utf-8"))
     assert patched_config["listeners"][0]["port"] == router_port != 8899
     assert 1024 <= management_port <= 65535
-    assert yaml.safe_load(cfg.read_text(encoding="utf-8"))["listeners"][0]["port"] == 8899
+    assert (
+        yaml.safe_load(cfg.read_text(encoding="utf-8"))["listeners"][0]["port"] == 8899
+    )
 
 
 def test_patch_ports_rejects_config_without_listeners(tmp_path):

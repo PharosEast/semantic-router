@@ -72,12 +72,23 @@ def find_threshold_sites(config: dict[str, Any]) -> list[ThresholdSite]:
         rules = decision.get("rules")
         if not isinstance(rules, dict):
             continue
-        _walk(rules, str(decision.get("name", f"decision-{d_idx}")), False,
-              ("routing", "decisions", d_idx, "rules"), sites)
+        _walk(
+            rules,
+            str(decision.get("name", f"decision-{d_idx}")),
+            False,
+            ("routing", "decisions", d_idx, "rules"),
+            sites,
+        )
     return sites
 
 
-def _walk(node: Any, decision_name: str, negated: bool, path: tuple, sites: list[ThresholdSite]) -> None:
+def _walk(
+    node: Any,
+    decision_name: str,
+    negated: bool,
+    path: tuple,
+    sites: list[ThresholdSite],
+) -> None:
     if not isinstance(node, dict):
         return
     operator = node.get("operator")
@@ -86,7 +97,13 @@ def _walk(node: Any, decision_name: str, negated: bool, path: tuple, sites: list
         conditions = node.get("conditions")
         if isinstance(conditions, list):
             for c_idx, child in enumerate(conditions):
-                _walk(child, decision_name, child_negated, path + ("conditions", c_idx), sites)
+                _walk(
+                    child,
+                    decision_name,
+                    child_negated,
+                    (*path, "conditions", c_idx),
+                    sites,
+                )
         return
     if node.get("type") != "decision":
         return
@@ -109,12 +126,14 @@ def _walk(node: Any, decision_name: str, negated: bool, path: tuple, sites: list
                 op=op,
                 value=float(value),
                 negated=negated,
-                path=path + ("predicate",),
+                path=(*path, "predicate"),
             )
         )
 
 
-def group_sites(sites: list[ThresholdSite]) -> dict[tuple[str, str, float], list[ThresholdSite]]:
+def group_sites(
+    sites: list[ThresholdSite],
+) -> dict[tuple[str, str, float], list[ThresholdSite]]:
     """Group by (signal, op, value): the variables a candidate can move."""
     groups: dict[tuple[str, str, float], list[ThresholdSite]] = {}
     for site in sites:
@@ -247,13 +266,18 @@ def _site_record(site: ThresholdSite, new_value: float) -> dict[str, Any]:
     }
 
 
-def write_candidates(candidates: list[RuleThresholdCandidate], output_dir: str | Path) -> list[Path]:
+def write_candidates(
+    candidates: list[RuleThresholdCandidate], output_dir: str | Path
+) -> list[Path]:
     """Write each candidate config plus its sidecar metadata; returns config paths."""
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for index, candidate in enumerate(candidates):
-        path = out_dir / f"candidate-{index:03d}-{candidate.signal_name}-{candidate.new_value}.yaml"
+        path = (
+            out_dir
+            / f"candidate-{index:03d}-{candidate.signal_name}-{candidate.new_value}.yaml"
+        )
         with path.open("w", encoding="utf-8") as fh:
             yaml.safe_dump(candidate.config, fh, allow_unicode=True, sort_keys=False)
         sidecar = {

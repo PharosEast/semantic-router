@@ -6,11 +6,10 @@ import copy
 
 import pytest
 import yaml
-
 from recipe_lab.contract import ContractError
 from recipe_lab.proposers.threshold_search import propose_thresholds, write_candidates
-from tests.fixtures import VALID_SPEC  # noqa: F401  (keeps import sanity)
 
+from tests.fixtures import VALID_SPEC  # noqa: F401  (keeps import sanity)
 
 BASE_CONFIG = {
     "version": "v0.3",
@@ -34,8 +33,14 @@ def test_propose_generates_one_variable_candidates():
     for candidate in candidates:
         assert candidate.old_value == 0.6
         # exactly one variable changed per candidate
-        assert candidate.config["routing"]["signals"]["decision"][0]["predicate"]["gte"] == candidate.new_value
-        assert candidate.config["routing"]["decisions"] == BASE_CONFIG["routing"]["decisions"]
+        assert (
+            candidate.config["routing"]["signals"]["decision"][0]["predicate"]["gte"]
+            == candidate.new_value
+        )
+        assert (
+            candidate.config["routing"]["decisions"]
+            == BASE_CONFIG["routing"]["decisions"]
+        )
 
 
 def test_propose_deterministic():
@@ -59,7 +64,10 @@ def test_propose_unknown_signal_rejected():
 
 def test_propose_signal_without_gte_rejected():
     config = copy.deepcopy(BASE_CONFIG)
-    config["routing"]["signals"]["decision"][0] = {"name": "depth", "predicate": {"lt": 0.6}}
+    config["routing"]["signals"]["decision"][0] = {
+        "name": "depth",
+        "predicate": {"lt": 0.6},
+    }
     with pytest.raises(ContractError, match="gte"):
         propose_thresholds(config, "depth", [0.05])
 

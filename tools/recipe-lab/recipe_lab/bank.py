@@ -60,12 +60,21 @@ def _chat_once(endpoint: str, model: str, prompt: str, timeout: float) -> str:
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             payload = json.loads(response.read().decode("utf-8"))
-    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError) as exc:
-        raise ContractError(f"answer bank query failed for model {model!r}: {exc}") from exc
+    except (
+        urllib.error.URLError,
+        urllib.error.HTTPError,
+        TimeoutError,
+        OSError,
+    ) as exc:
+        raise ContractError(
+            f"answer bank query failed for model {model!r}: {exc}"
+        ) from exc
     try:
         return str(payload["choices"][0]["message"]["content"])
     except (KeyError, IndexError, TypeError) as exc:
-        raise ContractError(f"answer bank query returned an unexpected payload for model {model!r}: {exc}") from exc
+        raise ContractError(
+            f"answer bank query returned an unexpected payload for model {model!r}: {exc}"
+        ) from exc
 
 
 def build_bank(
@@ -97,7 +106,9 @@ def write_bank(entries: list[BankEntry], path: str | Path) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as fh:
         for entry in entries:
-            fh.write(json.dumps(entry.to_dict(), ensure_ascii=False, allow_nan=False) + "\n")
+            fh.write(
+                json.dumps(entry.to_dict(), ensure_ascii=False, allow_nan=False) + "\n"
+            )
     return path
 
 
@@ -107,30 +118,42 @@ def load_bank(path: str | Path) -> dict[tuple[str, str], BankEntry]:
         raise ContractError(f"answer bank file not found: {path}")
     bank: dict[tuple[str, str], BankEntry] = {}
     with path.open("r", encoding="utf-8") as fh:
-        for lineno, line in enumerate(fh, 1):
-            line = line.strip()
+        for lineno, raw_line in enumerate(fh, 1):
+            line = raw_line.strip()
             if not line:
                 continue
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"answer bank line {lineno} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"answer bank line {lineno} is not valid JSON: {exc}"
+                ) from exc
             for name in ("case_id", "model", "answer", "answer_ok"):
                 if name not in raw:
-                    raise ContractError(f"answer bank line {lineno} is missing required field: {name}")
+                    raise ContractError(
+                        f"answer bank line {lineno} is missing required field: {name}"
+                    )
             key = (raw["case_id"], raw["model"])
             if key in bank:
-                raise ContractError(f"answer bank line {lineno}: duplicate entry for {key}")
+                raise ContractError(
+                    f"answer bank line {lineno}: duplicate entry for {key}"
+                )
             bank[key] = BankEntry(
                 case_id=raw["case_id"],
                 model=raw["model"],
                 answer=str(raw["answer"]),
-                answer_ok=raw["answer_ok"] if raw["answer_ok"] is None else bool(raw["answer_ok"]),
+                answer_ok=(
+                    raw["answer_ok"]
+                    if raw["answer_ok"] is None
+                    else bool(raw["answer_ok"])
+                ),
             )
     return bank
 
 
-def apply_bank(rows: list[dict[str, Any]], bank: dict[tuple[str, str], BankEntry]) -> tuple[list[dict[str, Any]], dict[str, int]]:
+def apply_bank(
+    rows: list[dict[str, Any]], bank: dict[tuple[str, str], BankEntry]
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Join bank correctness into attribution rows by (case_id, routed model)."""
     stats = {"joined": 0, "no_bank_entry": 0}
     out: list[dict[str, Any]] = []

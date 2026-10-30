@@ -184,3 +184,10 @@ ignore = [
 "src/vllm-sr/tests/test_setup_bootstrap.py" = ["I001", "UP015"]
 
 "tools/recipe-lab/tests/*.py" = ["PLR2004", "PLC0415"]
+
+"tools/recipe-lab/examples/smoke/build_mmlu_cases.py" = [
+  "PLC0415",  # pyarrow/pandas are optional parquet backends, tried in order with fallback
+]
+"tools/recipe-lab/recipe_lab/splitting.py" = [
+  "PLR2004",  # the three-way split count and the ratio-sum epsilon are readable inline
+]

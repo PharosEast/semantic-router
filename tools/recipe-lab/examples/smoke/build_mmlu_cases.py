@@ -24,7 +24,14 @@ import json
 import random
 from pathlib import Path
 
-DEEP_CATEGORIES = {"math", "physics", "computer science", "engineering", "chemistry", "law"}
+DEEP_CATEGORIES = {
+    "math",
+    "physics",
+    "computer science",
+    "engineering",
+    "chemistry",
+    "law",
+}
 
 
 def load_rows(data_dir: Path) -> list[dict]:
@@ -53,8 +60,8 @@ def load_rows(data_dir: Path) -> list[dict]:
     rows = []
     for path in jsonl_files:
         with path.open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
+            for raw_line in fh:
+                line = raw_line.strip()
                 if line:
                     rows.append(json.loads(line))
     return rows
@@ -73,11 +80,27 @@ def correct_option_text(row: dict) -> str | None:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="build frozen MMLU-Pro cases for recipe-lab")
-    parser.add_argument("--dataset-dir", required=True, help="MMLU-Pro snapshot directory (data/ below it)")
+    parser = argparse.ArgumentParser(
+        description="build frozen MMLU-Pro cases for recipe-lab"
+    )
+    parser.add_argument(
+        "--dataset-dir",
+        required=True,
+        help="MMLU-Pro snapshot directory (data/ below it)",
+    )
     parser.add_argument("--output", required=True, help="output cases JSONL path")
-    parser.add_argument("--per-deep", type=int, default=12, help="questions sampled from deep categories")
-    parser.add_argument("--per-standard", type=int, default=12, help="questions sampled from standard categories")
+    parser.add_argument(
+        "--per-deep",
+        type=int,
+        default=12,
+        help="questions sampled from deep categories",
+    )
+    parser.add_argument(
+        "--per-standard",
+        type=int,
+        default=12,
+        help="questions sampled from standard categories",
+    )
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
@@ -87,8 +110,12 @@ def main() -> int:
     if not rows:
         raise SystemExit(f"no rows found under {data_dir}")
 
-    deep_rows = [r for r in rows if str(r.get("category", "")).lower() in DEEP_CATEGORIES]
-    standard_rows = [r for r in rows if str(r.get("category", "")).lower() not in DEEP_CATEGORIES]
+    deep_rows = [
+        r for r in rows if str(r.get("category", "")).lower() in DEEP_CATEGORIES
+    ]
+    standard_rows = [
+        r for r in rows if str(r.get("category", "")).lower() not in DEEP_CATEGORIES
+    ]
     rng = random.Random(args.seed)
     rng.shuffle(deep_rows)
     rng.shuffle(standard_rows)
@@ -137,7 +164,9 @@ def main() -> int:
         json.dumps(
             {
                 "cases": len(cases),
-                "deep": sum(1 for c in cases if c["truth"] == "cloud_frontier_reasoning"),
+                "deep": sum(
+                    1 for c in cases if c["truth"] == "cloud_frontier_reasoning"
+                ),
                 "standard": sum(1 for c in cases if c["truth"] == "local_standard"),
                 "content_hash": f"sha256:{digest}",
                 "output": str(output),

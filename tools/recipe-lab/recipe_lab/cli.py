@@ -53,7 +53,7 @@ from .proposers import rule_threshold, threshold_search
 from .runner import (
     RunnerEnv,
     RunnerError,
-    RunnerTimeout,
+    RunnerTimeoutError,
     attribution_delta,
     evaluate_candidate,
     replay_metric_value,
@@ -502,7 +502,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 family=args.family,
                 trial_timeout_s=trial_timeout_s,
             )
-        except RunnerTimeout as exc:
+        except RunnerTimeoutError as exc:
             raise SystemExit(
                 f"baseline evaluation exceeded the trial budget: {exc}"
             ) from exc
@@ -531,7 +531,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 family=args.family,
                 trial_timeout_s=trial_timeout_s,
             )
-        except RunnerTimeout as exc:
+        except RunnerTimeoutError as exc:
             # A5: a hung stack is never a worse recipe - record status=timeout
             # with no metrics; top_replay excludes it from the ranking.
             timeouts.append(str(candidate_path))
