@@ -276,7 +276,9 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         raise SystemExit(f"cannot read config: {exc}") from exc
     if not isinstance(config, dict):
         raise SystemExit(f"config is not a YAML object: {args.config}")
-    expect_rare = [part.strip() for part in str(args.expect_rare).split(",") if part.strip()]
+    expect_rare = [
+        part.strip() for part in str(args.expect_rare).split(",") if part.strip()
+    ]
     diagnosis = build_diagnosis(
         rows,
         config,
@@ -461,14 +463,18 @@ def cmd_propose_calibrated(args: argparse.Namespace) -> int:
     same base config (hash-checked, exit 2 otherwise); each sidecar cites the
     diagnosis it came from."""
     if args.quantiles and args.target_share is not None:
-        raise SystemExit("propose-calibrated: --quantiles and --target-share are mutually exclusive")
+        raise SystemExit(
+            "propose-calibrated: --quantiles and --target-share are mutually exclusive"
+        )
     quantiles = (
         [float(part) for part in str(args.quantiles).split(",") if part.strip()]
         if args.quantiles
         else None
     )
     if quantiles is None and args.target_share is None:
-        raise SystemExit("propose-calibrated: one of --quantiles or --target-share is required")
+        raise SystemExit(
+            "propose-calibrated: one of --quantiles or --target-share is required"
+        )
     if not args.output_dir:
         raise SystemExit("propose-calibrated: --output-dir is required")
     try:
@@ -493,7 +499,9 @@ def cmd_propose_calibrated(args: argparse.Namespace) -> int:
             lo=args.lo,
             hi=args.hi,
         )
-        paths = distribution_calibration.write_calibrated_candidates(proposals, args.output_dir)
+        paths = distribution_calibration.write_calibrated_candidates(
+            proposals, args.output_dir
+        )
     except ContractError as exc:
         raise SystemExit(f"proposer error: {exc}") from exc
     _print_json(
@@ -1138,10 +1146,16 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_diag.add_argument(
-        "--records", required=True, help="unlabeled diagnostic rows JSONL (collect-replays --unlabeled output)"
+        "--records",
+        required=True,
+        help="unlabeled diagnostic rows JSONL (collect-replays --unlabeled output)",
     )
     p_diag.add_argument("--config", required=True, help="base recipe config YAML")
-    p_diag.add_argument("--output-dir", required=True, help="directory for diagnosis.json and diagnosis.md")
+    p_diag.add_argument(
+        "--output-dir",
+        required=True,
+        help="directory for diagnosis.json and diagnosis.md",
+    )
     p_diag.add_argument(
         "--expect-rare",
         default="",
@@ -1154,10 +1168,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="decisions above zero hits but under this traffic share %% are rare",
     )
     p_diag.add_argument(
-        "--source", default="unlabeled replay rows", help="traffic source note recorded in the diagnosis"
+        "--source",
+        default="unlabeled replay rows",
+        help="traffic source note recorded in the diagnosis",
     )
     p_diag.add_argument(
-        "--min-sample", type=int, default=DEFAULT_MIN_SAMPLE, help="warn when the sample count is below this"
+        "--min-sample",
+        type=int,
+        default=DEFAULT_MIN_SAMPLE,
+        help="warn when the sample count is below this",
     )
     p_diag.add_argument(
         "--utilization-warn",
@@ -1169,7 +1188,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_bank = sub.add_parser(
         "bank", help="build or apply the per-case/per-model answer bank"
-    )    bank_sub = p_bank.add_subparsers(dest="bank_action", required=True)
+    )
+    bank_sub = p_bank.add_subparsers(dest="bank_action", required=True)
 
     p_bbuild = bank_sub.add_parser(
         "build", help="query each case against each model and grade"
@@ -1312,9 +1332,17 @@ def build_parser() -> argparse.ArgumentParser:
             "is rejected (exit 2)."
         ),
     )
-    p_cal.add_argument("--diagnosis", required=True, help="diagnosis.json from 'recipe-lab diagnose'")
-    p_cal.add_argument("--base-config", required=True, help="base recipe config YAML the diagnosis was made over")
-    p_cal.add_argument("--signal", required=True, help="decision signal name to calibrate")
+    p_cal.add_argument(
+        "--diagnosis", required=True, help="diagnosis.json from 'recipe-lab diagnose'"
+    )
+    p_cal.add_argument(
+        "--base-config",
+        required=True,
+        help="base recipe config YAML the diagnosis was made over",
+    )
+    p_cal.add_argument(
+        "--signal", required=True, help="decision signal name to calibrate"
+    )
     p_cal.add_argument(
         "--from",
         dest="from_value",
@@ -1323,7 +1351,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="only move sites currently at this value (e.g. the 2.5 -> 1.75 BUG-3 calibration)",
     )
     p_cal.add_argument(
-        "--quantiles", default=None, help="comma-separated quantiles in (0, 1], e.g. 0.5,0.75,0.9"
+        "--quantiles",
+        default=None,
+        help="comma-separated quantiles in (0, 1], e.g. 0.5,0.75,0.9",
     )
     p_cal.add_argument(
         "--target-share",
@@ -1331,10 +1361,27 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="fraction of traffic meant to cross the threshold; equivalent to quantile 1 - share",
     )
-    p_cal.add_argument("--op", choices=["gte", "gt", "lte", "lt"], default=None, help="restrict to one predicate operator")
-    p_cal.add_argument("--lo", type=float, default=None, help="threshold lower clamp (default: inferred from the signal)")
-    p_cal.add_argument("--hi", type=float, default=None, help="threshold upper clamp (default: inferred from the signal)")
-    p_cal.add_argument("--output-dir", default=None, help="directory for candidate config YAMLs")
+    p_cal.add_argument(
+        "--op",
+        choices=["gte", "gt", "lte", "lt"],
+        default=None,
+        help="restrict to one predicate operator",
+    )
+    p_cal.add_argument(
+        "--lo",
+        type=float,
+        default=None,
+        help="threshold lower clamp (default: inferred from the signal)",
+    )
+    p_cal.add_argument(
+        "--hi",
+        type=float,
+        default=None,
+        help="threshold upper clamp (default: inferred from the signal)",
+    )
+    p_cal.add_argument(
+        "--output-dir", default=None, help="directory for candidate config YAMLs"
+    )
     p_cal.set_defaults(func=cmd_propose_calibrated)
 
     p_run = sub.add_parser(
@@ -1345,7 +1392,8 @@ def build_parser() -> argparse.ArgumentParser:
         default="replay",
         choices=["replay"],
         help="replay tier (RANKED records); live tier uses the live-verdict command",
-    )    p_run.add_argument("--spec", required=True, help="experiment spec YAML")
+    )
+    p_run.add_argument("--spec", required=True, help="experiment spec YAML")
     p_run.add_argument("--cases", required=True, help="labeled case list JSONL")
     p_run.add_argument(
         "--split",
