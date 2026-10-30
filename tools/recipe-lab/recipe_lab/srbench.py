@@ -28,9 +28,10 @@ from __future__ import annotations
 import json
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 from .contract import ContractError
 
@@ -92,7 +93,9 @@ class SrbenchCli:
         """One run document (status, manifest, ...); no evidence paging."""
         return self.run_command(["show", run_id])
 
-    def wait_for_run(self, run_id: str, *, poll_interval_s: float = 2.0) -> dict[str, Any]:
+    def wait_for_run(
+        self, run_id: str, *, poll_interval_s: float = 2.0
+    ) -> dict[str, Any]:
         """Poll `show` until the run reaches a terminal state (I).
 
         The caller owns the loop, so each trial's outcome is observable and
@@ -103,7 +106,9 @@ class SrbenchCli:
         while True:
             doc = self.show(run_id)
             if not isinstance(doc, dict):
-                raise SrbenchError(f"sr-bench show {run_id} did not return a run document")
+                raise SrbenchError(
+                    f"sr-bench show {run_id} did not return a run document"
+                )
             status = doc.get("status")
             if status is None:
                 raise SrbenchError(f"sr-bench run {run_id} carries no status")
@@ -114,17 +119,23 @@ class SrbenchCli:
     def _submit_and_wait(self, payload: Any, what: str) -> dict[str, Any]:
         run_id = payload.get("id") if isinstance(payload, dict) else None
         if not run_id or not isinstance(run_id, str):
-            raise SrbenchError(f"sr-bench did not return a run id for {what}: {payload!r}")
+            raise SrbenchError(
+                f"sr-bench did not return a run id for {what}: {payload!r}"
+            )
         return self.wait_for_run(run_id)
 
     def run_manifest(self, manifest_path: str | Path) -> dict[str, Any]:
         """Submit one frozen manifest (`run --manifest --detach`) and wait."""
-        payload = self.run_command(["run", "--manifest", str(manifest_path), "--detach"])
+        payload = self.run_command(
+            ["run", "--manifest", str(manifest_path), "--detach"]
+        )
         return self._submit_and_wait(payload, f"run --manifest {manifest_path}")
 
     def preview(self, manifest_path: str | Path) -> dict[str, Any]:
         """Submit one preview manifest (routing only, no quality) and wait."""
-        payload = self.run_command(["preview", "--manifest", str(manifest_path), "--detach"])
+        payload = self.run_command(
+            ["preview", "--manifest", str(manifest_path), "--detach"]
+        )
         return self._submit_and_wait(payload, f"preview --manifest {manifest_path}")
 
     def candidate_plan(
