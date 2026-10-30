@@ -84,7 +84,7 @@ class RunnerTimeoutError(RunnerError):
     instead of a metric so a hung stack can never rank as a worse recipe."""
 
 
-class HotReloadRejected(RunnerError):
+class HotReloadRejectedError(RunnerError):
     """The management API refused to hot-reload a candidate (HTTP 409
     RESTART_REQUIRED or a failed activation). The caller falls back to the
     restart path for that candidate."""
@@ -330,9 +330,9 @@ def evaluate_candidate(
                 str(management_port),
             ],
             # The handle is owned by the spawned router process and dies with its group.
-            stdout=open(
+            stdout=open(  # noqa: SIM115
                 Path(env.work_dir) / "router.log", "w", encoding="utf-8"
-            ),  # noqa: SIM115
+            ),
             stderr=subprocess.STDOUT,
             env=router_env,
             start_new_session=True,  # the spawned model runtime dies with the group
@@ -422,6 +422,9 @@ def _management_headers(env: RunnerEnv) -> dict[str, str]:
     return headers
 
 
+_HTTP_RESTART_REQUIRED = 409  # the management API answers 409 RESTART_REQUIRED
+
+
 def _put_router_config(
     management_url: str, env: RunnerEnv, yaml_text: str, timeout: float
 ) -> tuple[int, dict]:
@@ -429,7 +432,7 @@ def _put_router_config(
 
     Returns (http_status, response_json). Connection failures raise
     RunnerError; non-2xx replies are returned for the caller to classify
-    (409 RESTART_REQUIRED -> HotReloadRejected).
+    (409 RESTART_REQUIRED -> HotReloadRejectedError).
     """
     body = json.dumps({"yaml": yaml_text}).encode("utf-8")
     request = urllib.request.Request(
@@ -461,7 +464,7 @@ def _wait_config_activation(
 
     The PUT response usually reports "active" already (the server waits up to
     20s for the runtime publication), so this only spins for the pending/202
-    case. "failed" raises HotReloadRejected; a lapsed deadline raises
+    case. "failed" raises HotReloadRejectedError; a lapsed deadline raises
     RunnerTimeoutError. No fixed sleep is used as a completion signal: this polls
     the router's own publication status.
     """
@@ -490,7 +493,7 @@ def _wait_config_activation(
         if status == "active":
             return
         if status == "failed":
-            raise HotReloadRejected(
+            raise HotReloadRejectedError(
                 "config activation failed (management API reports activation_status=failed)"
             )
         if time.monotonic() >= deadline:
@@ -516,7 +519,7 @@ class HotReloadSession:
     The router boots once from a scratch copy of `boot_source` (the baseline
     config, or the first candidate when no baseline is given) and every
     further candidate is swapped in through `PUT /api/v1/config`. A rejected
-    PUT (409) or a failed activation raises HotReloadRejected;
+    PUT (409) or a failed activation raises HotReloadRejectedError;
     `evaluate_with_fallback` then runs that candidate through the restart
     path and leaves the session stopped, so the next candidate re-boots hot.
     """
@@ -567,7 +570,7 @@ class HotReloadSession:
         self._router_port = router_port
         self._management_port = management_port
         self._listener_ports = [
-            int(l["port"]) for l in (boot_yaml.get("listeners") or [])
+            int(listener["port"]) for listener in (boot_yaml.get("listeners") or [])
         ]
         self.status_file.unlink(missing_ok=True)
 
@@ -599,7 +602,10 @@ class HotReloadSession:
                 "-api-port",
                 str(management_port),
             ],
-            stdout=open(env.work_dir / "router.log", "w", encoding="utf-8"),
+            # The handle is owned by the spawned router process.
+            stdout=open(
+                env.work_dir / "router.log", "w", encoding="utf-8"
+            ),  # noqa: SIM115
             stderr=subprocess.STDOUT,
             env=router_env,
             start_new_session=True,
@@ -687,13 +693,13 @@ class HotReloadSession:
             status, payload = _put_router_config(
                 management_url, env, yaml_text, timeout=30.0
             )
-            if status == 409:
+            if status == _HTTP_RESTART_REQUIRED:
                 detail = (
                     payload.get("error", {}).get("message")
                     if isinstance(payload.get("error"), dict)
                     else payload.get("message")
                 )
-                raise HotReloadRejected(
+                raise HotReloadRejectedError(
                     f"hot reload rejected with HTTP 409: {detail or 'incompatible change'}"
                 )
             if status not in (200, 201, 202):
@@ -701,7 +707,7 @@ class HotReloadSession:
                 raise RunnerError(f"config PUT failed with HTTP {status}: {detail}")
             activation = str(payload.get("activation_status") or "").lower()
             if activation == "failed":
-                raise HotReloadRejected(
+                raise HotReloadRejectedError(
                     "config activation failed (PUT reported activation_status=failed)"
                 )
             # "active" confirms instantly in _wait_config_activation; "" (a
@@ -796,7 +802,7 @@ class HotReloadSession:
                 bank=bank,
                 trial_timeout_s=trial_timeout_s,
             )
-        except HotReloadRejected as exc:
+        except HotReloadRejectedError as exc:
             self.stop()
             result = evaluate_candidate(
                 candidate_config=candidate_config,

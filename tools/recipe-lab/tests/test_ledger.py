@@ -171,7 +171,12 @@ def test_timeout_status_is_the_only_allowed_one(tmp_path):
 def test_incomplete_record_roundtrip_and_never_ranks(tmp_path):
     ledger = Ledger(tmp_path / "ledger.jsonl")
     stored = ledger.append(
-        base_record(metrics={}, reasons=["incomplete replay capture: ..."], coverage_warning=True, status="incomplete")
+        base_record(
+            metrics={},
+            reasons=["incomplete replay capture: ..."],
+            coverage_warning=True,
+            status="incomplete",
+        )
     )
     assert stored["status"] == "incomplete"
     ledger.append(base_record(metrics={"capability.score": 0.81}))
