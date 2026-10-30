@@ -211,8 +211,8 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
    candidate-plan，然后逐对 compare；
 4. 各对指标取中位数/范围出裁决；任何一对不完整 → INCONCLUSIVE。
 
-输出与 `live-verdict` 同形的 JSON 且始终 exit 0（裁决从 JSON 的 `verdict`
-读取）。`--candidate-targets` 指定服务候选的 sr-bench MoM target，
+输出与 `live-verdict` 同形的 JSON，退出码也一致：PASS 0、FAIL 1、
+INCONCLUSIVE 与工具/用法错误 2（`verdict_exit_code`）。`--candidate-targets` 指定服务候选的 sr-bench MoM target，
 缺省回退到候选 JSON 的 `srbench_targets`。守卫与约束语义与 `live-verdict`
 一致（A3/E）；`--split frozen_test` 同样只留给 `--final` 晋升裁决。
 
