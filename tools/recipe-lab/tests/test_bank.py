@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from recipe_lab.bank import apply_bank, grade, load_bank, write_bank
@@ -30,7 +32,7 @@ def test_load_bank_rejects_duplicate_key(tmp_path):
     path = tmp_path / "bank.jsonl"
     entry = {"case_id": "c1", "model": "m-a", "answer": "x", "answer_ok": True}
     path.write_text(
-        "\n".join([__import__("json").dumps(entry), __import__("json").dumps(entry)]),
+        "\n".join([json.dumps(entry), json.dumps(entry)]),
         encoding="utf-8",
     )
     with pytest.raises(ContractError, match="duplicate"):
