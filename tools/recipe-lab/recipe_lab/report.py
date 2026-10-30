@@ -15,6 +15,8 @@ from typing import Any
 
 from .ledger import Ledger
 
+_MIN_LIVE_BENCH_REFS = 2  # a decisive live record must carry at least two bench refs
+
 _HONESTY_FOOTER = (
     "Replayed from the recipe-lab ledger only. Metrics are descriptive; "
     "statistical significance is not established. A PASS is a recommendation, "
@@ -27,18 +29,33 @@ def _metrics_line(metrics: dict[str, Any]) -> str:
         return "n/a"
     parts = []
     for key, value in metrics.items():
-        text = "n/a" if value is None else f"{value * 100:.2f}%" if isinstance(value, float) and value <= 1 else str(value)
+        text = (
+            "n/a"
+            if value is None
+            else (
+                f"{value * 100:.2f}%"
+                if isinstance(value, float) and value <= 1
+                else str(value)
+            )
+        )
         parts.append(f"{key}={text}")
     return ", ".join(parts)
 
 
 def render_run_report(records: list[dict[str, Any]]) -> str:
-    lines = ["# recipe-lab run report", "", "| record | round | tier | verdict | metrics | gates | bench_refs |", "|---|---|---|---|---|---|---|"]
+    lines = [
+        "# recipe-lab run report",
+        "",
+        "| record | round | tier | verdict | metrics | gates | bench_refs |",
+        "|---|---|---|---|---|---|---|",
+    ]
     inconsistencies: list[str] = []
     hashes = sorted({r.get("dataset_hash") for r in records if r.get("dataset_hash")})
     for record in records:
         gates = record.get("gates")
-        gates_text = "-" if not gates else ", ".join(f"{k}={v}" for k, v in gates.items())
+        gates_text = (
+            "-" if not gates else ", ".join(f"{k}={v}" for k, v in gates.items())
+        )
         refs = record.get("bench_refs") or []
         lines.append(
             f"| {record.get('record_id', '-')} | {record.get('round')} | {record.get('tier')} | **{record.get('verdict')}** "
@@ -48,11 +65,17 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
             # replay-consistency: a decisive live record must carry complete
             # evidence (gates dict and at least two bench refs)
             if not gates:
-                inconsistencies.append(f"round {record.get('round')}: live {record.get('verdict')} without gates")
-            if len(refs) < 2:
-                inconsistencies.append(f"round {record.get('round')}: live {record.get('verdict')} with fewer than two bench_refs")
+                inconsistencies.append(
+                    f"round {record.get('round')}: live {record.get('verdict')} without gates"
+                )
+            if len(refs) < _MIN_LIVE_BENCH_REFS:
+                inconsistencies.append(
+                    f"round {record.get('round')}: live {record.get('verdict')} with fewer than two bench_refs"
+                )
         if record.get("coverage_warning"):
-            lines.append(f"| - | {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - |")
+            lines.append(
+                f"| - | {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - |"
+            )
     if len(hashes) > 1:
         lines += [
             "",

@@ -72,7 +72,9 @@ def _bound(value: Any) -> str:
 
 
 def _record_brief(record: dict[str, Any]) -> str:
-    metrics = json.dumps(record.get("metrics") or {}, ensure_ascii=False, sort_keys=True)
+    metrics = json.dumps(
+        record.get("metrics") or {}, ensure_ascii=False, sort_keys=True
+    )
     candidate = record.get("candidate") or {}
     ref = candidate.get("ref", "?")
     provenance = (candidate.get("provenance") or {}).get("proposer", "?")
@@ -108,10 +110,15 @@ def _contract_summary(spec: ExperimentSpec, records: list[dict[str, Any]]) -> li
         lines.append("- gates: none declared")
     lines.append(
         "- splits: "
-        + " ".join(f"{name}={spec.workload.split_hash(name)}" for name in sorted(spec.workload.splits))
+        + " ".join(
+            f"{name}={spec.workload.split_hash(name)}"
+            for name in sorted(spec.workload.splits)
+        )
     )
     used = max((int(r.get("round", 0)) for r in records), default=0)
-    lines.append(f"- budget: rounds={spec.budget.rounds} used={used} remaining={max(0, spec.budget.rounds - used)}")
+    lines.append(
+        f"- budget: rounds={spec.budget.rounds} used={used} remaining={max(0, spec.budget.rounds - used)}"
+    )
     return lines
 
 
@@ -123,7 +130,9 @@ def _best_replay_section(replay_best: dict[str, Any] | None) -> list[str]:
             f"- ref: {candidate.get('ref')} (round {replay_best.get('round')}, "
             f"record {replay_best.get('record_id', '-')})"
         )
-        lines.append(f"- metrics: {json.dumps(replay_best.get('metrics') or {}, ensure_ascii=False, sort_keys=True)}")
+        lines.append(
+            f"- metrics: {json.dumps(replay_best.get('metrics') or {}, ensure_ascii=False, sort_keys=True)}"
+        )
         lines.append(f"- insight-ref: {replay_best.get('record_id', '-')}")
     else:
         lines.append("- none yet: run the replay tier first")
@@ -146,9 +155,13 @@ def _live_section(records: list[dict[str, Any]]) -> list[str]:
     if last.get("reasons"):
         lines.append(f"- reasons: {last['reasons']}")
     if last.get("gates"):
-        lines.append(f"- gates: {json.dumps(last['gates'], ensure_ascii=False, sort_keys=True)}")
+        lines.append(
+            f"- gates: {json.dumps(last['gates'], ensure_ascii=False, sort_keys=True)}"
+        )
     if last.get("constraints"):
-        lines.append(f"- constraints: {json.dumps(last['constraints'], ensure_ascii=False, sort_keys=True)}")
+        lines.append(
+            f"- constraints: {json.dumps(last['constraints'], ensure_ascii=False, sort_keys=True)}"
+        )
     bench_refs = last.get("bench_refs") or []
     if bench_refs:
         lines.append(f"- bench_refs: {', '.join(bench_refs)}")
@@ -164,39 +177,67 @@ def _attribution_section(
 ) -> list[str]:
     lines = ["", "## Latest attribution summary", ""]
     if attribution is None or attribution_ref is None:
-        lines.append("- none yet: run `recipe-lab attribute` and cite it with --attribution-ref")
+        lines.append(
+            "- none yet: run `recipe-lab attribute` and cite it with --attribution-ref"
+        )
         return lines
     owner = next((r for r in reversed(records) if r.get("attribution_ref")), None)
-    suffix = f" (round {owner.get('round')}, record {owner.get('record_id', '-')})" if owner else ""
+    suffix = (
+        f" (round {owner.get('round')}, record {owner.get('record_id', '-')})"
+        if owner
+        else ""
+    )
     lines.append(f"- artifact: {attribution_ref}{suffix}")
     accuracy = attribution.get("accuracy")
-    accuracy_text = f"{accuracy * 100:.2f}%" if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool) else "N/A (no answered cases)"
+    accuracy_text = (
+        f"{accuracy * 100:.2f}%"
+        if isinstance(accuracy, (int, float)) and not isinstance(accuracy, bool)
+        else "N/A (no answered cases)"
+    )
     lines.append(
         f"- total: {attribution.get('total', 0)} answered: {attribution.get('answered', 0)} "
         f"correct: {attribution.get('correct', 0)} accuracy: {accuracy_text}"
     )
     counts = attribution.get("class_counts") or {}
-    lines.append("- class counts: " + " ".join(f"{cls}={counts.get(cls, 0)}" for cls in ALL_CLASSES))
-    pairs = lambda items, left, right: "; ".join(f"`{i.get(left)}` -> `{i.get(right)}`: {i.get('count')}" for i in items[:5])
+    lines.append(
+        "- class counts: "
+        + " ".join(f"{cls}={counts.get(cls, 0)}" for cls in ALL_CLASSES)
+    )
+
+    def pairs(items, left, right):
+        return "; ".join(
+            f"`{i.get(left)}` -> `{i.get(right)}`: {i.get('count')}" for i in items[:5]
+        )
+
     e1 = attribution.get("e1_confusion_top") or []
-    lines.append("- E1 confusion pairs (top): " + (pairs(e1, "truth", "matched_decision") if e1 else "none"))
+    lines.append(
+        "- E1 confusion pairs (top): "
+        + (pairs(e1, "truth", "matched_decision") if e1 else "none")
+    )
     mm = attribution.get("decision_mismatch_top") or []
     lines.append(
         "- decision_mismatch pairs (top): "
         + (pairs(mm, "truth", "matched_decision") if mm else "none")
     )
     e2 = attribution.get("e2_deviations_top") or []
-    deviations = "; ".join(f"routed `{i.get('routed')}` but policy expects `{i.get('expected')}`: {i.get('count')}" for i in e2[:5])
+    deviations = "; ".join(
+        f"routed `{i.get('routed')}` but policy expects `{i.get('expected')}`: {i.get('count')}"
+        for i in e2[:5]
+    )
     lines.append("- E2 routing deviations (top): " + (deviations if e2 else "none"))
     lines.append(f"- insight-ref: {attribution_ref}")
     return lines
 
 
-def _diagnosis_section(diagnosis: dict[str, Any], diagnosis_ref: str) -> tuple[list[str], list[str]]:
+def _diagnosis_section(
+    diagnosis: dict[str, Any], diagnosis_ref: str
+) -> tuple[list[str], list[str]]:
     lines = ["", "## Diagnosis highlights", ""]
     lines.append(f"- artifact: {diagnosis_ref}")
     dead = diagnosis.get("dead_decisions") or []
-    lines.append("- dead decisions: " + (", ".join(str(d) for d in dead) if dead else "none"))
+    lines.append(
+        "- dead decisions: " + (", ".join(str(d) for d in dead) if dead else "none")
+    )
     rare = diagnosis.get("rare_decisions") or []
     rare_names: list[str] = []
     rare_texts = []
@@ -204,12 +245,16 @@ def _diagnosis_section(diagnosis: dict[str, Any], diagnosis_ref: str) -> tuple[l
         if isinstance(item, dict):
             name = str(item.get("decision", "?"))
             hit_pct = item.get("hit_pct")
-            rare_texts.append(f"{name} ({_num(hit_pct)}% hits)" if hit_pct is not None else name)
+            rare_texts.append(
+                f"{name} ({_num(hit_pct)}% hits)" if hit_pct is not None else name
+            )
         else:
             name = str(item)
             rare_texts.append(name)
         rare_names.append(name)
-    lines.append("- rare decisions: " + ("; ".join(rare_texts) if rare_texts else "none"))
+    lines.append(
+        "- rare decisions: " + ("; ".join(rare_texts) if rare_texts else "none")
+    )
     unreachable = diagnosis.get("unreachable_sites") or []
     site_texts = []
     site_anchors = []
@@ -217,12 +262,16 @@ def _diagnosis_section(diagnosis: dict[str, Any], diagnosis_ref: str) -> tuple[l
         if isinstance(site, dict):
             decision = str(site.get("decision", "?"))
             signal = str(site.get("signal", "?"))
-            site_texts.append(f"{signal} {site.get('op', '?')} {_num(site.get('threshold'))} @ {decision}")
+            site_texts.append(
+                f"{signal} {site.get('op', '?')} {_num(site.get('threshold'))} @ {decision}"
+            )
             site_anchors.append(f"threshold.{_anchor(decision)}.{_anchor(signal)}")
         else:
             site_texts.append(str(site))
             site_anchors.append(f"threshold.{_anchor(site)}")
-    lines.append("- unreachable sites: " + ("; ".join(site_texts) if site_texts else "none"))
+    lines.append(
+        "- unreachable sites: " + ("; ".join(site_texts) if site_texts else "none")
+    )
     path, _, digest = diagnosis_ref.partition("@")
     # anchors use the diag:<path>@sha256:<hex>#<anchor> charset (no colons)
     refs = [f"{path}@{digest}#decision.{_anchor(name)}" for name in dead + rare_names]
@@ -257,7 +306,7 @@ def render_next_context(
     # (highest replay_metric, coverage_warning excluded), not by recency -
     # an earlier candidate with a higher metric must win over a later one.
     replay_best = best_replay(records, spec.objective.replay_metric)
-    lines = [UNTRUSTED_HEADER] + _contract_summary(spec, records)
+    lines = [UNTRUSTED_HEADER, *_contract_summary(spec, records)]
     lines += ["", "## Ledger tail (most recent last)", ""]
     for record in records[-tail:]:
         lines.append(_record_brief(record))
@@ -283,10 +332,19 @@ def render_next_context(
     return "\n".join(lines)
 
 
-def _load_attribution_summary(records: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, str | None]:
+def _load_attribution_summary(
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, str | None]:
     """Resolve the newest attribution_ref, verify the artifact hash (A4
     identity), then read the summary.json written next to attribution.jsonl."""
-    ref = next((r.get("attribution_ref") for r in reversed(records) if r.get("attribution_ref")), None)
+    ref = next(
+        (
+            r.get("attribution_ref")
+            for r in reversed(records)
+            if r.get("attribution_ref")
+        ),
+        None,
+    )
     if not ref:
         return None, None
     match = _ATTR_REF_RE.match(str(ref))
@@ -299,9 +357,13 @@ def _load_attribution_summary(records: list[dict[str, Any]]) -> tuple[dict[str, 
     try:
         actual = dataset_content_hash(path)
     except OSError as exc:
-        raise ContractError(f"cannot read attribution artifact {path!r}: {exc}") from exc
+        raise ContractError(
+            f"cannot read attribution artifact {path!r}: {exc}"
+        ) from exc
     if actual != expected:
-        raise ContractError(f"attribution_ref hash mismatch for {path!r}: ref={expected} file={actual}")
+        raise ContractError(
+            f"attribution_ref hash mismatch for {path!r}: ref={expected} file={actual}"
+        )
     summary_path = Path(path).parent / "summary.json"
     try:
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
@@ -310,9 +372,13 @@ def _load_attribution_summary(records: list[dict[str, Any]]) -> tuple[dict[str, 
             f"attribution summary not found: {summary_path} (attribute writes it next to attribution.jsonl)"
         ) from exc
     except json.JSONDecodeError as exc:
-        raise ContractError(f"attribution summary is not valid JSON: {summary_path} ({exc})") from exc
+        raise ContractError(
+            f"attribution summary is not valid JSON: {summary_path} ({exc})"
+        ) from exc
     if not isinstance(summary, dict):
-        raise ContractError(f"attribution summary must be a JSON object: {summary_path}")
+        raise ContractError(
+            f"attribution summary must be a JSON object: {summary_path}"
+        )
     return summary, f"attr:{path}@{expected}"
 
 
@@ -326,7 +392,9 @@ def _load_diagnosis(path: str) -> tuple[dict[str, Any], str]:
     try:
         diagnosis = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise ContractError(f"diagnosis file is not valid JSON: {path} ({exc})") from exc
+        raise ContractError(
+            f"diagnosis file is not valid JSON: {path} ({exc})"
+        ) from exc
     if not isinstance(diagnosis, dict):
         raise ContractError(f"diagnosis file must be a JSON object: {path}")
     return diagnosis, f"diag:{path}@{digest}"
