@@ -150,6 +150,81 @@ def test_next_best_replay_excludes_flagged_records():
     assert "rec-eeeeeeeeeeee" not in best_section
 
 
+# ---- E2: cost proxy in the next context and the run report ----
+
+
+COST_MODEL_SPEC = {
+    **VALID_SPLITS_SPEC,
+    "objective": {
+        **VALID_SPLITS_SPEC["objective"],
+        "constraints": [
+            {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline", "tolerance_pct": 0.0},
+        ],
+    },
+    "cost_model": {"local/model-a": 2, "local/model-b": 1},
+}
+
+
+def test_next_contract_summary_lists_cost_proxy():
+    spec = ExperimentSpec.from_dict(COST_MODEL_SPEC)
+    context = render_next_context([REPLAY], spec)
+    assert "- cost_model (replay cost proxy): local/model-a=2.0, local/model-b=1.0" in context
+    assert "proxy-evaluated in replay" in context and "routed_cost_index" in context
+    assert "excluded from best_replay" in context
+
+
+def test_next_contract_summary_live_only_hint_without_cost_model():
+    # E2: without cost_model, replay does no constraint work; the hint must
+    # say cost is adjudicated only in the live tier.
+    spec = ExperimentSpec.from_dict(VALID_SPLITS_SPEC | {"objective": {**VALID_SPLITS_SPEC["objective"], "constraints": [
+        {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline", "tolerance_pct": 0.0},
+    ]}})
+    context = render_next_context([REPLAY], spec)
+    assert "cost is adjudicated only in the live tier" in context
+    assert "proxy-evaluated in replay" not in context
+
+
+def test_next_best_replay_excludes_constraint_warning():
+    spec = ExperimentSpec.from_dict(COST_MODEL_SPEC)
+    good = dict(REPLAY, record_id="rec-cccccccccccc", round=1, metrics={"routed_accuracy": 0.8})
+    warned = dict(REPLAY, record_id="rec-ffffffffffff", round=2, metrics={"routed_accuracy": 0.99}, constraint_warning=True)
+    context = render_next_context([warned, good], spec)
+    best_section = context.split("## Best replay-tier candidate")[1].split("##")[0]
+    assert "rec-cccccccccccc" in best_section
+    assert "rec-ffffffffffff" not in best_section
+
+
+def test_report_lists_cost_metric_and_constraint_values():
+    warned = dict(
+        REPLAY,
+        record_id="rec-333333333333",
+        metrics={"routed_accuracy": 0.85, "routed_cost_index": 5.5},
+        constraint_warning=True,
+        constraints={
+            "cost-not-worse": {
+                "name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte",
+                "bound": "baseline", "tolerance_pct": 0.0,
+                "baseline": 5.0, "candidate": 5.5, "bound_value": 5.0,
+                "status": "violated", "proxy": "routed_cost_index",
+            }
+        },
+    )
+    report = render_run_report([warned])
+    # the cost index renders as a raw number, never a percentage
+    assert "routed_cost_index=5.5" in report
+    assert "routed_accuracy=85.00%" in report
+    # every constraint's status, candidate value and resolved bound value
+    assert "cost-not-worse=violated (candidate=5.5, bound=5.0)" in report
+    assert "constraint_warning" in report and "excluded from best_replay" in report
+
+
+def test_report_cost_rendering_not_a_percentage():
+    live_cost = dict(LIVE, metrics={"accuracy": 0.9, "cost.total_usd": 0.8})
+    report = render_run_report([live_cost])
+    assert "cost.total_usd=0.8" in report  # a cost amount, not "80.00%"
+    assert "accuracy=90.00%" in report
+
+
 ATTR_DIR_SUMMARY = {
     "total": 5,
     "answered": 4,

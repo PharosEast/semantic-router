@@ -70,13 +70,16 @@ from .proposers import distribution_calibration, rule_threshold, threshold_searc
 from .provenance import write_run_manifest
 from .report import render_promotion_draft, write_run_report
 from .runner import (
+    COST_PROXY_METRIC,
     HotReloadSession,
     RunnerEnv,
     RunnerError,
     RunnerTimeoutError,
     attribution_delta,
     evaluate_candidate,
+    replay_constraint_evidence,
     replay_metric_value,
+    routed_cost_index,
 )
 from .session_attribution import write_session_report
 from .splitting import (
@@ -689,6 +692,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         )
 
     baseline_summary: dict | None = None
+    # E2: baseline arm's routed_cost_index (None when no baseline was evaluated)
+    baseline_cost_index: float | None = None
     if args.baseline_config:
         print(
             f"[run] evaluating baseline config: {args.baseline_config}", file=sys.stderr
@@ -733,6 +738,17 @@ def cmd_run(args: argparse.Namespace) -> int:
                 "timings": result.get("timings"),
             }
         )
+        # E2: the baseline arm's cost proxy anchors `bound: baseline` constraints.
+        if spec.cost_model is not None:
+            baseline_cost_index, baseline_unknown = routed_cost_index(
+                result["rows"], spec.cost_model
+            )
+            if baseline_cost_index is None and baseline_unknown:
+                print(
+                    "[run] baseline cost proxy incomplete: routed model(s) not in cost_model: "
+                    + ", ".join(baseline_unknown),
+                    file=sys.stderr,
+                )
 
     appended = []
     timeouts = []
@@ -860,17 +876,49 @@ def cmd_run(args: argparse.Namespace) -> int:
         coverage_warning = (
             result["bank_stats"].get("no_bank_entry", 0) > 0 or metric_value is None
         )
+        # E2: replay cost proxy - a secondary metric plus constraint warnings.
+        # Without cost_model the replay tier does no constraint work at all:
+        # cost is adjudicated only in the live tier (the next-context export
+        # carries that hint).
+        reasons: list[str] = []
+        metrics: dict = (
+            {replay_metric: metric_value} if metric_value is not None else {}
+        )
+        constraint_evidence: dict | None = None
+        constraint_warning = False
+        cost_text = ""
+        if spec.cost_model is not None:
+            cost_index, unknown_models = routed_cost_index(
+                result["rows"], spec.cost_model
+            )
+            if cost_index is not None:
+                metrics[COST_PROXY_METRIC] = cost_index
+                cost_text = f" {COST_PROXY_METRIC}={cost_index}"
+            elif unknown_models:
+                reasons.append(
+                    "cost proxy incomplete: routed model(s) not in cost_model: "
+                    + ", ".join(unknown_models)
+                    + " (unknown cost is never counted as zero)"
+                )
+            if spec.objective.constraints:
+                evidence, constraint_warning = replay_constraint_evidence(
+                    spec.objective.constraints, cost_index, baseline_cost_index
+                )
+                constraint_evidence = {c["name"]: c for c in evidence}
+                reasons.extend(
+                    c["reason"] for c in evidence if c["status"] == "violated"
+                )
         record = LedgerRecord(
             round=args.round,
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             candidate=entry,
             tier="replay",
             baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
-            metrics={replay_metric: metric_value} if metric_value is not None else {},
+            metrics=metrics,
             verdict="RANKED",
             dataset_hash=split_hash,
             split=split_name,
-            reasons=[],
+            reasons=reasons,
             # A3: replay never evaluates guards; the declared gates are
             # recorded as explicitly not evaluated.
             gates={gate.name: "not_evaluated" for gate in spec.gates},
@@ -883,6 +931,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             attribution_ref=args.attribution_ref,
             coverage_warning=coverage_warning,
             notes=notes,
+            constraint_warning=constraint_warning,
+            constraints=constraint_evidence,
         )
         stored = ledger.append(record)
         appended.append(stored)
@@ -895,8 +945,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             }
         )
         accuracy_text = "n/a" if metric_value is None else f"{metric_value * 100:.2f}%"
+        warning_text = " CONSTRAINT_WARNING" if constraint_warning else ""
         print(
-            f"[run] {candidate_path.name}: {replay_metric}={accuracy_text} -> ledger",
+            f"[run] {candidate_path.name}: {replay_metric}={accuracy_text}{cost_text} -> ledger{warning_text}",
             file=sys.stderr,
         )
 

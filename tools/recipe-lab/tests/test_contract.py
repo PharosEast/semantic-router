@@ -453,3 +453,35 @@ def test_spec_with_rules_policy_roundtrip():
         == "domain_code_complex"
     )
     assert ExperimentSpec.from_dict(spec.to_dict()).to_dict() == spec.to_dict()
+
+# ---- E2: optional top-level cost_model ----
+
+
+def test_cost_model_roundtrip():
+    raw = {**copy.deepcopy(VALID_SPEC), "cost_model": {"local/model-large": 10, "local/model-small": 1}}
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.cost_model == {"local/model-large": 10.0, "local/model-small": 1.0}
+    assert spec.to_dict()["cost_model"] == {"local/model-large": 10.0, "local/model-small": 1.0}
+
+
+def test_cost_model_absent_by_default():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC))
+    assert spec.cost_model is None
+    assert "cost_model" not in spec.to_dict()
+
+
+@pytest.mark.parametrize(
+    "bad, message",
+    [
+        ([("local/model-a", 1)], "cost_model must be a mapping"),
+        ({}, "cost_model must not be empty"),
+        ({"local/model-a": 0}, "cost_model\\[.{0,40}\\] must be > 0"),
+        ({"local/model-a": -1}, "cost_model\\[.{0,40}\\] must be > 0"),
+        ({"local/model-a": "cheap"}, "must be a finite number"),
+        ({"  ": 1}, "non-empty model names"),
+    ],
+)
+def test_cost_model_validation_rejects(bad, message):
+    raw = {**copy.deepcopy(VALID_SPEC), "cost_model": bad}
+    with pytest.raises(ContractError, match=message):
+        ExperimentSpec.from_dict(raw)

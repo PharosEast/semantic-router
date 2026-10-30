@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from recipe_lab.contract import ContractError, OraclePolicy
+from recipe_lab.contract import Constraint, ContractError, OraclePolicy
 from recipe_lab.runner import (
     RunnerEnv,
     RunnerError,
@@ -15,7 +15,9 @@ from recipe_lab.runner import (
     _patch_ports,
     attribution_delta,
     evaluate_candidate,
+    replay_constraint_evidence,
     replay_metric_value,
+    routed_cost_index,
 )
 
 
@@ -64,6 +66,101 @@ def test_replay_metric_value_rounds_and_rejects_unknown():
     assert replay_metric_value({}, "routed_accuracy") is None
     with pytest.raises(ContractError, match="unknown replay metric"):
         replay_metric_value({"accuracy": 1.0}, "capability.score")
+
+
+# ---- E2: replay cost proxy ----
+
+
+def test_routed_cost_index_averages_answered_samples_only():
+    rows = [
+        {"case_id": "a", "routed": "local/model-large", "answer_ok": True},
+        {"case_id": "b", "routed": "local/model-small", "answer_ok": False},
+        {
+            "case_id": "c",
+            "routed": "local/model-large",
+            "answer_ok": None,
+        },  # unanswered: excluded
+        {
+            "case_id": "d",
+            "routed": "local/model-small",
+            "answer_ok": None,
+        },  # no_bank_entry: excluded
+    ]
+    index, unknown = routed_cost_index(
+        rows, {"local/model-large": 10, "local/model-small": 1}
+    )
+    assert index == 5.5
+    assert unknown == []
+
+
+def test_routed_cost_index_unknown_model_is_never_zero():
+    # sr-bench rule: unknown usage must not count as zero. A routed model
+    # missing from cost_model makes the whole index incomputable.
+    rows = [
+        {"case_id": "a", "routed": "local/model-large", "answer_ok": True},
+        {"case_id": "b", "routed": "local/model-x", "answer_ok": True},
+        {
+            "case_id": "c",
+            "routed": "local/model-mystery",
+            "answer_ok": None,
+        },  # unanswered: ignored
+    ]
+    index, unknown = routed_cost_index(rows, {"local/model-large": 10})
+    assert index is None
+    assert unknown == ["local/model-x"]
+
+
+def test_routed_cost_index_without_answered_rows():
+    index, unknown = routed_cost_index(
+        [{"routed": "local/model-large", "answer_ok": None}], {"local/model-large": 10}
+    )
+    assert index is None
+    assert unknown == []
+
+
+def _cost_constraint(**overrides):
+    raw = {
+        "name": "cost-not-worse",
+        "metric": "total_spend_usd",
+        "op": "lte",
+        "bound": "baseline",
+        "tolerance_pct": 0.0,
+    }
+    raw.update(overrides)
+    return Constraint.from_dict(raw, 0)
+
+
+def test_replay_constraint_evidence_flags_violation():
+    evidence, warning = replay_constraint_evidence(
+        (_cost_constraint(),), candidate_index=5.5, baseline_index=5.0
+    )
+    assert warning is True
+    assert len(evidence) == 1
+    entry = evidence[0]
+    assert entry["status"] == "violated"
+    assert entry["proxy"] == "routed_cost_index"  # the substitution is explicit
+    assert entry["baseline"] == 5.0 and entry["candidate"] == 5.5
+    assert entry["bound_value"] == 5.0
+    assert entry["reason"] == "constraint cost-not-worse violated (replay cost proxy)"
+
+
+def test_replay_constraint_evidence_numeric_bound_pass():
+    evidence, warning = replay_constraint_evidence(
+        (_cost_constraint(bound=12.0),), candidate_index=5.5, baseline_index=None
+    )
+    assert warning is False
+    assert evidence[0]["status"] == "pass"
+    assert evidence[0]["bound_value"] == 12.0
+
+
+def test_replay_constraint_evidence_baseline_bound_without_baseline():
+    # no baseline arm evaluated -> not_evaluated, never a guess
+    evidence, warning = replay_constraint_evidence(
+        (_cost_constraint(),), candidate_index=5.5, baseline_index=None
+    )
+    assert warning is False
+    assert evidence[0]["status"] == "not_evaluated"
+    assert evidence[0]["bound_value"] is None
 
 
 # ---- A5: per-trial budget ----
