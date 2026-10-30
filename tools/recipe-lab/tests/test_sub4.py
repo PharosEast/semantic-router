@@ -8,26 +8,43 @@ import json
 from pathlib import Path
 
 import yaml
-
 from recipe_lab.contract import ExperimentSpec
 from recipe_lab.next import render_next_context
 from recipe_lab.provenance import build_run_manifest
 from recipe_lab.report import render_run_report
+
 from tests.fixtures import VALID_SPLITS_SPEC
 
 REPLAY = {
     "record_id": "rec-111111111111",
-    "round": 1, "ts": "t", "tier": "replay", "verdict": "RANKED",
-    "candidate": {"kind": "config", "ref": "c1.yaml", "provenance": {"proposer": "threshold-search"}},
-    "metrics": {"routed_accuracy": 0.85}, "dataset_hash": "sha256:aa",
+    "round": 1,
+    "ts": "t",
+    "tier": "replay",
+    "verdict": "RANKED",
+    "candidate": {
+        "kind": "config",
+        "ref": "c1.yaml",
+        "provenance": {"proposer": "threshold-search"},
+    },
+    "metrics": {"routed_accuracy": 0.85},
+    "dataset_hash": "sha256:aa",
     "coverage_warning": False,
 }
 LIVE = {
     "record_id": "rec-222222222222",
-    "round": 2, "ts": "t", "tier": "live", "verdict": "PASS",
-    "candidate": {"kind": "config", "ref": "c1.yaml", "provenance": {"proposer": "threshold-search"}},
-    "metrics": {"accuracy": 0.9}, "dataset_hash": "sha256:aa",
-    "gates": {"pii": "pass"}, "bench_refs": ["run-a", "run-b"],
+    "round": 2,
+    "ts": "t",
+    "tier": "live",
+    "verdict": "PASS",
+    "candidate": {
+        "kind": "config",
+        "ref": "c1.yaml",
+        "provenance": {"proposer": "threshold-search"},
+    },
+    "metrics": {"accuracy": 0.9},
+    "dataset_hash": "sha256:aa",
+    "gates": {"pii": "pass"},
+    "bench_refs": ["run-a", "run-b"],
     "coverage_warning": False,
 }
 
@@ -93,8 +110,12 @@ def test_next_best_replay_uses_metric_not_recency():
     # A2: the buggy selection let the last RANKED record win regardless of
     # metric; an earlier candidate with a higher metric must win instead.
     spec = ExperimentSpec.from_dict(VALID_SPLITS_SPEC)
-    early_high = dict(REPLAY, record_id="rec-aaaaaaaaaaaa", round=1, metrics={"routed_accuracy": 0.9})
-    late_low = dict(REPLAY, record_id="rec-bbbbbbbbbbbb", round=2, metrics={"routed_accuracy": 0.7})
+    early_high = dict(
+        REPLAY, record_id="rec-aaaaaaaaaaaa", round=1, metrics={"routed_accuracy": 0.9}
+    )
+    late_low = dict(
+        REPLAY, record_id="rec-bbbbbbbbbbbb", round=2, metrics={"routed_accuracy": 0.7}
+    )
     context = render_next_context([early_high, late_low, LIVE], spec)
     assert "rec-aaaaaaaaaaaa" in context
     best_section = context.split("## Best replay-tier candidate")[1].split("##")[0]
@@ -105,9 +126,23 @@ def test_next_best_replay_uses_metric_not_recency():
 def test_next_best_replay_excludes_flagged_records():
     # A2: coverage_warning records and timeout trials never rank.
     spec = ExperimentSpec.from_dict(VALID_SPLITS_SPEC)
-    good = dict(REPLAY, record_id="rec-cccccccccccc", round=1, metrics={"routed_accuracy": 0.8})
-    flagged = dict(REPLAY, record_id="rec-dddddddddddd", round=2, metrics={"routed_accuracy": 0.99}, coverage_warning=True)
-    timeout = dict(REPLAY, record_id="rec-eeeeeeeeeeee", round=3, metrics={"routed_accuracy": 0.98}, status="timeout")
+    good = dict(
+        REPLAY, record_id="rec-cccccccccccc", round=1, metrics={"routed_accuracy": 0.8}
+    )
+    flagged = dict(
+        REPLAY,
+        record_id="rec-dddddddddddd",
+        round=2,
+        metrics={"routed_accuracy": 0.99},
+        coverage_warning=True,
+    )
+    timeout = dict(
+        REPLAY,
+        record_id="rec-eeeeeeeeeeee",
+        round=3,
+        metrics={"routed_accuracy": 0.98},
+        status="timeout",
+    )
     context = render_next_context([flagged, timeout, good, LIVE], spec)
     best_section = context.split("## Best replay-tier candidate")[1].split("##")[0]
     assert "rec-cccccccccccc" in best_section
@@ -133,8 +168,12 @@ ATTR_DIR_SUMMARY = {
     "e1_by_family": {},
     "e3_by_family": {},
     "e1_confusion_top": [],
-    "decision_mismatch_top": [{"truth": "math", "matched_decision": "code", "count": 1}],
-    "e2_deviations_top": [{"routed": "local/model-code", "expected": "local/model-math", "count": 1}],
+    "decision_mismatch_top": [
+        {"truth": "math", "matched_decision": "code", "count": 1}
+    ],
+    "e2_deviations_top": [
+        {"routed": "local/model-code", "expected": "local/model-math", "count": 1}
+    ],
 }
 
 
@@ -146,7 +185,8 @@ def _write_attribution_artifacts(tmp_path) -> str:
     attr_dir.mkdir()
     (attr_dir / "attribution.jsonl").write_bytes(ATTR_BYTES)
     (attr_dir / "summary.json").write_text(
-        json.dumps(ATTR_DIR_SUMMARY, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8"
+        json.dumps(ATTR_DIR_SUMMARY, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
     )
     return f"{attr_dir / 'attribution.jsonl'}@sha256:{hashlib.sha256(ATTR_BYTES).hexdigest()}"
 
@@ -156,14 +196,25 @@ def _next_ledger(tmp_path, with_attribution: bool = True):
         REPLAY,
         record_id="rec-333333333333",
         round=2,
-        attribution_ref=_write_attribution_artifacts(tmp_path) if with_attribution else None,
+        attribution_ref=(
+            _write_attribution_artifacts(tmp_path) if with_attribution else None
+        ),
     )
-    live_last = dict(LIVE, record_id="rec-222222222222", round=3, reasons=["accuracy improved"], constraints={"cost": {"status": "pass"}})
+    live_last = dict(
+        LIVE,
+        record_id="rec-222222222222",
+        round=3,
+        reasons=["accuracy improved"],
+        constraints={"cost": {"status": "pass"}},
+    )
     records = [REPLAY, live_last]
     if with_attribution:
         records.insert(1, replay_ref)
     ledger = tmp_path / "ledger.jsonl"
-    ledger.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records), encoding="utf-8")
+    ledger.write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in records),
+        encoding="utf-8",
+    )
     return str(ledger)
 
 
@@ -173,8 +224,34 @@ def test_next_full_context_is_byte_stable(tmp_path):
     spec_path = _next_spec(tmp_path)
     ledger_path = _next_ledger(tmp_path)
     first, second = tmp_path / "ctx1.md", tmp_path / "ctx2.md"
-    assert main(["next", "--spec", spec_path, "--ledger", ledger_path, "--output", str(first)]) == 0
-    assert main(["next", "--spec", spec_path, "--ledger", ledger_path, "--output", str(second)]) == 0
+    assert (
+        main(
+            [
+                "next",
+                "--spec",
+                spec_path,
+                "--ledger",
+                ledger_path,
+                "--output",
+                str(first),
+            ]
+        )
+        == 0
+    )
+    assert (
+        main(
+            [
+                "next",
+                "--spec",
+                spec_path,
+                "--ledger",
+                ledger_path,
+                "--output",
+                str(second),
+            ]
+        )
+        == 0
+    )
     context = first.read_text(encoding="utf-8")
     assert context == second.read_text(encoding="utf-8")  # G3: byte-stable export
     for section in (
@@ -205,7 +282,20 @@ def test_next_empty_ledger(tmp_path):
     ledger_path = _next_ledger(tmp_path, with_attribution=False)
     Path(ledger_path).write_text("", encoding="utf-8")
     output = tmp_path / "ctx.md"
-    assert main(["next", "--spec", spec_path, "--ledger", ledger_path, "--output", str(output)]) == 0
+    assert (
+        main(
+            [
+                "next",
+                "--spec",
+                spec_path,
+                "--ledger",
+                ledger_path,
+                "--output",
+                str(output),
+            ]
+        )
+        == 0
+    )
     context = output.read_text(encoding="utf-8")
     assert "none yet: run the replay tier first" in context
     assert "none yet: no live-tier record in the ledger" in context
@@ -223,8 +313,23 @@ def test_next_attribution_hash_mismatch_exits_2(tmp_path, capsys):
     (attr_dir / "summary.json").write_text("{}", encoding="utf-8")
     stale_ref = f"{attr_dir / 'attribution.jsonl'}@sha256:{'0' * 64}"
     ledger = tmp_path / "ledger.jsonl"
-    ledger.write_text(json.dumps(dict(REPLAY, attribution_ref=stale_ref)) + "\n", encoding="utf-8")
-    assert main(["next", "--spec", spec_path, "--ledger", str(ledger), "--output", str(tmp_path / "ctx.md")]) == 2
+    ledger.write_text(
+        json.dumps(dict(REPLAY, attribution_ref=stale_ref)) + "\n", encoding="utf-8"
+    )
+    assert (
+        main(
+            [
+                "next",
+                "--spec",
+                spec_path,
+                "--ledger",
+                str(ledger),
+                "--output",
+                str(tmp_path / "ctx.md"),
+            ]
+        )
+        == 2
+    )
     assert "attribution_ref hash mismatch" in capsys.readouterr().err
 
 
@@ -237,8 +342,23 @@ def test_next_missing_summary_json_exits_2(tmp_path, capsys):
     (attr_dir / "attribution.jsonl").write_bytes(ATTR_BYTES)  # no summary.json
     ref = f"{attr_dir / 'attribution.jsonl'}@sha256:{hashlib.sha256(ATTR_BYTES).hexdigest()}"
     ledger = tmp_path / "ledger.jsonl"
-    ledger.write_text(json.dumps(dict(REPLAY, attribution_ref=ref)) + "\n", encoding="utf-8")
-    assert main(["next", "--spec", spec_path, "--ledger", str(ledger), "--output", str(tmp_path / "ctx.md")]) == 2
+    ledger.write_text(
+        json.dumps(dict(REPLAY, attribution_ref=ref)) + "\n", encoding="utf-8"
+    )
+    assert (
+        main(
+            [
+                "next",
+                "--spec",
+                spec_path,
+                "--ledger",
+                str(ledger),
+                "--output",
+                str(tmp_path / "ctx.md"),
+            ]
+        )
+        == 2
+    )
     assert "attribution summary not found" in capsys.readouterr().err
 
 
@@ -256,7 +376,12 @@ def test_next_diagnosis_sections_and_citable_refs(tmp_path):
                 "dead_decisions": ["domain_code_complex"],
                 "rare_decisions": [{"decision": "complex_general", "hit_pct": 0.4}],
                 "unreachable_sites": [
-                    {"decision": "domain_code_complex", "signal": "difficulty", "op": "gte", "threshold": 2.5}
+                    {
+                        "decision": "domain_code_complex",
+                        "signal": "difficulty",
+                        "op": "gte",
+                        "threshold": 2.5,
+                    }
                 ],
             }
         ),
@@ -266,8 +391,15 @@ def test_next_diagnosis_sections_and_citable_refs(tmp_path):
     assert (
         main(
             [
-                "next", "--spec", spec_path, "--ledger", ledger_path,
-                "--diagnosis", str(diagnosis_path), "--output", str(output),
+                "next",
+                "--spec",
+                spec_path,
+                "--ledger",
+                ledger_path,
+                "--diagnosis",
+                str(diagnosis_path),
+                "--output",
+                str(output),
             ]
         )
         == 0
@@ -287,7 +419,7 @@ def test_next_diagnosis_sections_and_citable_refs(tmp_path):
     diag_refs = [r for r in resolved if r.startswith("diag:")]
     assert diag_refs, "diagnosis highlights must contribute citable refs"
     for ref in diag_refs:
-        assert _DIAG_RE.match(ref[len("diag:"):]), ref
+        assert _DIAG_RE.match(ref[len("diag:") :]), ref
 
 
 def test_next_without_replay_records(tmp_path):
@@ -304,7 +436,10 @@ def test_provenance_manifest_from_ledger(tmp_path):
     manifest = build_run_manifest(str(ledger), [REPLAY, LIVE])
     assert manifest["kind"] == "recipe-lab-run"
     assert manifest["dataset_ref"]["content_hash"] == "sha256:aa"
-    assert manifest["evidence"]["ledger"]["record_ids"] == ["rec-111111111111", "rec-222222222222"]
+    assert manifest["evidence"]["ledger"]["record_ids"] == [
+        "rec-111111111111",
+        "rec-222222222222",
+    ]
     assert manifest["evidence"]["bench_refs"] == ["run-a", "run-b"]
     assert manifest["best_replay_candidate"]["ref"] == "c1.yaml"
     assert manifest["rounds"]["verdict_counts"] == {"PASS": 1, "RANKED": 1}
@@ -319,6 +454,7 @@ def test_attribute_writes_summary_json(tmp_path, capsys):
     # G3: attribute writes the summarize() result next to attribution.jsonl
     # so `next` can resolve a record's attribution_ref and read it.
     from recipe_lab.cli import main
+
     from tests.fixtures import VALID_SPEC
 
     cases = tmp_path / "cases.jsonl"
@@ -334,13 +470,32 @@ def test_attribute_writes_summary_json(tmp_path, capsys):
     records = tmp_path / "records.jsonl"
     records.write_text(
         json.dumps(
-            {"case_id": "c1", "truth": "math", "matched_decision": "code", "routed": "local/model-code", "answer_ok": False}
+            {
+                "case_id": "c1",
+                "truth": "math",
+                "matched_decision": "code",
+                "routed": "local/model-code",
+                "answer_ok": False,
+            }
         )
         + "\n",
         encoding="utf-8",
     )
     out_dir = tmp_path / "attr-out"
-    assert main(["attribute", "--spec", str(spec_path), "--records", str(records), "--output-dir", str(out_dir)]) == 0
+    assert (
+        main(
+            [
+                "attribute",
+                "--spec",
+                str(spec_path),
+                "--records",
+                str(records),
+                "--output-dir",
+                str(out_dir),
+            ]
+        )
+        == 0
+    )
     parsed = json.loads(capsys.readouterr().out)
     summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
     assert summary["class_counts"]["decision_mismatch"] == 1

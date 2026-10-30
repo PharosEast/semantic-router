@@ -35,13 +35,17 @@ def build_run_manifest(
     rounds = sorted({r.get("round") for r in records})
     verdicts = [r.get("verdict") for r in records]
     live_records = [r for r in records if r.get("tier") == "live"]
-    bench_refs = sorted({ref for r in live_records for ref in (r.get("bench_refs") or [])})
+    bench_refs = sorted(
+        {ref for r in live_records for ref in (r.get("bench_refs") or [])}
+    )
     best = None
     for record in records:
         if record.get("tier") == "replay" and record.get("verdict") == "RANKED":
             metrics = record.get("metrics") or {}
             for value in metrics.values():
-                if isinstance(value, (int, float)) and (best is None or value > best[1]):
+                if isinstance(value, (int, float)) and (
+                    best is None or value > best[1]
+                ):
                     best = (record.get("candidate", {}).get("ref"), float(value))
     return {
         "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -68,11 +72,15 @@ def build_run_manifest(
             "ledger": {
                 "path": str(ledger_file),
                 "content_hash": _content_hash(ledger_file),
-                "record_ids": sorted({r["record_id"] for r in records if r.get("record_id")}),
+                "record_ids": sorted(
+                    {r["record_id"] for r in records if r.get("record_id")}
+                ),
             },
             "bench_refs": bench_refs,
         },
-        "best_replay_candidate": None if best is None else {"ref": best[0], "score": best[1]},
+        "best_replay_candidate": (
+            None if best is None else {"ref": best[0], "score": best[1]}
+        ),
     }
 
 
@@ -86,5 +94,7 @@ def write_run_manifest(ledger_path: str, output_path: str) -> dict[str, Any]:
     manifest = build_run_manifest(ledger_path, records)
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
+    output.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8"
+    )
     return manifest
