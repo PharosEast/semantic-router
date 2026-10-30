@@ -53,7 +53,13 @@ def row(
 
 def test_lane_flap_detected_with_router_reasoning():
     rows = [
-        row("conv-A", 0, "local/private-qwen", ts="2026-10-28T10:00:00Z", session_action="establish_baseline"),
+        row(
+            "conv-A",
+            0,
+            "local/private-qwen",
+            ts="2026-10-28T10:00:00Z",
+            session_action="establish_baseline",
+        ),
         row(
             "conv-A",
             1,
@@ -79,13 +85,33 @@ def test_same_turn_requests_ordered_by_timestamp():
     # from the (API-return-ordered) input order. The reversed input would
     # otherwise report the flap in the wrong direction.
     rows = [
-        row("conv-A", 0, "cloud/frontier-reasoning", ts="2026-10-28T10:00:03Z", request_id="r3"),
-        row("conv-A", 0, "local/private-qwen", ts="2026-10-28T10:00:01Z", request_id="r1"),
-        row("conv-A", 0, "cloud/frontier-reasoning", ts="2026-10-28T10:00:02Z", request_id="r2"),
+        row(
+            "conv-A",
+            0,
+            "cloud/frontier-reasoning",
+            ts="2026-10-28T10:00:03Z",
+            request_id="r3",
+        ),
+        row(
+            "conv-A",
+            0,
+            "local/private-qwen",
+            ts="2026-10-28T10:00:01Z",
+            request_id="r1",
+        ),
+        row(
+            "conv-A",
+            0,
+            "cloud/frontier-reasoning",
+            ts="2026-10-28T10:00:02Z",
+            request_id="r2",
+        ),
     ]
     analysis = analyze_sessions(rows)
     assert analysis["event_counts"][SESSION_CLASS_LANE_FLAP] == 1
-    flap_events = [e for e in analysis["events"] if e["class"] == SESSION_CLASS_LANE_FLAP]
+    flap_events = [
+        e for e in analysis["events"] if e["class"] == SESSION_CLASS_LANE_FLAP
+    ]
     assert [(e["detail"]["from"], e["detail"]["to"]) for e in flap_events] == [
         ("local/private-qwen", "cloud/frontier-reasoning"),
     ]
@@ -103,19 +129,46 @@ def test_failed_request_is_selection_failed_and_interrupted():
     # continues within the user turn: one record-level selection_failed plus
     # one conversation-level tool_loop_interrupted.
     rows = [
-        row("conv-A", 0, "local/private-qwen", ts="2026-10-28T10:00:00Z", request_id="r1"),
-        row("conv-A", 0, "", ts="2026-10-28T10:00:01Z", request_id="r2", lifecycle_state="failed", response_status=503, terminal_reason="selection_rejected"),
-        row("conv-A", 0, "local/private-qwen", ts="2026-10-28T10:00:02Z", request_id="r3"),
+        row(
+            "conv-A",
+            0,
+            "local/private-qwen",
+            ts="2026-10-28T10:00:00Z",
+            request_id="r1",
+        ),
+        row(
+            "conv-A",
+            0,
+            "",
+            ts="2026-10-28T10:00:01Z",
+            request_id="r2",
+            lifecycle_state="failed",
+            response_status=503,
+            terminal_reason="selection_rejected",
+        ),
+        row(
+            "conv-A",
+            0,
+            "local/private-qwen",
+            ts="2026-10-28T10:00:02Z",
+            request_id="r3",
+        ),
     ]
     analysis = analyze_sessions(rows)
     assert analysis["event_counts"][SESSION_CLASS_SELECTION_FAILED] == 1
     assert analysis["event_counts"][SESSION_CLASS_TOOL_LOOP_INTERRUPTED] == 1
-    failed = next(e for e in analysis["events"] if e["class"] == SESSION_CLASS_SELECTION_FAILED)
+    failed = next(
+        e for e in analysis["events"] if e["class"] == SESSION_CLASS_SELECTION_FAILED
+    )
     assert failed["turn_index"] == 0
     assert failed["detail"]["terminal_reason"] == "selection_rejected"
     assert failed["detail"]["response_status"] == 503
     assert failed["detail"]["request_id"] == "r2"
-    interrupted = next(e for e in analysis["events"] if e["class"] == SESSION_CLASS_TOOL_LOOP_INTERRUPTED)
+    interrupted = next(
+        e
+        for e in analysis["events"]
+        if e["class"] == SESSION_CLASS_TOOL_LOOP_INTERRUPTED
+    )
     assert interrupted["detail"]["interrupted_request"] == "r2"
     assert interrupted["detail"]["resumed_request"] == "r3"
     summary = analysis["sessions"][0]
@@ -127,9 +180,28 @@ def test_failed_request_without_resume_is_not_interrupted():
     # the loop was interrupted but the turn ended there (user abort / next
     # turn): record-level evidence only, no in-turn resume.
     rows = [
-        row("conv-A", 0, "local/private-qwen", ts="2026-10-28T10:00:00Z", request_id="r1"),
-        row("conv-A", 0, "", ts="2026-10-28T10:00:01Z", request_id="r2", lifecycle_state="failed"),
-        row("conv-A", 1, "local/private-qwen", ts="2026-10-28T10:05:00Z", request_id="r3"),
+        row(
+            "conv-A",
+            0,
+            "local/private-qwen",
+            ts="2026-10-28T10:00:00Z",
+            request_id="r1",
+        ),
+        row(
+            "conv-A",
+            0,
+            "",
+            ts="2026-10-28T10:00:01Z",
+            request_id="r2",
+            lifecycle_state="failed",
+        ),
+        row(
+            "conv-A",
+            1,
+            "local/private-qwen",
+            ts="2026-10-28T10:05:00Z",
+            request_id="r3",
+        ),
     ]
     analysis = analyze_sessions(rows)
     assert analysis["event_counts"][SESSION_CLASS_SELECTION_FAILED] == 1
@@ -176,7 +248,13 @@ def test_report_is_deterministic_and_honest():
     rows = [
         row("conv-B", 0, "local/private-qwen", ts="2026-10-28T10:00:00Z"),
         row("conv-A", 0, "local/private-qwen", ts="2026-10-28T10:00:00Z"),
-        row("conv-A", 2, "cloud/frontier-reasoning", ts="2026-10-28T10:02:00Z", session_action="switch"),
+        row(
+            "conv-A",
+            2,
+            "cloud/frontier-reasoning",
+            ts="2026-10-28T10:02:00Z",
+            session_action="switch",
+        ),
     ]
     first = render_session_report(analyze_sessions(rows))
     second = render_session_report(analyze_sessions(rows))
@@ -185,14 +263,37 @@ def test_report_is_deterministic_and_honest():
     assert "statistical significance is not established" in first
     # conv-A sorts before conv-B; the flap detail carries the router reasoning
     assert "`conv-A`" in first and "`conv-B`" in first
-    assert "previous_model_not_in_candidates" not in first  # no reasoning given on this flap
+    assert (
+        "previous_model_not_in_candidates" not in first
+    )  # no reasoning given on this flap
 
 
 def test_write_session_report_artifacts(tmp_path):
     rows = [
-        row("conv-A", 0, "local/private-qwen", ts="2026-10-28T10:00:00Z", request_id="r1"),
-        row("conv-A", 0, "", ts="2026-10-28T10:00:01Z", request_id="r2", lifecycle_state="failed", response_status=503, terminal_reason="selection_rejected"),
-        row("conv-A", 2, "cloud/frontier-reasoning", ts="2026-10-28T10:02:00Z", request_id="r3"),
+        row(
+            "conv-A",
+            0,
+            "local/private-qwen",
+            ts="2026-10-28T10:00:00Z",
+            request_id="r1",
+        ),
+        row(
+            "conv-A",
+            0,
+            "",
+            ts="2026-10-28T10:00:01Z",
+            request_id="r2",
+            lifecycle_state="failed",
+            response_status=503,
+            terminal_reason="selection_rejected",
+        ),
+        row(
+            "conv-A",
+            2,
+            "cloud/frontier-reasoning",
+            ts="2026-10-28T10:02:00Z",
+            request_id="r3",
+        ),
     ]
     summary = write_session_report(rows, str(tmp_path))
     assert summary["sessions"] == 1

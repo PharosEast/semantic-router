@@ -239,7 +239,9 @@ def record_to_case(
         "session_id": _record_field(record, "session_id", "SessionID"),
         "turn_index": _record_field(record, "turn_index", "TurnIndex"),
         "session_action": _record_field(record, "session_action", "SessionAction"),
-        "selection_reasoning": _record_field(record, "selection_reasoning", "SelectionReasoning"),
+        "selection_reasoning": _record_field(
+            record, "selection_reasoning", "SelectionReasoning"
+        ),
     }
     if any(value is not None for value in session_evidence.values()):
         row["session"] = {k: v for k, v in session_evidence.items() if v is not None}
@@ -308,7 +310,9 @@ def records_to_cases(
         if state == "matched":
             prompt = _record_field(record, "prompt", "Prompt")
             if str(row.get("lifecycle_state") or "") == "failed":
-                rows.append(row)  # rejection evidence is never deduped and never claims the prompt
+                rows.append(
+                    row
+                )  # rejection evidence is never deduped and never claims the prompt
             elif prompt in seen_prompts:
                 stats["duplicate_prompt"] += 1
                 continue

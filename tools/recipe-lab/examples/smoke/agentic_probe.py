@@ -55,20 +55,32 @@ TOOLS_PAYLOAD = {
 }
 
 
-def post(body: dict, session: str | None, conversation: str | None) -> tuple[int, dict, dict]:
+def post(
+    body: dict, session: str | None, conversation: str | None
+) -> tuple[int, dict, dict]:
     headers = {"Content-Type": "application/json"}
     if session:
         headers["x-session-id"] = session
     if conversation:
         headers["x-conversation-id"] = conversation
     request = urllib.request.Request(
-        ROUTER + "/v1/chat/completions", data=json.dumps(body).encode("utf-8"), headers=headers
+        ROUTER + "/v1/chat/completions",
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=120) as response:
-            return response.status, json.loads(response.read().decode("utf-8")), dict(response.headers)
+            return (
+                response.status,
+                json.loads(response.read().decode("utf-8")),
+                dict(response.headers),
+            )
     except urllib.error.HTTPError as exc:
-        return exc.code, {"error": exc.read().decode("utf-8", "replace")[:400]}, dict(exc.headers)
+        return (
+            exc.code,
+            {"error": exc.read().decode("utf-8", "replace")[:400]},
+            dict(exc.headers),
+        )
 
 
 def model_from(headers: dict, body: dict) -> str:
@@ -80,7 +92,9 @@ def model_from(headers: dict, body: dict) -> str:
 
 def dump_replays(output: Path) -> list[dict]:
     try:
-        with urllib.request.urlopen(MGMT + "/api/v1/observability/replays?showDetails=true", timeout=30) as response:
+        with urllib.request.urlopen(
+            MGMT + "/api/v1/observability/replays?showDetails=true", timeout=30
+        ) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (urllib.error.URLError, json.JSONDecodeError) as exc:
         print(f"replay dump failed: {exc}", file=sys.stderr)
@@ -88,7 +102,9 @@ def dump_replays(output: Path) -> list[dict]:
     rows = payload.get("replays") or payload.get("records") or payload
     if isinstance(rows, dict):
         rows = list(rows.values())
-    output.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    output.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
     return rows
 
 
@@ -104,7 +120,12 @@ def main() -> int:
     transcript: list[dict] = []
 
     def turn(name: str, messages: list[dict], **extra: object) -> None:
-        body = {"model": "vllm-sr/auto", "max_tokens": 64, "messages": messages, **extra}
+        body = {
+            "model": "vllm-sr/auto",
+            "max_tokens": 64,
+            "messages": messages,
+            **extra,
+        }
         status, data, headers = post(body, session, conversation)
         entry = {
             "turn": name,
@@ -134,23 +155,62 @@ def main() -> int:
     turn(
         "A3-tool-call-request",
         [
-            {"role": "user", "content": "Fix the failing test in src/limiter.py, then run the suite."},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "src/limiter.py"}'}}
-            ]},
-            {"role": "tool", "tool_call_id": "call-1", "content": "def limit(r): return r > 10  # bug: off-by-one"},
+            {
+                "role": "user",
+                "content": "Fix the failing test in src/limiter.py, then run the suite.",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "src/limiter.py"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "def limit(r): return r > 10  # bug: off-by-one",
+            },
         ],
         **TOOLS_PAYLOAD,
     )
     turn(
         "A4-tool-result-followup",
         [
-            {"role": "user", "content": "Fix the failing test in src/limiter.py, then run the suite."},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "call-1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "src/limiter.py"}'}}
-            ]},
-            {"role": "tool", "tool_call_id": "call-1", "content": "def limit(r): return r > 10"},
-            {"role": "assistant", "content": "The boundary check is off by one; I'll fix it and run tests."},
+            {
+                "role": "user",
+                "content": "Fix the failing test in src/limiter.py, then run the suite.",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "call-1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "src/limiter.py"}',
+                        },
+                    }
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "call-1",
+                "content": "def limit(r): return r > 10",
+            },
+            {
+                "role": "assistant",
+                "content": "The boundary check is off by one; I'll fix it and run tests.",
+            },
             {"role": "user", "content": "Good. Now summarise what you changed."},
         ],
         **TOOLS_PAYLOAD,
@@ -170,15 +230,19 @@ def main() -> int:
         ],
     }
     status, data, headers = post(body, "probe-session-002", "probe-conv-002")
-    transcript.append({
-        "turn": "B-fresh-hard",
-        "status": status,
-        "model": model_from(headers, data),
-        "vsr_headers": {k: v for k, v in headers.items() if k.startswith("x-vsr-")},
-    })
+    transcript.append(
+        {
+            "turn": "B-fresh-hard",
+            "status": status,
+            "model": model_from(headers, data),
+            "vsr_headers": {k: v for k, v in headers.items() if k.startswith("x-vsr-")},
+        }
+    )
     print(json.dumps(transcript[-1], ensure_ascii=False))
 
-    (out / "probe-transcript.json").write_text(json.dumps(transcript, ensure_ascii=False, indent=1), encoding="utf-8")
+    (out / "probe-transcript.json").write_text(
+        json.dumps(transcript, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
 
     # --- replay dump: what the router recorded about this agent traffic ---
     rows = dump_replays(out / "probe-replays.json")
@@ -187,8 +251,10 @@ def main() -> int:
         details = row.get("details", row) if isinstance(row, dict) else {}
         summary.append(
             {
-                "conversation": details.get("conversation_id") or details.get("x-conversation-id"),
-                "selected_model": details.get("selected_model") or details.get("routed"),
+                "conversation": details.get("conversation_id")
+                or details.get("x-conversation-id"),
+                "selected_model": details.get("selected_model")
+                or details.get("routed"),
                 "decision": details.get("decision"),
                 "has_tools": "tools" in json.dumps(details)[:20000],
                 "body_bytes_captured": len(json.dumps(details, ensure_ascii=False)),

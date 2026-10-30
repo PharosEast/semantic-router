@@ -19,11 +19,18 @@ from pathlib import Path
 ROUTER = "http://127.0.0.1:8899"
 TOOLS = {
     "tools": [
-        {"type": "function", "function": {
-            "name": "read_file",
-            "description": "Read a file from the workspace",
-            "parameters": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-        }},
+        {
+            "type": "function",
+            "function": {
+                "name": "read_file",
+                "description": "Read a file from the workspace",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"path": {"type": "string"}},
+                    "required": ["path"],
+                },
+            },
+        },
     ]
 }
 HARD = (
@@ -63,7 +70,12 @@ def main() -> int:
         if tools:
             body.update(TOOLS)
         status, data = post(body, "probe-r2", conversation)
-        entry = {"turn": tag, "status": status, "model": data.get("model"), "error": data.get("error")}
+        entry = {
+            "turn": tag,
+            "status": status,
+            "model": data.get("model"),
+            "error": data.get("error"),
+        }
         results.append(entry)
         print(json.dumps(entry, ensure_ascii=False))
 
@@ -74,9 +86,20 @@ def main() -> int:
         "conv-E",
         [
             {"role": "user", "content": HARD},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c1", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "src/limiter/gcra.go"}'}}
-            ]},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c1",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "src/limiter/gcra.go"}',
+                        },
+                    }
+                ],
+            },
             {"role": "tool", "tool_call_id": "c1", "content": HARD_TOOL_RESULT},
         ],
         True,
@@ -88,14 +111,27 @@ def main() -> int:
         "conv-F",
         [
             {"role": "user", "content": HARD},
-            {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "c2", "type": "function", "function": {"name": "read_file", "arguments": '{"path": "notes.txt"}'}}
-            ]},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    {
+                        "id": "c2",
+                        "type": "function",
+                        "function": {
+                            "name": "read_file",
+                            "arguments": '{"path": "notes.txt"}',
+                        },
+                    }
+                ],
+            },
             {"role": "tool", "tool_call_id": "c2", "content": SIMPLE_TOOL_RESULT},
         ],
         True,
     )
-    Path(args.output).write_text(json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8")
+    Path(args.output).write_text(
+        json.dumps(results, ensure_ascii=False, indent=1), encoding="utf-8"
+    )
     return 0
 
 

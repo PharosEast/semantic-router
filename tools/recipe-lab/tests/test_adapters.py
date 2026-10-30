@@ -17,7 +17,9 @@ from recipe_lab.adapters.router_replay import (
 from recipe_lab.contract import ContractError
 
 
-def fake_record(request_id: str, prompt: str, decision: str, selected: str, **extra) -> dict:
+def fake_record(
+    request_id: str, prompt: str, decision: str, selected: str, **extra
+) -> dict:
     record = {
         "request_id": request_id,
         "decision": decision,
@@ -236,7 +238,15 @@ def test_record_to_case_carries_timeline_and_lifecycle():
     assert row["lifecycle_state"] == "completed"
     assert "terminal_reason" not in row  # absent fields keep the row shape
     # an older record wire without these fields still produces a plain row
-    row_plain, _ = record_to_case(fake_record("r2", "What is the capital of France?", "local_standard", "local/private-qwen"), by_prompt)
+    row_plain, _ = record_to_case(
+        fake_record(
+            "r2",
+            "What is the capital of France?",
+            "local_standard",
+            "local/private-qwen",
+        ),
+        by_prompt,
+    )
     assert "record_ts" not in row_plain and "lifecycle_state" not in row_plain
 
 
@@ -254,7 +264,13 @@ def test_records_to_cases_keeps_failed_records():
             terminal_reason="selection_rejected",
             response_status=503,
         ),
-        fake_record("r2", "What is the capital of France?", "local_standard", "local/private-qwen", timestamp="2026-10-28T10:00:01Z"),
+        fake_record(
+            "r2",
+            "What is the capital of France?",
+            "local_standard",
+            "local/private-qwen",
+            timestamp="2026-10-28T10:00:01Z",
+        ),
     ]
     rows, stats = records_to_cases(records, [type("C", (), c) for c in CASES])
     assert len(rows) == 2
