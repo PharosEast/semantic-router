@@ -54,12 +54,13 @@ for `live-verdict`.
   `session-report.md` and `session-events.json`; deterministic - same rows,
   same report bytes.
 - `recipe-lab collect-replays --url http://127.0.0.1:8080
-  [--cases C | --unlabeled] --output R --family d3`
+  [--cases C | --unlabeled] --output R --family d3 [--api-key-env NAME]`
   Pulls router_replay records from the management API and joins them with
   labeled cases. Skipped rows are counted (`no_prompt`/`unlabeled`/
   `duplicate_prompt`), never guessed. `--unlabeled` skips the labeled join
   and emits one raw diagnostic row per replay record - the `diagnose`
-  input; mutually exclusive with `--cases`.
+  input; mutually exclusive with `--cases`. `--api-key-env` names the
+  environment variable holding the management API bearer token.
 - `recipe-lab bank build --cases C --models M1,M2 --endpoint U --output B`
   Direct per-case/per-model queries graded by `expected_contains`.
 - `recipe-lab bank apply --bank B --records R [--output R2]`
@@ -113,7 +114,8 @@ proposals.
   --bank B --candidates D [--baseline-config B] --proposer P --ledger L
   --output-dir D --router-bin BIN --mock-backend M [--mock-extra-args "..."]
   [--validate [--validate-bin vllm-sr]] [--attribution-ref REF]
-  [--insight-refs "..."] [--round N]`
+  [--insight-refs "..."] [--round N]
+  [--reload restart|hot [--api-key-env NAME]]`
   One router lifecycle per candidate; RANKED records land in the ledger.
   The split identity is re-hashed before any stack work (A4); the trial
   deadline is `budget.max_minutes_per_trial` (A5, timed-out candidates get
@@ -122,6 +124,12 @@ proposals.
   all-rejected exits 2. `--candidates` accepts a directory, a comma-separated
   list, or a single config path — the agent's own proposal entry: pass one
   config plus `--proposer agent:<id>` so the ledger records who proposed it.
+  - `--reload` (H): `restart` (default) restarts the router once per
+    candidate; `hot` keeps one router alive for the whole candidate list
+    and feeds it each candidate via `PUT /api/v1/config` - needs
+    `--api-key-env` for the management bearer token (the same env var
+    covers the replay fetch). A hot-path failure falls back to restart;
+    the record notes always say which mode ran (`reload=`).
 
 ## Insight references (stage 2)
 

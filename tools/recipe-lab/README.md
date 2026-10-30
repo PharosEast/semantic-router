@@ -5,7 +5,7 @@ Closed-loop experiments for semantic-router routing recipes（RSI 工作台）�
 本层覆盖 replay-tier 闭环：冻结题集身份（A4）→ 题集三分（B）→ 答案库与归因 →
 候选提议（信号级 / 规则级 / 分布校准）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2），
 以及 live 层终裁 `live-verdict`（守卫以契约为准 A3、洞察引用 G2、经济约束 E）。
-另含无需标注的分布诊断（D）、oracle policy 的规则/默认形态（F2）。
+另含无需标注的分布诊断（D）、oracle policy 的规则/默认形态（F2）、replay 热加载（H）。
 
 ## 安装
 
@@ -42,7 +42,8 @@ pip install -e '.[dev]'
    `objective.replay_metric`（A1，默认 `routed_accuracy`）；`budget.rounds` 是轮次硬上限，
    `budget.max_minutes_per_trial` 是单个 trial 的 deadline（A5），超时记 `status=timeout`
    且不参与排序。`--validate` 用 `vllm-sr config validate` 预检候选，被拒候选不进台账，
-   全部被拒则 exit 2。
+   全部被拒则 exit 2。`--reload hot` 用单路由 + `PUT /api/v1/config` 切换候选，
+   失败回退 restart 并记录（H）。
 8. **台账（ledger）**：append / show / top。每条记录有稳定 `record_id`（G1），
    provenance 可携带 insight-refs（G2）。`ledger top --spec` 按 replay_metric 取最优。
 9. **报告与上下文（report / provenance / record-draft / next）**：报告、manifest 与
@@ -65,7 +66,7 @@ pip install -e '.[dev]'
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
 | `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |
-| `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2） |
+| `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2；`--reload restart|hot` H） |
 | `ledger` | 台账 append / show / top（G1/G2） |
 | `live-verdict` | 比较两个 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
 | `report` | 只从台账重放的运行报告（G1） |
