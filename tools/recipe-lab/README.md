@@ -3,8 +3,9 @@
 Closed-loop experiments for semantic-router routing recipes（RSI 工作台）。
 
 本层覆盖 replay-tier 闭环：冻结题集身份（A4）→ 题集三分（B）→ 答案库与归因 →
-候选提议（信号级 / 规则级）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2），
+候选提议（信号级 / 规则级 / 分布校准）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2），
 以及 live 层终裁 `live-verdict`（守卫以契约为准 A3、洞察引用 G2、经济约束 E）。
+另含无需标注的分布诊断（D）。
 
 ## 安装
 
@@ -44,7 +45,7 @@ pip install -e '.[dev]'
    全部被拒则 exit 2。
 8. **台账（ledger）**：append / show / top。每条记录有稳定 `record_id`（G1），
    provenance 可携带 insight-refs（G2）。`ledger top --spec` 按 replay_metric 取最优。
-8. **报告与上下文（report / provenance / record-draft / next）**：报告、manifest 与
+9. **报告与上下文（report / provenance / record-draft / next）**：报告、manifest 与
    晋升草稿只从台账重放；`next` 把下一轮上下文导出给 agent（见下）。
 
 ## CLI
@@ -58,12 +59,12 @@ pip install -e '.[dev]'
 | `split` | 组级确定性三分 calib/dev/frozen_test（B） |
 | `attribute` | E1/E2/E3 误路由归因（`--split` + 可选 `--cases` 哈希校验） |
 | `attribute-session` | 会话级 agentic 归因：lane_flap / tool_loop_interrupted / selection_failed（sub-6 P2） |
-| `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签 |
-| `diagnose` | 无标签流量的三类体检：覆盖率 / 分布 / 阈值可达性（D） |
+| `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签（`--unlabeled` 出原始诊断行） |
 | `bank` | 构建 / 应用 per-case/per-model 答案库 |
+| `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D） |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
-| `propose-calibrated` | 按观测分布分位点提议规则阈值候选（D） |
+| `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |
 | `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
 | `live-verdict` | 比较两个 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
@@ -89,9 +90,11 @@ recipe-lab diagnose --records rows.jsonl --config config.yaml --output-dir diag/
 recipe-lab propose-rule-thresholds --base-config config.yaml \
   --signal difficulty --from 2.5 --values 1.75 --output-dir cands/
 
-# 候选生成：按诊断观测分布自动定值（p75，或 --target-share 0.25 表达同一意图）
-recipe-lab propose-calibrated --diagnosis diag/diagnosis.json --base-config config.yaml \
-  --signal difficulty --from 2.5 --quantiles 0.75 --output-dir cands/
+# 无需标注的分布诊断 → 按观测分位点提议（D）
+recipe-lab collect-replays --url http://127.0.0.1:8080 --unlabeled --output raw.jsonl
+recipe-lab diagnose --records raw.jsonl --config config.yaml --output-dir diag/
+recipe-lab propose-calibrated --diagnosis diag/diagnosis.json \
+  --base-config config.yaml --signal difficulty --quantiles 0.75 --output-dir cands/
 
 # replay 评估（frozen_test 拒绝；候选先过 config validate）
 recipe-lab run --spec spec.yaml --split dev --cases splits/dev.jsonl \
@@ -142,6 +145,24 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
 - `bench:<run_id>`：基准 run id（仅格式校验）
 - `attr:<path>@sha256:<hex>`：归因产物，哈希必须与文件字节一致
 - `diag:<path>@sha256:<hex>#<anchor>`：诊断产物，锚定到文件内某个位置
+
+## 诊断与分布校准（D）
+
+两条无需标注的命令，把无标签流量变成提议依据：
+
+- **`diagnose`**：对 `collect-replays --unlabeled` 的原始行做三类体检——
+  死决策（从未命中）与稀有决策（有命中但流量占比低于 `--rare-pct`；
+  `--expect-rare` 白名单合法稀有决策如安全兜底，只报告不告警）、
+  各信号的分位数 / 直方图 / 量程利用率（`--utilization-warn` 标记量程利用不足，
+  `--min-sample` 警告样本过少）、以及无流量满足的规则谓词位点（unreachable）。
+  产出 `diagnosis.json`（recipe-lab-diagnosis-v1，输入哈希、字节级稳定，
+  即 `next --diagnosis` 的输入）与 `diagnosis.md`。
+- **`propose-calibrated`**：从 `diagnosis.json` 读一个信号的观测分布，
+  在指定分位点（`--quantiles`）或目标流量占比（`--target-share`，等价于分位点
+  `1 - share`）提议规则阈值候选；复用规则级提议器，共享 (signal, op, value) 的
+  位点一起移动。旁车引用来源 diagnosis；其 config 哈希与 `--base-config` 不符
+  直接拒绝（exit 2）。`--from` 限定只移动当前处于该值的位点
+  （BUG-3 的 2.5 → 1.75 校准）。
 
 ## 守卫与约束（live-verdict）
 
