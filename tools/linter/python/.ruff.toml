@@ -191,3 +191,7 @@ ignore = [
 "tools/recipe-lab/recipe_lab/splitting.py" = [
   "PLR2004",  # the three-way split count and the ratio-sum epsilon are readable inline
 ]
+
+"tools/recipe-lab/recipe_lab/live.py" = [
+  "PLR2004",  # the two-arm pairing count is part of the compare contract
+]

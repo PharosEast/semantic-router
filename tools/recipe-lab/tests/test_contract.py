@@ -52,22 +52,44 @@ def test_objective_constraints_parse_and_roundtrip():
     # E: constraints are economic conditions declared on the objective
     raw = copy.deepcopy(VALID_SPEC)
     raw["objective"]["constraints"] = [
-        {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline", "tolerance_pct": 5.0}
+        {
+            "name": "cost-not-worse",
+            "metric": "total_spend_usd",
+            "op": "lte",
+            "bound": "baseline",
+            "tolerance_pct": 5.0,
+        }
     ]
     spec = ExperimentSpec.from_dict(raw)
     [constraint] = spec.objective.constraints
-    assert constraint.op == "lte" and constraint.bound == "baseline" and constraint.tolerance_pct == 5.0
+    assert (
+        constraint.op == "lte"
+        and constraint.bound == "baseline"
+        and constraint.tolerance_pct == 5.0
+    )
     spec2 = ExperimentSpec.from_dict(spec.to_dict())
     assert spec2.to_dict() == spec.to_dict()
     # a numeric bound is legal too
-    raw["objective"]["constraints"] = [{"name": "keep-recall", "metric": "guard.pii.recall", "op": "gte", "bound": 0.95}]
+    raw["objective"]["constraints"] = [
+        {
+            "name": "keep-recall",
+            "metric": "guard.pii.recall",
+            "op": "gte",
+            "bound": 0.95,
+        }
+    ]
     spec = ExperimentSpec.from_dict(raw)
     assert spec.objective.constraints[0].bound == 0.95
 
 
 def test_objective_constraints_reject_invalid():
     raw = copy.deepcopy(VALID_SPEC)
-    base = {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline"}
+    base = {
+        "name": "cost-not-worse",
+        "metric": "total_spend_usd",
+        "op": "lte",
+        "bound": "baseline",
+    }
     for field, value, match in [
         ("op", "lt", "op"),
         ("bound", "guess", "bound"),

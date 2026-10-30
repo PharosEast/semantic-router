@@ -5,12 +5,15 @@ next to a live router."""
 from __future__ import annotations
 
 import argparse
-import json
 
 import requests
 
+_PROBE_TEXT_CAP = 400  # stop reading the probe response after this many chars
 
-def probe(url: str, model: str, payload_extra: dict, label: str, headers: dict | None = None) -> None:
+
+def probe(
+    url: str, model: str, payload_extra: dict, label: str, headers: dict | None = None
+) -> None:
     body = {
         "model": model,
         "messages": [{"role": "user", "content": "What is the capital of France?"}],
@@ -27,7 +30,7 @@ def probe(url: str, model: str, payload_extra: dict, label: str, headers: dict |
     text = ""
     for chunk in response.iter_content(chunk_size=4096, decode_unicode=True):
         text += chunk
-        if len(text) > 400:
+        if len(text) > _PROBE_TEXT_CAP:
             break
     print(f"[{label}] HTTP {response.status_code}: {text[:220]!r}")
 
@@ -37,7 +40,11 @@ def main() -> int:
     parser.add_argument("--router", default="http://127.0.0.1:8899/v1")
     parser.add_argument("--model", default="vllm-sr/auto")
     parser.add_argument("--config-hash", default="")
-    parser.add_argument("--only-mom-headers", action="store_true", help="first request carries the mom headers")
+    parser.add_argument(
+        "--only-mom-headers",
+        action="store_true",
+        help="first request carries the mom headers",
+    )
     args = parser.parse_args()
     if args.only_mom_headers:
         hash_value = args.config_hash
