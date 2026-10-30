@@ -17,6 +17,7 @@ from pathlib import Path
 import pytest
 import yaml
 from recipe_lab.cli import build_parser, main, verdict_exit_code
+
 from tests.fixtures import VALID_SPEC
 
 EXIT_CONTRACT_ERROR = 2
@@ -297,30 +298,55 @@ def test_run_records_declared_gates_as_not_evaluated(monkeypatch, tmp_path):
 
 @pytest.mark.parametrize(
     "tag",
-    ["threshold-search", "rule-threshold", "distribution-calibration", "bootstrap", "agent:claude-1", "agent:a.b_c-d"],
+    [
+        "threshold-search",
+        "rule-threshold",
+        "distribution-calibration",
+        "bootstrap",
+        "agent:claude-1",
+        "agent:a.b_c-d",
+    ],
 )
 def test_run_proposer_parses_valid_tags(tag):
     args = build_parser().parse_args(
         [
-            "run", "--spec", "s.yaml", "--cases", "c.jsonl", "--bank", "b.jsonl",
-            "--candidates", "x.yaml", "--ledger", "l.jsonl", "--output-dir", "o",
-            "--router-bin", "r", "--mock-backend", "m", "--proposer", tag,
+            "run",
+            "--spec",
+            "s.yaml",
+            "--cases",
+            "c.jsonl",
+            "--bank",
+            "b.jsonl",
+            "--candidates",
+            "x.yaml",
+            "--ledger",
+            "l.jsonl",
+            "--output-dir",
+            "o",
+            "--router-bin",
+            "r",
+            "--mock-backend",
+            "m",
+            "--proposer",
+            tag,
         ]
     )
     assert args.proposer == tag
 
 
-@pytest.mark.parametrize("tag", ["Agent1", "agent:", "agent:UPPER", "external", "agent:sp ace"])
+@pytest.mark.parametrize(
+    "tag", ["Agent1", "agent:", "agent:UPPER", "external", "agent:sp ace"]
+)
 def test_run_proposer_rejects_invalid_tags(tag, capsys):
     with pytest.raises(SystemExit) as exc:
         main(["run", "--proposer", tag, "--spec", "s.yaml"])
-    assert exc.value.code == 2
+    assert exc.value.code == EXIT_CONTRACT_ERROR
     assert "invalid --proposer" in capsys.readouterr().err
 
 
 def test_run_agent_proposer_lands_in_ledger_provenance(monkeypatch, tmp_path):
     # S5: a self-authored candidate tagged agent:<id> keeps the tag verbatim.
-    from recipe_lab import cli
+    from recipe_lab import cli  # noqa: PLC0415
 
     spec_path, cases = _write_frozen_spec(tmp_path)
     bank = tmp_path / "bank.jsonl"
@@ -331,23 +357,46 @@ def test_run_agent_proposer_lands_in_ledger_provenance(monkeypatch, tmp_path):
     monkeypatch.setattr(
         cli,
         "evaluate_candidate",
-        lambda **kwargs: {"summary": {"accuracy": 0.9}, "statuses": {"ok": 1}, "bank_stats": {"no_bank_entry": 0}},
+        lambda **kwargs: {
+            "summary": {"accuracy": 0.9},
+            "statuses": {"ok": 1},
+            "bank_stats": {"no_bank_entry": 0},
+        },
     )
     ledger_path = tmp_path / "ledger.jsonl"
     assert (
         main(
             [
-                "run", "--spec", spec_path, "--round", "1",
-                "--cases", str(cases), "--bank", str(bank),
-                "--ledger", str(ledger_path), "--candidates", str(cands),
-                "--proposer", "agent:claude-loop",
-                "--router-bin", "/bin/true", "--mock-backend", str(tmp_path / "mock.py"),
-                "--output-dir", str(tmp_path / "out"),
+                "run",
+                "--spec",
+                spec_path,
+                "--round",
+                "1",
+                "--cases",
+                str(cases),
+                "--bank",
+                str(bank),
+                "--ledger",
+                str(ledger_path),
+                "--candidates",
+                str(cands),
+                "--proposer",
+                "agent:claude-loop",
+                "--router-bin",
+                "/bin/true",
+                "--mock-backend",
+                str(tmp_path / "mock.py"),
+                "--output-dir",
+                str(tmp_path / "out"),
             ]
         )
         == 0
     )
-    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert rows[-1]["candidate"]["provenance"]["proposer"] == "agent:claude-loop"
 
 
@@ -569,7 +618,7 @@ def _documented_invocations() -> list:
         for line in text.splitlines():
             stripped = line.strip()
             if stripped.startswith("recipe-lab "):
-                found.append((doc, stripped[len("recipe-lab "):]))
+                found.append((doc, stripped[len("recipe-lab ") :]))
         for m in re.finditer(r"`recipe-lab\s+([^`\n]+)`", text):
             found.append((doc, m.group(1).strip()))
     return found
@@ -592,7 +641,11 @@ def test_every_documented_invocation_exists():
         for action in parsers[name]._actions:
             if isinstance(action, argparse._SubParsersAction):
                 sub_names = set(action.choices)
-        if len(tokens) > 1 and re.fullmatch(r"[a-z][a-z0-9|]*", tokens[1]) and sub_names:
+        if (
+            len(tokens) > 1
+            and re.fullmatch(r"[a-z][a-z0-9|]*", tokens[1])
+            and sub_names
+        ):
             for action in tokens[1].split("|"):
                 if action not in sub_names:
                     unknown.append(f"{doc}: recipe-lab {name} {action}")
