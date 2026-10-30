@@ -528,8 +528,12 @@ def test_verdict_exit_code_mapping():
     assert verdict_exit_code("INCONCLUSIVE") == EXIT_CONTRACT_ERROR
 
 
-@pytest.mark.parametrize("verdict,expected", [("PASS", 0), ("FAIL", 1), ("INCONCLUSIVE", 2)])
-def test_verify_exit_code_follows_verdict(tmp_path, capsys, monkeypatch, verdict, expected):
+@pytest.mark.parametrize(
+    "verdict,expected", [("PASS", 0), ("FAIL", 1), ("INCONCLUSIVE", 2)]
+)
+def test_verify_exit_code_follows_verdict(
+    tmp_path, capsys, monkeypatch, verdict, expected
+):
     # I: verify shares the live-verdict exit-code contract (0/1/2).
     import recipe_lab.cli as cli_module
 

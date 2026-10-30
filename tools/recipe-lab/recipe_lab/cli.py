@@ -1186,13 +1186,17 @@ def cmd_verify(args: argparse.Namespace) -> int:
     # B: frozen_test is quarantined; only the --final promotion verdict may
     # cite it. Every other split goes through the normal A4 re-hash gate.
     if args.split == "frozen_test" and not args.final:
-        raise ContractError("frozen_test is quarantined; pass --final for the promotion verdict")
+        raise ContractError(
+            "frozen_test is quarantined; pass --final for the promotion verdict"
+        )
     dataset_hash = spec.verify_workload(split=args.split)
     try:
         raw_measurements = (
             [
                 json.loads(line)
-                for line in Path(args.guard_measurements).read_text(encoding="utf-8").splitlines()
+                for line in Path(args.guard_measurements)
+                .read_text(encoding="utf-8")
+                .splitlines()
                 if line.strip()
             ]
             if args.guard_measurements
@@ -1215,13 +1219,26 @@ def cmd_verify(args: argparse.Namespace) -> int:
         targets = [t.strip() for t in args.candidate_targets.split(",") if t.strip()]
     else:
         targets = candidate_row.get("srbench_targets")
-    if not isinstance(targets, list) or not targets or not all(isinstance(t, str) and t.strip() for t in targets):
+    if (
+        not isinstance(targets, list)
+        or not targets
+        or not all(isinstance(t, str) and t.strip() for t in targets)
+    ):
         raise ContractError(
             "verify needs sr-bench MoM target ids: pass --candidate-targets "
             "(comma-separated) or add a non-empty srbench_targets list to the candidate JSON"
         )
-    work_dir = Path(args.work_dir) if args.work_dir else Path(tempfile.mkdtemp(prefix="rl-verify-"))
-    cli = SrbenchCli(bin=args.srbench_bin, url=args.srbench_url, store=args.srbench_store, timeout_s=args.timeout)
+    work_dir = (
+        Path(args.work_dir)
+        if args.work_dir
+        else Path(tempfile.mkdtemp(prefix="rl-verify-"))
+    )
+    cli = SrbenchCli(
+        bin=args.srbench_bin,
+        url=args.srbench_url,
+        store=args.srbench_store,
+        timeout_s=args.timeout,
+    )
     try:
         result = verify_live(
             spec=spec,
@@ -1245,7 +1262,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
             notes_parts.append(f"preview_run={preview['run_id']}")
         distribution = preview.get("distribution")
         if distribution:
-            notes_parts.append("routing_distribution=" + json.dumps(distribution, sort_keys=True, ensure_ascii=False))
+            notes_parts.append(
+                "routing_distribution="
+                + json.dumps(distribution, sort_keys=True, ensure_ascii=False)
+            )
         record = LedgerRecord(
             round=args.round,
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1833,8 +1853,14 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="promotion verdict; the only consumer allowed to cite the frozen_test split (B)",
     )
-    p_verify.add_argument("--baseline-run-id", required=True, help="terminal completed sr-bench baseline run ID")
-    p_verify.add_argument("--candidate", required=True, help="candidate JSON file for the ledger record")
+    p_verify.add_argument(
+        "--baseline-run-id",
+        required=True,
+        help="terminal completed sr-bench baseline run ID",
+    )
+    p_verify.add_argument(
+        "--candidate", required=True, help="candidate JSON file for the ledger record"
+    )
     p_verify.add_argument(
         "--candidate-targets",
         default=None,
@@ -1866,7 +1892,9 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="attribution artifact this round is based on (path@hash); recorded in the ledger",
     )
-    p_verify.add_argument("--ledger", default=None, help="ledger JSONL to append the live record to")
+    p_verify.add_argument(
+        "--ledger", default=None, help="ledger JSONL to append the live record to"
+    )
     p_verify.add_argument("--srbench-bin", default="vllm-sr")
     p_verify.add_argument("--srbench-url", default=None)
     p_verify.add_argument("--srbench-store", default=None)
