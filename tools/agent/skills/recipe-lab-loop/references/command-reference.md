@@ -2,9 +2,10 @@
 
 All commands print a single structured JSON document on stdout
 (allow_nan=False, UTF-8); progress and logs go to stderr; no command reads
-stdin. Exit codes: `0` success (for `live-verdict`: PASS), `1` FAIL verdict
-(`live-verdict` only), `2` usage, contract or tool error, and INCONCLUSIVE
-for `live-verdict`.
+stdin. Exit codes: `0` success (for `live-verdict`: PASS; `verify` always
+exits 0 - read `verdict` from the JSON), `1` FAIL verdict (`live-verdict`
+only), `2` usage, contract or tool error, and INCONCLUSIVE for
+`live-verdict`.
 
 ## Contract
 
@@ -37,7 +38,8 @@ for `live-verdict`.
   --ratios 0.4,0.3,0.3 --seed 42]`
   Deterministic group-level three-way split (B): `calib.jsonl`, `dev.jsonl`,
   `frozen_test.jsonl`. Same input + same flags -> byte-identical output.
-  `frozen_test` is quarantined: only `live-verdict --final` may cite it.
+  `frozen_test` is quarantined: only `live-verdict --final` (or `verify
+  --final`) may cite it.
 
 ## Evidence intake
 
@@ -66,7 +68,13 @@ for `live-verdict`.
   input; mutually exclusive with `--cases`. `--api-key-env` names the
   environment variable holding the management API bearer token.
 - `recipe-lab bank build --cases C --models M1,M2 --endpoint U --output B`
-  Direct per-case/per-model queries graded by `expected_contains`.
+  Direct per-case/per-model queries. Each case declares its grader (I):
+  the default `contains` grades a case-insensitive substring match on
+  `expected_contains`; `grader: "mcq"` grades the answer letter extracted
+  by the router repo's `mcq_judge.extract_letter` against `expected`
+  (`src/` must be on `PYTHONPATH`; an unextractable letter is wrong, never
+  unevaluated - the sr-bench no-answer convention). Any other grader name
+  is a contract error.
 - `recipe-lab bank apply --bank B --records R [--output R2]`
   Joins correctness by (case_id, routed model); missing entries stay
   `no_evidence`.
@@ -148,8 +156,8 @@ proposals.
 
 ## Insight references (stage 2)
 
-`--insight-refs` (comma-separated, on `run`, `ledger append` and
-`live-verdict`) merges provenance links into
+`--insight-refs` (comma-separated, on `run`, `ledger append`,
+`live-verdict` and `verify`) merges provenance links into
 `candidate.provenance.insight_refs`; unverifiable references exit 2:
 - `rec-<id>` - an existing ledger record_id (G1: every record carries one)
 - `bench:<run_id>` - a benchmark run id (format-checked)
@@ -158,6 +166,24 @@ proposals.
 
 ## Live tier
 
+- `recipe-lab verify --spec S [--split calib|dev|frozen_test] [--final]
+  --baseline-run-id A --candidate J [--candidate-targets T1,T2]
+  [--repetitions N] [--work-dir D] [--guard-measurements M]
+  [--insight-refs R] [--attribution-ref REF] [--ledger L]
+  [--srbench-bin vllm-sr] [--srbench-url U] [--srbench-store P]
+  [--timeout S] [--round N]`
+  Drives sr-bench end to end instead of comparing two ready-made runs (I):
+  extracts the baseline manifest from the terminal-completed baseline run
+  (`benchmark show`), runs one preview candidate-plan, then `--repetitions`
+  AB/BA pairs - every pair re-runs the frozen baseline manifest and a fresh
+  candidate-plan, then compares the pair. Pair metrics become
+  medians/ranges; any incomplete pair forces INCONCLUSIVE. The preview is
+  diagnostic only: its routing distribution lands in the record notes, and
+  a preview failure is recorded as a diagnostic reason, never a veto.
+  Prints the same JSON shape as `live-verdict` and always exits 0 - read
+  `verdict` from the JSON. `--candidate-targets` names the sr-bench MoM
+  targets serving the candidate; it falls back to the candidate JSON's
+  `srbench_targets`.
 - `recipe-lab live-verdict --spec S [--split dev|calib|frozen_test] --final?
   --baseline-run-id A --candidate-run-id B [--guard-measurements M]
   [--candidate J] [--insight-refs R]
@@ -186,7 +212,9 @@ proposals.
 
 - `recipe-lab ledger show|append|top`
 - `recipe-lab report --ledger L --output R` - ledger-only replay with a
-  consistency check.
+  consistency check. Live records render gate results, constraint evidence
+  and `constraint_warning` notes; replay records with a cost proxy render
+  `routed_cost_index` (E2).
 - `recipe-lab next --spec S --ledger L [--diagnosis diag/diagnosis.json]
   --output C [--tail N]` - full agent context export (G3), byte-stable for
   the same inputs. Sections: untrusted-material header; contract summary
@@ -212,3 +240,8 @@ proposals.
   explicitly with `SR_BENCH_STORE=<path> vllm-sr benchmark serve`.
 - The router's benchmark binding supports `X-SR-Bench-Max-Inference-Calls: 1`
   only (`pkg/extproc/benchmark_config_binding.go`).
+- `verify` needs the sr-bench CLI (`--srbench-bin vllm-sr`) and a baseline
+  run that reached `completed` with its manifest recoverable through
+  `benchmark show`.
+- The `mcq` bank grader imports `training.model_eval.mcq_judge` from the
+  router repo: run recipe-lab with `src/` on `PYTHONPATH` for mcq cases.

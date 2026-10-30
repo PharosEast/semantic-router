@@ -55,7 +55,10 @@ Drive the closed loop with `tools/recipe-lab/recipe_lab/cli.py` (installed as
    then `recipe-lab live-verdict --spec spec.yaml --baseline-run-id ...
    --candidate-run-id ... --guard-measurements measurements.jsonl
    --candidate cand-001.json --ledger ledger.jsonl` (add `--split frozen_test
-   --final` only for the promotion verdict).
+   --final` only for the promotion verdict). Or drive the whole gate in one
+   command: `recipe-lab verify --spec spec.yaml --baseline-run-id ...
+   --candidate cand-001.json --ledger ledger.jsonl` runs the preview, the
+   `--repetitions` AB/BA pairs, the compares and the verdict itself.
 7. Read the outcome with `recipe-lab report --ledger ledger.jsonl --output
    report.md`; stop when the objective is met, the budget is exhausted, or
    evidence is repeatedly incomplete.

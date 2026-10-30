@@ -4,8 +4,9 @@ Closed-loop experiments for semantic-router routing recipes（RSI 工作台）�
 
 本层覆盖 replay-tier 闭环：冻结题集身份（A4）→ 题集三分（B）→ 答案库与归因 →
 候选提议（信号级 / 规则级 / 分布校准）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2），
-以及 live 层终裁 `live-verdict`（守卫以契约为准 A3、洞察引用 G2、经济约束 E）。
-另含无需标注的分布诊断（D）、oracle policy 的规则/默认形态（F2）、replay 热加载（H）与成本代理（E2）。
+以及 live 层终裁 `live-verdict`（守卫以契约为准 A3、洞察引用 G2、经济约束 E）
+与端到端编排 `verify`（I）。另含无需标注的分布诊断（D）、oracle policy 的
+规则/默认形态（F2）、replay 热加载（H）与成本代理（E2）。
 
 ## 安装
 
@@ -63,14 +64,15 @@ pip install -e '.[dev]'
 | `attribute` | E1/E2/E3 误路由归因（`--split` + 可选 `--cases` 哈希校验） |
 | `attribute-session` | 会话级 agentic 归因：lane_flap / tool_loop_interrupted / selection_failed（sub-6 P2） |
 | `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签（`--unlabeled` 出原始诊断行） |
-| `bank` | 构建 / 应用 per-case/per-model 答案库 |
+| `bank` | 构建 / 应用 per-case/per-model 答案库（`contains` / `mcq` 判卷，I） |
 | `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D） |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
 | `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |
 | `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2；`--reload restart\|hot` H；`cost_model` 成本代理 E2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
-| `live-verdict` | 比较两个 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
+| `verify` | 驱动 sr-bench 端到端：preview + AB/BA 多轮 → 三态裁决（I） |
+| `live-verdict` | 比较两个现成 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
 | `report` | 只从台账重放的运行报告（G1） |
 | `provenance` | recipe-lab-run-v1 manifest（记录 ID、台账哈希、bench_refs） |
 | `record-draft` | 从最近一条 PASS live 记录生成晋升草稿 |
@@ -122,6 +124,10 @@ recipe-lab ledger top --file ledger.jsonl --spec spec.yaml
 recipe-lab live-verdict --spec spec.yaml --baseline-run-id run-a \
   --candidate-run-id run-b --guard-measurements measurements.jsonl \
   --candidate cand-001.json --insight-refs rec-<id>,bench:run-a
+
+# 端到端终裁（I）：驱动 sr-bench —— preview + 3 轮 AB/BA + compare + 裁决
+recipe-lab verify --spec spec.yaml --baseline-run-id run-a \
+  --candidate cand-001.json --repetitions 3 --ledger ledger.jsonl
 # 晋升终裁（唯一允许引用 frozen_test 的路径）
 recipe-lab live-verdict --spec spec.yaml --baseline-run-id run-a \
   --candidate-run-id run-b --split frozen_test --final
@@ -193,6 +199,22 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
   用量未知序列化为 null → 约束不可评估 → INCONCLUSIVE（绝不记 0，也绝不记违规）。
   约束证据进入裁决输出与台账记录（`constraints` 字段），供报告重放。
   replay 层的代理评估见下节（E2）。
+
+## verify（驱动 sr-bench 的端到端终裁，I）
+
+`verify` 不比较两个现成 run，而是自己驱动 sr-bench：
+
+1. 从终态 `completed` 的 baseline run 提取冻结 manifest（`benchmark show`）；
+2. 跑一次 preview candidate-plan——纯诊断：路由分布写进台账 notes，
+   preview 失败只记为诊断原因，绝不否决裁决；
+3. 跑 `--repetitions` 轮 AB/BA——每轮重跑冻结 baseline manifest + 新建
+   candidate-plan，然后逐对 compare；
+4. 各对指标取中位数/范围出裁决；任何一对不完整 → INCONCLUSIVE。
+
+输出与 `live-verdict` 同形的 JSON 且始终 exit 0（裁决从 JSON 的 `verdict`
+读取）。`--candidate-targets` 指定服务候选的 sr-bench MoM target，
+缺省回退到候选 JSON 的 `srbench_targets`。守卫与约束语义与 `live-verdict`
+一致（A3/E）；`--split frozen_test` 同样只留给 `--final` 晋升裁决。
 
 ## 记录格式（归因输入）
 
