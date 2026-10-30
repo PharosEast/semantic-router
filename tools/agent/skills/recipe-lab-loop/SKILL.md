@@ -36,6 +36,11 @@ Drive the closed loop with `tools/recipe-lab/recipe_lab/cli.py` (installed as
    cite the motivating evidence with `--insight-refs`, using the exact refs
    from `next`'s citable list (`rec-<id>`, `bench:<run_id>`,
    `attr:<path>@sha256:<hex>`, `diag:<path>@sha256:<hex>#<anchor>`).
+   For threshold-shaped fixes, ground the proposal in traffic first:
+   `recipe-lab diagnose --records <collect-replays --unlabeled output>
+   --config <recipe.yaml> --output-dir diag/` (no ground truth needed),
+   then `recipe-lab propose-calibrated --diagnosis diag/diagnosis.json
+   --base-config <recipe.yaml> --signal <signal> --quantiles ...`.
 4. Validate the candidate: `vllm-sr config validate` on the revision.
    Failure: fix the config; never evaluate an invalid candidate.
 5. Evaluate in the replay tier: `recipe-lab run --spec spec.yaml --split dev
@@ -46,7 +51,10 @@ Drive the closed loop with `tools/recipe-lab/recipe_lab/cli.py` (installed as
    then `recipe-lab live-verdict --spec spec.yaml --baseline-run-id ...
    --candidate-run-id ... --guard-measurements measurements.jsonl
    --candidate cand-001.json --ledger ledger.jsonl` (add `--split frozen_test
-   --final` only for the promotion verdict).
+   --final` only for the promotion verdict). Or drive the whole gate in one
+   command: `recipe-lab verify --spec spec.yaml --baseline-run-id ...
+   --candidate cand-001.json --ledger ledger.jsonl` runs the preview, the
+   `--repetitions` AB/BA pairs, the compares and the verdict itself.
 7. Read the outcome with `recipe-lab report --ledger ledger.jsonl --output
    report.md`; stop when the objective is met, the budget is exhausted, or
    evidence is repeatedly incomplete.

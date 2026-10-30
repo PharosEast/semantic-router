@@ -13,6 +13,11 @@ decision or algorithm, and selected backend/plugin behavior consistent. Update
 canonical config, generated or schema-derived artifacts, and user-visible docs
 only where that contract changes.
 
+When the change needs routing-accuracy evidence, drive it through the
+recipe-lab loop (`tools/recipe-lab/`, skill `recipe-lab-loop`): attribute the
+misroutes, propose the candidate, and let the replay/live tiers and the
+ledger produce the evidence chain your PR cites.
+
 Run `make check` first. Use `make verify DOMAIN=<domain>` for the affected
 integration contract, or `make verify PROFILE=<profile>` when behavior crosses
 the deployment boundary. A pure refactor does not need new E2E coverage.

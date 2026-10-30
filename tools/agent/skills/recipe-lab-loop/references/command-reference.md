@@ -2,9 +2,10 @@
 
 All commands print a single structured JSON document on stdout
 (allow_nan=False, UTF-8); progress and logs go to stderr; no command reads
-stdin. Exit codes: `0` success (for `live-verdict`: PASS), `1` FAIL verdict
-(`live-verdict` only), `2` usage, contract or tool error, and INCONCLUSIVE
-for `live-verdict`.
+stdin. Exit codes: `0` success (for `live-verdict`: PASS; `verify` always
+exits 0 - read `verdict` from the JSON), `1` FAIL verdict (`live-verdict`
+only), `2` usage, contract or tool error, and INCONCLUSIVE for
+`live-verdict`.
 
 ## Contract
 
@@ -13,6 +14,19 @@ for `live-verdict`.
   experiment runs. Contract errors exit 2 with the reason on stderr — fix
   the spec and re-run. Every later command re-checks the same contract, so
   a spec that passes this command is the single source of truth for a round.
+- `attribution.oracle_policy` (F2) takes exactly one of two forms: a
+  label -> model mapping, or a rules/default mapping
+  `{"rules": [{"when": {<signal>: <condition>}, "expect": {"decision":
+  <decision>, "models": [<model>, ...]?}}, ...],
+  "default": {"decision": ...}?}`. A condition matches one signal fact by
+  label string, finite number, or a numeric predicate mapping over
+  `gte|lte|gt|lt` (router semantics: `gte` fails when the value is below
+  the bound). The first matching rule wins, the optional default covers
+  the rest, and truth no rule covers is a policy gap.
+- Optional top-level `cost_model` (E2): map of served model name to a
+  finite positive relative cost. Its presence lets the replay tier compute
+  `routed_cost_index` and proxy cost constraints; without it, cost is
+  adjudicated only in the live tier.
 
 ## Dataset identity and splits (stage 2)
 
@@ -24,7 +38,8 @@ for `live-verdict`.
   --ratios 0.4,0.3,0.3 --seed 42]`
   Deterministic group-level three-way split (B): `calib.jsonl`, `dev.jsonl`,
   `frozen_test.jsonl`. Same input + same flags -> byte-identical output.
-  `frozen_test` is quarantined: only `live-verdict --final` may cite it.
+  `frozen_test` is quarantined: only `live-verdict --final` (or `verify
+  --final`) may cite it.
 
 ## Evidence intake
 
@@ -44,16 +59,54 @@ for `live-verdict`.
   afterwards; needs the rejection-recording router fix). Writes
   `session-report.md` and `session-events.json`; deterministic - same rows,
   same report bytes.
-- `recipe-lab collect-replays --url http://127.0.0.1:8080 --cases C
-  --output R --family d3`
+- `recipe-lab collect-replays --url http://127.0.0.1:8080
+  [--cases C | --unlabeled] --output R --family d3 [--api-key-env NAME]`
   Pulls router_replay records from the management API and joins them with
   labeled cases. Skipped rows are counted (`no_prompt`/`unlabeled`/
-  `duplicate_prompt`), never guessed.
+  `duplicate_prompt`), never guessed. `--unlabeled` skips the labeled join
+  and emits one raw diagnostic row per replay record - the `diagnose`
+  input; mutually exclusive with `--cases`. `--api-key-env` names the
+  environment variable holding the management API bearer token.
 - `recipe-lab bank build --cases C --models M1,M2 --endpoint U --output B`
-  Direct per-case/per-model queries graded by `expected_contains`.
+  Direct per-case/per-model queries. Each case declares its grader (I):
+  the default `contains` grades a case-insensitive substring match on
+  `expected_contains`; `grader: "mcq"` grades the answer letter extracted
+  by the router repo's `mcq_judge.extract_letter` against `expected`
+  (`src/` must be on `PYTHONPATH`; an unextractable letter is wrong, never
+  unevaluated - the sr-bench no-answer convention). Any other grader name
+  is a contract error.
 - `recipe-lab bank apply --bank B --records R [--output R2]`
   Joins correctness by (case_id, routed model); missing entries stay
   `no_evidence`.
+
+## Diagnosis and distribution calibration (D)
+
+Both commands need no ground truth: they turn unlabeled traffic into
+proposals.
+
+- `recipe-lab diagnose --records R --config C --output-dir D
+  [--expect-rare d1,d2] [--rare-pct P] [--min-sample N]
+  [--utilization-warn U] [--source "..."]`
+  Three checks over replay rows: decisions that never fire (dead) or fire
+  under `--rare-pct` traffic share (rare; `--expect-rare` whitelists
+  legitimately rare decisions such as security containment - reported,
+  never warned), per-signal quantiles / histogram / range utilization
+  (`--utilization-warn` flags a signal using less of its known range;
+  `--min-sample` warns when the sample count is too small), and rule
+  predicate sites no traffic ever satisfies (unreachable). `--records` is
+  the `collect-replays --unlabeled` output. Writes `diagnosis.json`
+  (recipe-lab-diagnosis-v1, input-hashed, byte-stable - the
+  `next --diagnosis` input) and `diagnosis.md`.
+- `recipe-lab propose-calibrated --diagnosis D --base-config C --signal S
+  [--from V] [--quantiles Q1,Q2 | --target-share F] [--op gte|gt|lte|lt]
+  [--lo L] [--hi H] [--output-dir D]`
+  Rule threshold candidates at the signal's observed distribution
+  quantiles, or at a target traffic share (quantile `1 - share`). Uses the
+  rule-level proposer, so all rule sites sharing (signal, op, value) move
+  together; each candidate sidecar cites the diagnosis it came from, and a
+  diagnosis whose config hash does not match `--base-config` is rejected
+  (exit 2). `--from` restricts the move to sites currently at that value
+  (the 2.5 -> 1.75 BUG-3 calibration).
 
 ## Proposal and replay tier
 
@@ -73,7 +126,8 @@ for `live-verdict`.
   --bank B --candidates D [--baseline-config B] --proposer P --ledger L
   --output-dir D --router-bin BIN --mock-backend M [--mock-extra-args "..."]
   [--validate [--validate-bin vllm-sr]] [--attribution-ref REF]
-  [--insight-refs "..."] [--round N]`
+  [--insight-refs "..."] [--round N]
+  [--reload restart|hot [--api-key-env NAME]]`
   One router lifecycle per candidate; RANKED records land in the ledger.
   The split identity is re-hashed before any stack work (A4); the trial
   deadline is `budget.max_minutes_per_trial` (A5, timed-out candidates get
@@ -82,11 +136,28 @@ for `live-verdict`.
   all-rejected exits 2. `--candidates` accepts a directory, a comma-separated
   list, or a single config path — the agent's own proposal entry: pass one
   config plus `--proposer agent:<id>` so the ledger records who proposed it.
+  - `--reload` (H): `restart` (default) restarts the router once per
+    candidate; `hot` keeps one router alive for the whole candidate list
+    and feeds it each candidate via `PUT /api/v1/config` - needs
+    `--api-key-env` for the management bearer token (the same env var
+    covers the replay fetch). A hot-path failure falls back to restart;
+    the record notes always say which mode ran (`reload=`).
+  - Replay cost proxy (E2): with `cost_model` in the spec, every candidate
+    also reports `routed_cost_index` - the mean relative cost of the routed
+    models over answered rows (a routed model missing from `cost_model`
+    makes the index incomputable; unknown cost is never counted as zero).
+    Declared constraints are proxied onto that measurement: the evidence
+    keeps the declared live metric name and adds
+    `proxy: routed_cost_index`, and `bound: baseline` resolves against the
+    baseline arm's proxy. A violated candidate carries `constraint_warning`
+    in its ledger record and is excluded from `best_replay` selection.
+    Without `cost_model` replay does no constraint work - the `next`
+    context states that cost is adjudicated only in the live tier.
 
 ## Insight references (stage 2)
 
-`--insight-refs` (comma-separated, on `run`, `ledger append` and
-`live-verdict`) merges provenance links into
+`--insight-refs` (comma-separated, on `run`, `ledger append`,
+`live-verdict` and `verify`) merges provenance links into
 `candidate.provenance.insight_refs`; unverifiable references exit 2:
 - `rec-<id>` - an existing ledger record_id (G1: every record carries one)
 - `bench:<run_id>` - a benchmark run id (format-checked)
@@ -95,6 +166,24 @@ for `live-verdict`.
 
 ## Live tier
 
+- `recipe-lab verify --spec S [--split calib|dev|frozen_test] [--final]
+  --baseline-run-id A --candidate J [--candidate-targets T1,T2]
+  [--repetitions N] [--work-dir D] [--guard-measurements M]
+  [--insight-refs R] [--attribution-ref REF] [--ledger L]
+  [--srbench-bin vllm-sr] [--srbench-url U] [--srbench-store P]
+  [--timeout S] [--round N]`
+  Drives sr-bench end to end instead of comparing two ready-made runs (I):
+  extracts the baseline manifest from the terminal-completed baseline run
+  (`benchmark show`), runs one preview candidate-plan, then `--repetitions`
+  AB/BA pairs - every pair re-runs the frozen baseline manifest and a fresh
+  candidate-plan, then compares the pair. Pair metrics become
+  medians/ranges; any incomplete pair forces INCONCLUSIVE. The preview is
+  diagnostic only: its routing distribution lands in the record notes, and
+  a preview failure is recorded as a diagnostic reason, never a veto.
+  Prints the same JSON shape as `live-verdict` and always exits 0 - read
+  `verdict` from the JSON. `--candidate-targets` names the sr-bench MoM
+  targets serving the candidate; it falls back to the candidate JSON's
+  `srbench_targets`.
 - `recipe-lab live-verdict --spec S [--split dev|calib|frozen_test] --final?
   --baseline-run-id A --candidate-run-id B [--guard-measurements M]
   [--candidate J] [--insight-refs R]
@@ -115,24 +204,31 @@ for `live-verdict`.
   cost fields: `total_spend_usd`, `cache_neutral_cost_usd`, `cost_usd`,
   `evaluation_cost_usd` on the baseline_targets/candidate_targets entries.
   Unknown usage is null -> the constraint is INCONCLUSIVE (never zero).
-  Constraint evidence lands in the record's `constraints` field.
+  Constraint evidence lands in the record's `constraints` field. In the
+  replay tier the same constraints are proxied onto `routed_cost_index`
+  when the spec has `cost_model` (see `run`, E2).
 
 ## Reporting
 
 - `recipe-lab ledger show|append|top`
 - `recipe-lab report --ledger L --output R` - ledger-only replay with a
-  consistency check.
+  consistency check. Live records render gate results, constraint evidence
+  and `constraint_warning` notes; replay records with a cost proxy render
+  `routed_cost_index` (E2).
 - `recipe-lab next --spec S --ledger L [--diagnosis diag/diagnosis.json]
   --output C [--tail N]` - full agent context export (G3), byte-stable for
   the same inputs. Sections: untrusted-material header; contract summary
-  (objective, replay_metric, constraints, gates, split names + hashes,
-  budget used/remaining); ledger tail; best replay candidate (ranked by
-  `objective.replay_metric` through the same `best_replay` selection as
-  `ledger top`, A2); last live verdict with reasons, gates, constraints and
-  bench_refs; latest attribution summary read through the newest record's
-  hash-verified `attribution_ref`; optional diagnosis highlights (dead/rare
-  decisions, unreachable threshold sites); and a citable insight-ref list -
-  paste those refs verbatim into `--insight-refs` when proposing (step 3).
+  (objective, replay_metric, constraints, gates, cost_model, split names +
+  hashes, budget used/remaining); ledger tail; best replay candidate (ranked
+  by `objective.replay_metric` through the same `best_replay` selection as
+  `ledger top`, A2 - cost-proxy-violating candidates excluded, E2); last
+  live verdict with reasons, gates, constraints and bench_refs; latest
+  attribution summary read through the newest record's hash-verified
+  `attribution_ref`; optional diagnosis highlights (dead/rare decisions,
+  unreachable threshold sites); and a citable insight-ref list - paste
+  those refs verbatim into `--insight-refs` when proposing (step 3). When
+  cost constraints exist but `cost_model` does not, the summary states that
+  cost is adjudicated only in the live tier.
 - `recipe-lab provenance --ledger L --output M` - recipe-lab-run-v1 manifest.
 - `recipe-lab record-draft --ledger L --output D` - promotion draft from the
   latest PASS live record (human checklist included).
@@ -144,3 +240,8 @@ for `live-verdict`.
   explicitly with `SR_BENCH_STORE=<path> vllm-sr benchmark serve`.
 - The router's benchmark binding supports `X-SR-Bench-Max-Inference-Calls: 1`
   only (`pkg/extproc/benchmark_config_binding.go`).
+- `verify` needs the sr-bench CLI (`--srbench-bin vllm-sr`) and a baseline
+  run that reached `completed` with its manifest recoverable through
+  `benchmark show`.
+- The `mcq` bank grader imports `training.model_eval.mcq_judge` from the
+  router repo: run recipe-lab with `src/` on `PYTHONPATH` for mcq cases.
