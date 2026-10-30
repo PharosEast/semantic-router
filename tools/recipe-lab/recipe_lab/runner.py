@@ -603,9 +603,9 @@ class HotReloadSession:
                 str(management_port),
             ],
             # The handle is owned by the spawned router process.
-            stdout=open(
+            stdout=open(  # noqa: SIM115
                 env.work_dir / "router.log", "w", encoding="utf-8"
-            ),  # noqa: SIM115
+            ),
             stderr=subprocess.STDOUT,
             env=router_env,
             start_new_session=True,
