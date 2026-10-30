@@ -454,14 +454,21 @@ def test_spec_with_rules_policy_roundtrip():
     )
     assert ExperimentSpec.from_dict(spec.to_dict()).to_dict() == spec.to_dict()
 
+
 # ---- E2: optional top-level cost_model ----
 
 
 def test_cost_model_roundtrip():
-    raw = {**copy.deepcopy(VALID_SPEC), "cost_model": {"local/model-large": 10, "local/model-small": 1}}
+    raw = {
+        **copy.deepcopy(VALID_SPEC),
+        "cost_model": {"local/model-large": 10, "local/model-small": 1},
+    }
     spec = ExperimentSpec.from_dict(raw)
     assert spec.cost_model == {"local/model-large": 10.0, "local/model-small": 1.0}
-    assert spec.to_dict()["cost_model"] == {"local/model-large": 10.0, "local/model-small": 1.0}
+    assert spec.to_dict()["cost_model"] == {
+        "local/model-large": 10.0,
+        "local/model-small": 1.0,
+    }
 
 
 def test_cost_model_absent_by_default():

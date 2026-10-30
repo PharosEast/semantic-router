@@ -856,7 +856,9 @@ REPLAY_SUMMARY_KEYS = {"routed_accuracy": "accuracy"}
 COST_PROXY_METRIC = "routed_cost_index"
 
 
-def routed_cost_index(rows: list[dict], cost_model: dict[str, float]) -> tuple[float | None, list[str]]:
+def routed_cost_index(
+    rows: list[dict], cost_model: dict[str, float]
+) -> tuple[float | None, list[str]]:
     """E2: mean relative cost of the routed models over answered samples.
 
     Only answered rows count (`answer_ok` is not None; unanswered /
@@ -915,7 +917,9 @@ def replay_constraint_evidence(
             }
         )
         if resolved["status"] == "violated":
-            resolved["reason"] = f"constraint {constraint.name} violated (replay cost proxy)"
+            resolved["reason"] = (
+                f"constraint {constraint.name} violated (replay cost proxy)"
+            )
             warning = True
         evidence.append(resolved)
     return evidence, warning
