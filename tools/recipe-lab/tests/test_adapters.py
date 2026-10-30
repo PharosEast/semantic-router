@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import urllib.error
 from unittest import mock
 
 import pytest
@@ -126,6 +127,29 @@ def test_fetch_replays_follows_pagination():
     assert "limit=50&offset=0" in requested[0] and "showDetails=true" in requested[0]
     assert "offset=2" in requested[1]
     assert "offset=3" in requested[2]
+
+
+def test_fetch_replays_halves_page_on_http_413():
+    # A page of detailed records can overflow the management API's
+    # response-body cap (HTTP 413); the fetcher must retry the same offset
+    # with a halved page instead of failing the whole fetch.
+    page = {"data": [fake_record("r1", "p1", "d", "m")], "total": 1, "has_more": False}
+    response = mock.MagicMock()
+    response.__enter__ = lambda s: s
+    response.__exit__ = lambda s, *a: None
+    response.read.return_value = json.dumps(page).encode()
+
+    def urlopen_side_effect(request, *args, **kwargs):
+        if "limit=50" in request.full_url:
+            raise urllib.error.HTTPError(request.full_url, 413, "too large", {}, None)
+        return response
+
+    with mock.patch("urllib.request.urlopen", side_effect=urlopen_side_effect) as urlopen:
+        records = fetch_replays("http://127.0.0.1:8080")
+    assert [r["request_id"] for r in records] == ["r1"]
+    requested = [call.args[0].full_url for call in urlopen.call_args_list]
+    assert "limit=50&offset=0" in requested[0]
+    assert "limit=25&offset=0" in requested[1]
 
 
 def test_record_to_case_carries_timeline_and_lifecycle():

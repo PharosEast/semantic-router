@@ -58,6 +58,10 @@ class ReplayFetchError(RuntimeError):
     """Raised when the management API cannot be reached or returns bad JSON."""
 
 
+# The management API caps response bodies (HTTP 413); pagination floors here.
+_MIN_PAGE_SIZE = 4
+
+
 def _get_json(url: str, timeout: float, api_key_env: str | None) -> Any:
     """GET one JSON document from the management API (shared error mapping)."""
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
@@ -99,7 +103,17 @@ def fetch_replays(
         url = f"{base}?limit={page_size}&offset={offset}"
         if show_details:
             url += "&showDetails=true"
-        payload = _get_json(url, timeout, api_key_env)
+        try:
+            payload = _get_json(url, timeout, api_key_env)
+        except ReplayFetchError as exc:
+            # The management API caps response bodies (HTTP 413): a page of
+            # detailed records can exceed the cap late in the list. Retry the
+            # same offset with a halved page until it fits; a floor-sized page
+            # that still overflows is a real failure.
+            if "HTTP 413" in str(exc) and page_size > _MIN_PAGE_SIZE:
+                page_size = max(_MIN_PAGE_SIZE, page_size // 2)
+                continue
+            raise
         page = payload.get("data", payload) if isinstance(payload, dict) else payload
         if not isinstance(page, list):
             raise ReplayFetchError("unexpected replay list payload: expected {'data': [...]}" )
