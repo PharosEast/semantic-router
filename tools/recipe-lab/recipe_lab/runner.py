@@ -87,11 +87,13 @@ def _free_port() -> int:
 def _patch_ports(candidate_config: Path, work_dir: Path) -> tuple[Path, int, int]:
     """Copy the candidate config into work_dir with per-trial ports patched in.
 
-    The router binds its gateway listener(s) and the management API from the
-    config itself, so fixed defaults (8899/8080) collide with anything already
-    on those ports - and worse, a stale router on the defaults answers the
-    readiness probe for a router that never started. Returns (patched config
-    path, primary gateway port, management port).
+    The router binds its gateway listener(s) from the config, so the fixed
+    default (8899) collides with anything already on that port - and worse, a
+    stale router on the default ports answers the readiness probe for a router
+    that never started. The management API port is passed to the router via
+    -api-port, which also works on binaries whose config schema predates the
+    management_api section. Returns (patched config path, primary gateway
+    port, management port).
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     config = yaml.safe_load(candidate_config.read_text(encoding="utf-8"))
@@ -103,7 +105,6 @@ def _patch_ports(candidate_config: Path, work_dir: Path) -> tuple[Path, int, int
     if not router_port:
         raise RunnerError(f"candidate config has no gateway listeners: {candidate_config}")
     management_port = _free_port()
-    config.setdefault("management_api", {})["port"] = management_port
     patched = work_dir / f"{candidate_config.name}.patched.yaml"
     patched.write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
     return patched, router_port, management_port
@@ -226,6 +227,8 @@ def evaluate_candidate(
                 str(patched_config),
                 "-gateway",
                 "standalone",
+                "-api-port",
+                str(management_port),
             ],
             stdout=open(Path(env.work_dir) / "router.log", "w", encoding="utf-8"),
             stderr=subprocess.STDOUT,
