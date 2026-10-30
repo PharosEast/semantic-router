@@ -15,6 +15,8 @@ from typing import Any
 
 from .ledger import Ledger
 
+_MIN_LIVE_BENCH_REFS = 2  # a decisive live record must carry at least two bench refs
+
 _HONESTY_FOOTER = (
     "Replayed from the recipe-lab ledger only. Metrics are descriptive; "
     "statistical significance is not established. A PASS is a recommendation, "
@@ -84,7 +86,7 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
                 inconsistencies.append(
                     f"round {record.get('round')}: live {record.get('verdict')} without gates"
                 )
-            if len(refs) < 2:
+            if len(refs) < _MIN_LIVE_BENCH_REFS:
                 inconsistencies.append(
                     f"round {record.get('round')}: live {record.get('verdict')} with fewer than two bench_refs"
                 )
