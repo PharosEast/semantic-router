@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from recipe_lab.verdict import GuardResult, evaluate_verdict
 
 
@@ -11,7 +9,12 @@ def guard(name: str, value: float | None, floor: float | None = 0.95) -> GuardRe
     return GuardResult(name=name, metric=f"guard.{name}", value=value, floor=floor)
 
 
-BASE = dict(baseline_metric=0.80, direction="maximize", min_improvement_pct=1.0, guards=[])
+BASE = {
+    "baseline_metric": 0.80,
+    "direction": "maximize",
+    "min_improvement_pct": 1.0,
+    "guards": [],
+}
 
 
 def test_pass_when_improvement_meets_bar():
@@ -68,8 +71,12 @@ def test_unevaluated_guard_is_incomplete_not_fail():
 
 def test_missing_metrics_are_inconclusive():
     for kwargs in ({"candidate_metric": None}, {"baseline_metric": None}):
-        merged = {**BASE, **kwargs, "candidate_metric": kwargs.get("candidate_metric", 0.9),
-                  "baseline_metric": kwargs.get("baseline_metric", 0.8)}
+        merged = {
+            **BASE,
+            **kwargs,
+            "candidate_metric": kwargs.get("candidate_metric", 0.9),
+            "baseline_metric": kwargs.get("baseline_metric", 0.8),
+        }
         result = evaluate_verdict(**merged, incomplete_reasons=[])
         assert result.verdict == "INCONCLUSIVE"
 

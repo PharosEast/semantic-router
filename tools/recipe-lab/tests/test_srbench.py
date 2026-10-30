@@ -6,7 +6,6 @@ import json
 from unittest import mock
 
 import pytest
-
 from recipe_lab.contract import ContractError
 from recipe_lab.srbench import SrbenchCli, SrbenchError, extract_metric, require_metric
 
@@ -20,16 +19,21 @@ def fake_run(returncode: int = 0, stdout: str = "{}", stderr: str = ""):
 
 
 def test_compare_parses_json_stdout():
-    payload = {"baseline": {"capability.score": 0.80}, "candidate": {"capability.score": 0.86}}
+    payload = {
+        "baseline": {"capability.score": 0.80},
+        "candidate": {"capability.score": 0.86},
+    }
     with fake_run(stdout=json.dumps(payload)):
         result = SrbenchCli().compare("run-a", "run-b")
     assert result == payload
 
 
 def test_compare_nonzero_exit_raises():
-    with fake_run(returncode=3, stderr="boom"):
-        with pytest.raises(SrbenchError, match="returned 3"):
-            SrbenchCli().compare("run-a", "run-b")
+    with (
+        fake_run(returncode=3, stderr="boom"),
+        pytest.raises(SrbenchError, match="returned 3"),
+    ):
+        SrbenchCli().compare("run-a", "run-b")
 
 
 def test_compare_non_json_is_kept_raw():
@@ -68,4 +72,10 @@ def test_preview_candidate_plan_experiment_arg_shapes():
         assert run_mock.call_args[0][0][2:] == ["candidate-plan", "run-base"]
     with fake_run(stdout="{}") as run_mock:
         SrbenchCli().experiment(["attach", "exp-1", "--run", "run-a"])
-        assert run_mock.call_args[0][0][2:] == ["experiment", "attach", "exp-1", "--run", "run-a"]
+        assert run_mock.call_args[0][0][2:] == [
+            "experiment",
+            "attach",
+            "exp-1",
+            "--run",
+            "run-a",
+        ]

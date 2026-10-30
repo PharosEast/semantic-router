@@ -30,9 +30,10 @@ never zero.
 
 from __future__ import annotations
 
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
-from .contract import ContractError, ExperimentSpec, Gate
+from .contract import Constraint, ContractError, ExperimentSpec, Gate
 from .srbench import SrbenchCli, extract_metric_values
 from .verdict import GuardResult, evaluate_verdict
 
@@ -59,13 +60,17 @@ def measurements_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             )
         name = row.get("name")
         if not isinstance(name, str) or not name.strip():
-            raise ContractError(f"guard measurement row {index}: name must be a non-empty string")
+            raise ContractError(
+                f"guard measurement row {index}: name must be a non-empty string"
+            )
         for key in ("candidate", "baseline"):
             value = row.get(key)
             if value is None:
                 continue
             if isinstance(value, bool) or not isinstance(value, (int, float)):
-                raise ContractError(f"guard measurement row {index}: {key} must be a number or null")
+                raise ContractError(
+                    f"guard measurement row {index}: {key} must be a number or null"
+                )
         validated.append({key: row.get(key) for key in _MEASUREMENT_KEYS})
     return validated
 
@@ -95,13 +100,19 @@ def resolve_gates(
     for gate in gates:
         row = by_name.get(gate.name)
         if row is None:
-            guards.append(GuardResult(name=gate.name, metric=gate.metric, value=None, floor=None))
+            guards.append(
+                GuardResult(name=gate.name, metric=gate.metric, value=None, floor=None)
+            )
             continue
         floor = gate.floor
         if floor == "baseline":
             base = row.get("baseline")
             if base is None:
-                guards.append(GuardResult(name=gate.name, metric=gate.metric, value=None, floor=None))
+                guards.append(
+                    GuardResult(
+                        name=gate.name, metric=gate.metric, value=None, floor=None
+                    )
+                )
                 continue
             floor = float(base)
         candidate = row.get("candidate")
@@ -156,14 +167,20 @@ def _pair_metrics(
     if isinstance(comparison, dict):
         base_section = comparison.get("baseline", comparison.get("baseline_targets"))
         cand_section = comparison.get("candidate", comparison.get("candidate_targets"))
-        if isinstance(base_section, (dict, list)) and isinstance(cand_section, (dict, list)):
+        if isinstance(base_section, (dict, list)) and isinstance(
+            cand_section, (dict, list)
+        ):
             if isinstance(base_section, list):
-                baseline_metric = _arm_accuracy(base_section, metric_key, routing_arm=False)
+                baseline_metric = _arm_accuracy(
+                    base_section, metric_key, routing_arm=False
+                )
             else:
                 base_values = extract_metric_values(base_section, metric_key)
                 baseline_metric = base_values[0] if base_values else None
             if isinstance(cand_section, list):
-                candidate_metric = _arm_accuracy(cand_section, metric_key, routing_arm=True)
+                candidate_metric = _arm_accuracy(
+                    cand_section, metric_key, routing_arm=True
+                )
             else:
                 cand_values = extract_metric_values(cand_section, metric_key)
                 candidate_metric = cand_values[0] if cand_values else None
@@ -191,7 +208,9 @@ def _constraint_evidence(
     """
     evidence: list[dict[str, Any]] = []
     for constraint in constraints:
-        baseline_value, candidate_value = _pair_metrics(comparison, constraint.metric, incomplete)
+        baseline_value, candidate_value = _pair_metrics(
+            comparison, constraint.metric, incomplete
+        )
         evidence.append(
             {
                 "name": constraint.name,
@@ -224,10 +243,14 @@ def live_verdict_from_runs(
     """
     comparison = cli.compare(baseline_run_id, candidate_run_id)
     incomplete = list(incomplete_reasons or [])
-    baseline_metric, candidate_metric = _pair_metrics(comparison, spec.objective.metric_key, incomplete)
+    baseline_metric, candidate_metric = _pair_metrics(
+        comparison, spec.objective.metric_key, incomplete
+    )
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
-    constraint_evidence = _constraint_evidence(comparison, list(spec.objective.constraints), incomplete)
+    constraint_evidence = _constraint_evidence(
+        comparison, list(spec.objective.constraints), incomplete
+    )
     verdict = evaluate_verdict(
         baseline_metric=baseline_metric,
         candidate_metric=candidate_metric,
@@ -251,7 +274,12 @@ def live_verdict_from_runs(
             "baseline": baseline_metric,
             "candidate": candidate_metric,
         },
-        "gates": {g.name: ("pass" if g.passed else ("incomplete" if not g.evaluated else "fail")) for g in guards},
+        "gates": {
+            g.name: (
+                "pass" if g.passed else ("incomplete" if not g.evaluated else "fail")
+            )
+            for g in guards
+        },
         "constraints": verdict.constraints,
         "undeclared_measurements": undeclared,
         "bench_refs": [baseline_run_id, candidate_run_id],

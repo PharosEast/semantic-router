@@ -248,9 +248,9 @@ def evaluate_candidate(
                 str(management_port),
             ],
             # The handle is owned by the spawned router process and dies with its group.
-            stdout=open(
+            stdout=open(  # noqa: SIM115
                 Path(env.work_dir) / "router.log", "w", encoding="utf-8"
-            ),  # noqa: SIM115
+            ),
             stderr=subprocess.STDOUT,
             env=router_env,
             start_new_session=True,  # the spawned model runtime dies with the group

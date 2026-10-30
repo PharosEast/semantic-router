@@ -21,7 +21,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-
 VERDICT_PASS = "PASS"
 VERDICT_FAIL = "FAIL"
 VERDICT_INCONCLUSIVE = "INCONCLUSIVE"
@@ -96,7 +95,11 @@ def _resolve_constraint(constraint: dict[str, Any]) -> dict[str, Any]:
         return out
     bound_value = float(baseline) if bound == "baseline" else float(bound)
     # lte allows a worst case above the bound, gte below it
-    bound_value = bound_value * (1 + tolerance / 100.0) if op == "lte" else bound_value * (1 - tolerance / 100.0)
+    bound_value = (
+        bound_value * (1 + tolerance / 100.0)
+        if op == "lte"
+        else bound_value * (1 - tolerance / 100.0)
+    )
     out["bound_value"] = bound_value
     violated = candidate > bound_value if op == "lte" else candidate < bound_value
     out["status"] = "violated" if violated else "pass"
@@ -140,16 +143,28 @@ def evaluate_verdict(
                 f"{constraint['metric']!r} is unknown (missing evidence, never counted as zero)"
             )
     if reasons:
-        return VerdictResult(VERDICT_INCONCLUSIVE, reasons, constraints=resolved_constraints)
+        return VerdictResult(
+            VERDICT_INCONCLUSIVE, reasons, constraints=resolved_constraints
+        )
 
     if baseline_metric is None:
-        return VerdictResult(VERDICT_INCONCLUSIVE, ["baseline metric missing"], constraints=resolved_constraints)
+        return VerdictResult(
+            VERDICT_INCONCLUSIVE,
+            ["baseline metric missing"],
+            constraints=resolved_constraints,
+        )
     if candidate_metric is None:
-        return VerdictResult(VERDICT_INCONCLUSIVE, ["candidate metric missing"], constraints=resolved_constraints)
+        return VerdictResult(
+            VERDICT_INCONCLUSIVE,
+            ["candidate metric missing"],
+            constraints=resolved_constraints,
+        )
 
     improvement = _improvement_pct(baseline_metric, candidate_metric, direction)
     failed_guards = [g for g in guards if not g.passed]
-    violated_constraints = [c for c in resolved_constraints if c["status"] == "violated"]
+    violated_constraints = [
+        c for c in resolved_constraints if c["status"] == "violated"
+    ]
     if failed_guards:
         details = "; ".join(
             f"{g.name}: {g.value:.4f} < floor {g.floor:.4f}" for g in failed_guards
@@ -157,7 +172,8 @@ def evaluate_verdict(
         # safety veto first; any simultaneously violated constraint is still listed
         return VerdictResult(
             VERDICT_FAIL,
-            [f"guard floor violated ({details})"] + [c["reason"] for c in violated_constraints],
+            [f"guard floor violated ({details})"]
+            + [c["reason"] for c in violated_constraints],
             improvement_pct=round(improvement, 6),
             constraints=resolved_constraints,
         )

@@ -123,7 +123,9 @@ class LedgerRecord:
             notes=str(raw.get("notes", "")),
             split=raw.get("split"),
             status=raw.get("status"),
-            constraints=dict(raw["constraints"]) if raw.get("constraints") is not None else None,
+            constraints=(
+                dict(raw["constraints"]) if raw.get("constraints") is not None else None
+            ),
         )
 
 

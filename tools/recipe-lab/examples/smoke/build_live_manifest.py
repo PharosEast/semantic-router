@@ -18,6 +18,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import random
 from pathlib import Path
 
 from build_mmlu_cases import DEEP_CATEGORIES, load_rows
@@ -28,7 +29,9 @@ def letter(index: int) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="build live-tier manifests from MMLU-Pro")
+    parser = argparse.ArgumentParser(
+        description="build live-tier manifests from MMLU-Pro"
+    )
     parser.add_argument("--dataset-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--mock-url", default="http://127.0.0.1:8000/v1")
@@ -39,7 +42,9 @@ def main() -> int:
         help="router management preview endpoint (required by sr-bench preview)",
     )
     parser.add_argument("--router-model", default="vllm-sr/auto")
-    parser.add_argument("--config-hash", required=True, help="router's frozen config hash (64 hex)")
+    parser.add_argument(
+        "--config-hash", required=True, help="router's frozen config hash (64 hex)"
+    )
     parser.add_argument("--per-deep", type=int, default=6)
     parser.add_argument("--per-standard", type=int, default=6)
     parser.add_argument("--seed", type=int, default=42)
@@ -50,9 +55,9 @@ def main() -> int:
     rows = load_rows(data_sub if data_sub.is_dir() else data_dir)
 
     deep = [r for r in rows if str(r.get("category", "")).lower() in DEEP_CATEGORIES]
-    standard = [r for r in rows if str(r.get("category", "")).lower() not in DEEP_CATEGORIES]
-    import random
-
+    standard = [
+        r for r in rows if str(r.get("category", "")).lower() not in DEEP_CATEGORIES
+    ]
     rng = random.Random(args.seed)
     rng.shuffle(deep)
     rng.shuffle(standard)
@@ -113,8 +118,18 @@ def main() -> int:
     # accounting - require_priced would demand the full router usage-receipt
     # chain (SKILL: "capability_only permits unpriced evaluation")
     prices = {
-        "local/private-qwen": {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0},
-        "cloud/frontier-reasoning": {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0},
+        "local/private-qwen": {
+            "input": 0,
+            "cached_input": 0,
+            "cache_write": 0,
+            "output": 0,
+        },
+        "cloud/frontier-reasoning": {
+            "input": 0,
+            "cached_input": 0,
+            "cache_write": 0,
+            "output": 0,
+        },
         "vllm-sr/auto": {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0},
     }
 
@@ -185,7 +200,9 @@ def main() -> int:
         json.dumps(
             {
                 "cases": len(cases),
-                "deep": sum(1 for c in cases if c["truth"] == "cloud_frontier_reasoning"),
+                "deep": sum(
+                    1 for c in cases if c["truth"] == "cloud_frontier_reasoning"
+                ),
                 "standard": sum(1 for c in cases if c["truth"] == "local_standard"),
                 "cases_hash": f"sha256:{digest}",
                 "output_dir": str(out_dir),

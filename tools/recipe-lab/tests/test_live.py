@@ -9,14 +9,17 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from recipe_lab.cli import main
 from recipe_lab.contract import ContractError, ExperimentSpec
-from recipe_lab.live import _pair_metrics, live_verdict_from_runs, measurements_from_rows, resolve_gates
-from recipe_lab.srbench import SrbenchCli
+from recipe_lab.live import (
+    _pair_metrics,
+    live_verdict_from_runs,
+    measurements_from_rows,
+    resolve_gates,
+)
+
 from tests.fixtures import VALID_SPEC
 from tests.test_contract import _write_splits_dataset
-
 
 # ---- A3: the contract is the only source of guard floors ----
 
@@ -24,7 +27,9 @@ from tests.test_contract import _write_splits_dataset
 def test_measurements_from_rows_rejects_floors_and_unknown_keys():
     # a floor inside the measurement file is a contract bypass
     with pytest.raises(ContractError, match="floor"):
-        measurements_from_rows([{"name": "pii", "candidate": 0.97, "baseline": 0.96, "floor": 0.95}])
+        measurements_from_rows(
+            [{"name": "pii", "candidate": 0.97, "baseline": 0.96, "floor": 0.95}]
+        )
     with pytest.raises(ContractError, match="non-measurement keys"):
         measurements_from_rows([{"name": "pii", "candidate": 0.97, "metric": "g"}])
     with pytest.raises(ContractError, match="name"):
@@ -37,15 +42,21 @@ def test_resolve_gates_numeric_floor_pass_and_breach():
     from recipe_lab.contract import Gate
 
     gates = [Gate(name="pii-recall-floor", metric="guard.pii.recall", floor=0.95)]
-    guards, undeclared = resolve_gates(gates, [{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.5}])
+    guards, _undeclared = resolve_gates(
+        gates, [{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.5}]
+    )
     assert guards[0].floor == 0.95 and guards[0].value == 0.97 and guards[0].passed
-    guards, _ = resolve_gates(gates, [{"name": "pii-recall-floor", "candidate": 0.90, "baseline": 0.5}])
+    guards, _ = resolve_gates(
+        gates, [{"name": "pii-recall-floor", "candidate": 0.90, "baseline": 0.5}]
+    )
     assert guards[0].passed is False
 
 
 def test_resolve_gates_baseline_floor_uses_measured_baseline():
     gates = ExperimentSpec.from_dict(VALID_SPEC).gates
-    guards, undeclared = resolve_gates(gates, [{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}])
+    guards, undeclared = resolve_gates(
+        gates, [{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}]
+    )
     assert undeclared == []
     assert guards[0].floor == 0.96 and guards[0].value == 0.97 and guards[0].passed
 
@@ -77,7 +88,10 @@ def test_resolve_gates_reports_undeclared_without_veto():
 
 
 def test_pair_metrics_sectioned_payload():
-    payload = {"baseline": {"m": {"capability.score": 0.80}}, "candidate": {"capability.score": 0.86}}
+    payload = {
+        "baseline": {"m": {"capability.score": 0.80}},
+        "candidate": {"capability.score": 0.86},
+    }
     base, cand = _pair_metrics(payload, "capability.score", [])
     assert (base, cand) == (0.80, 0.86)
     # sr-bench compare's actual shape: *_targets arrays with accuracy leaves
@@ -116,14 +130,20 @@ def test_pair_metrics_flat_two_values():
     base, cand = _pair_metrics({"a": 0.80, "b": 0.86}, "x", [])
     assert base is None and cand is None  # different key, nothing matched
     incomplete: list[str] = []
-    base, cand = _pair_metrics({"capability.score": 0.80, "nested": {"capability.score": 0.86}}, "capability.score", incomplete)
+    base, cand = _pair_metrics(
+        {"capability.score": 0.80, "nested": {"capability.score": 0.86}},
+        "capability.score",
+        incomplete,
+    )
     assert (base, cand) == (0.80, 0.86)
     assert incomplete == []
 
 
 def test_pair_metrics_ambiguous_is_incomplete():
     incomplete: list[str] = []
-    base, cand = _pair_metrics({"capability.score": 0.8}, "capability.score", incomplete)
+    base, cand = _pair_metrics(
+        {"capability.score": 0.8}, "capability.score", incomplete
+    )
     assert base is None and cand is None
     assert "ambiguous" in incomplete[0]
 
@@ -137,7 +157,10 @@ def _spec():
 def test_live_verdict_pass_flow():
     class FakeCli:
         def compare(self, base, cand):
-            return {"baseline": {"capability.score": 0.80}, "candidate": {"capability.score": 0.86}}
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
 
     result = live_verdict_from_runs(
         spec=_spec(),
@@ -145,7 +168,9 @@ def test_live_verdict_pass_flow():
         baseline_run_id="run-a",
         candidate_run_id="run-b",
         # VALID_SPEC declares floor: baseline -> the measured baseline is the floor
-        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
     )
     assert result["verdict"] == "PASS"
     assert result["gates"] == {"pii-recall-floor": "pass"}
@@ -156,14 +181,19 @@ def test_live_verdict_pass_flow():
 def test_live_verdict_baseline_floor_breach_fails():
     class FakeCli:
         def compare(self, base, cand):
-            return {"baseline": {"capability.score": 0.80}, "candidate": {"capability.score": 0.86}}
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
 
     result = live_verdict_from_runs(
         spec=_spec(),
         cli=FakeCli(),
         baseline_run_id="run-a",
         candidate_run_id="run-b",
-        measurements=[{"name": "pii-recall-floor", "candidate": 0.90, "baseline": 0.96}],
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.90, "baseline": 0.96}
+        ],
     )
     assert result["verdict"] == "FAIL"
     assert result["gates"] == {"pii-recall-floor": "fail"}
@@ -173,7 +203,10 @@ def test_live_verdict_baseline_floor_breach_fails():
 def test_live_verdict_missing_measurement_is_inconclusive():
     class FakeCli:
         def compare(self, base, cand):
-            return {"baseline": {"capability.score": 0.80}, "candidate": {"capability.score": 0.86}}
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
 
     result = live_verdict_from_runs(
         spec=_spec(),
@@ -190,18 +223,26 @@ def test_live_verdict_missing_measurement_is_inconclusive():
 def test_live_verdict_undeclared_measurement_does_not_veto():
     class FakeCli:
         def compare(self, base, cand):
-            return {"baseline": {"capability.score": 0.80}, "candidate": {"capability.score": 0.86}}
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
 
     result = live_verdict_from_runs(
         spec=_spec(),
         cli=FakeCli(),
         baseline_run_id="run-a",
         candidate_run_id="run-b",
-        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}, {"name": "extra", "candidate": 0.1}],
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96},
+            {"name": "extra", "candidate": 0.1},
+        ],
     )
     assert result["verdict"] == "PASS"
     assert result["undeclared_measurements"] == ["extra"]
-    assert any("undeclared guard measurements" in reason for reason in result["reasons"])
+    assert any(
+        "undeclared guard measurements" in reason for reason in result["reasons"]
+    )
 
 
 def test_live_verdict_empty_gates_is_explicit():
@@ -210,7 +251,10 @@ def test_live_verdict_empty_gates_is_explicit():
 
     class FakeCli:
         def compare(self, base, cand):
-            return {"baseline": {"capability.score": 0.80}, "candidate": {"capability.score": 0.86}}
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
 
     result = live_verdict_from_runs(
         spec=ExperimentSpec.from_dict(spec_dict),
@@ -234,7 +278,9 @@ def test_live_verdict_ambiguous_is_inconclusive():
         cli=FakeCli(),
         baseline_run_id="run-a",
         candidate_run_id="run-b",
-        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
     )
     assert result["verdict"] == "INCONCLUSIVE"
     assert result["gates"] == {"pii-recall-floor": "pass"}
@@ -247,7 +293,15 @@ def test_live_verdict_rejects_floor_in_measurement_file(tmp_path, capsys):
     spec_path = str(_write_splits_dataset(tmp_path))
     measurements = tmp_path / "measurements.jsonl"
     measurements.write_text(
-        json.dumps({"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96, "floor": 0.9}) + "\n",
+        json.dumps(
+            {
+                "name": "pii-recall-floor",
+                "candidate": 0.97,
+                "baseline": 0.96,
+                "floor": 0.9,
+            }
+        )
+        + "\n",
         encoding="utf-8",
     )
     assert (
@@ -281,7 +335,12 @@ def _seed_replay_ledger(tmp_path) -> tuple[str, str]:
         LedgerRecord(
             round=1,
             ts="2026-10-29T00:00:00Z",
-            candidate={"kind": "config", "ref": "seed.yaml", "change_summary": "s", "provenance": {"proposer": "p", "insight_refs": []}},
+            candidate={
+                "kind": "config",
+                "ref": "seed.yaml",
+                "change_summary": "s",
+                "provenance": {"proposer": "p", "insight_refs": []},
+            },
             tier="replay",
             baseline_ref="base@main",
             metrics={"routed_accuracy": 0.9},
@@ -293,13 +352,23 @@ def _seed_replay_ledger(tmp_path) -> tuple[str, str]:
 
 
 def _live_verdict_args(spec_path: str, ledger: str | None = None) -> list[str]:
-    args = ["live-verdict", "--spec", spec_path, "--baseline-run-id", "run-a", "--candidate-run-id", "run-b"]
+    args = [
+        "live-verdict",
+        "--spec",
+        spec_path,
+        "--baseline-run-id",
+        "run-a",
+        "--candidate-run-id",
+        "run-b",
+    ]
     if ledger:
         args += ["--ledger", ledger]
     return args
 
 
-def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(monkeypatch, tmp_path, capsys):
+def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(
+    monkeypatch, tmp_path, capsys
+):
     from recipe_lab import cli
 
     spec_path = str(_write_splits_dataset(tmp_path))
@@ -311,7 +380,14 @@ def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(monkeypatch, tmp_
     diag_file.write_text("{}", encoding="utf-8")
     sidecar = tmp_path / "cand.json"
     sidecar.write_text(
-        json.dumps({"kind": "config", "ref": "cand-1.yaml", "change_summary": "s", "provenance": {"proposer": "agent", "insight_refs": ["bench:run-a"]}}),
+        json.dumps(
+            {
+                "kind": "config",
+                "ref": "cand-1.yaml",
+                "change_summary": "s",
+                "provenance": {"proposer": "agent", "insight_refs": ["bench:run-a"]},
+            }
+        ),
         encoding="utf-8",
     )
     attr_hash = hashlib.sha256(attr_file.read_bytes()).hexdigest()
@@ -327,14 +403,29 @@ def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(monkeypatch, tmp_
     monkeypatch.setattr(
         cli,
         "live_verdict_from_runs",
-        lambda **kwargs: {"verdict": "PASS", "reasons": [], "improvement_pct": 1.0, "gates": {}, "constraints": [], "bench_refs": ["run-a", "run-b"], "metrics": {"baseline": 0.5, "candidate": 0.6}},
+        lambda **kwargs: {
+            "verdict": "PASS",
+            "reasons": [],
+            "improvement_pct": 1.0,
+            "gates": {},
+            "constraints": [],
+            "bench_refs": ["run-a", "run-b"],
+            "metrics": {"baseline": 0.5, "candidate": 0.6},
+        },
     )
-    args = _live_verdict_args(spec_path, str(ledger_path)) + [
-        "--candidate", str(sidecar),
-        "--insight-refs", refs,
+    args = [
+        *_live_verdict_args(spec_path, str(ledger_path)),
+        "--candidate",
+        str(sidecar),
+        "--insight-refs",
+        refs,
     ]
     assert main(args) == 0
-    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert rows[-1]["candidate"]["provenance"]["insight_refs"] == [
         "bench:run-a",
         record_id,
@@ -346,7 +437,13 @@ def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(monkeypatch, tmp_
 def test_live_verdict_unknown_record_ref_exits_2(tmp_path, capsys):
     seed_ledger, _ = _seed_replay_ledger(tmp_path)
     spec_path = str(_write_splits_dataset(tmp_path))
-    rc = main(_live_verdict_args(spec_path, seed_ledger) + ["--insight-refs", "rec-000000000000"])
+    rc = main(
+        [
+            *_live_verdict_args(spec_path, seed_ledger),
+            "--insight-refs",
+            "rec-000000000000",
+        ]
+    )
     assert rc == 2
     assert "not found in ledger" in capsys.readouterr().err
 
@@ -356,7 +453,13 @@ def test_live_verdict_hash_mismatch_exits_2(tmp_path, capsys):
     attr_file = tmp_path / "attr.json"
     attr_file.write_text("{}", encoding="utf-8")
     bad_hash = "sha256:" + "f" * 64
-    rc = main(_live_verdict_args(spec_path) + ["--insight-refs", f"attr:{attr_file}@{bad_hash}"])
+    rc = main(
+        [
+            *_live_verdict_args(spec_path),
+            "--insight-refs",
+            f"attr:{attr_file}@{bad_hash}",
+        ]
+    )
     assert rc == 2
     assert "hash mismatch" in capsys.readouterr().err
 
@@ -367,7 +470,13 @@ def test_live_verdict_hash_mismatch_exits_2(tmp_path, capsys):
 def _spec_with_constraints(**overrides) -> ExperimentSpec:
     spec_dict = copy.deepcopy(VALID_SPEC)
     spec_dict["objective"]["constraints"] = [
-        {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline", "tolerance_pct": 0.0}
+        {
+            "name": "cost-not-worse",
+            "metric": "total_spend_usd",
+            "op": "lte",
+            "bound": "baseline",
+            "tolerance_pct": 0.0,
+        }
     ]
     spec_dict["objective"].update(overrides)
     return ExperimentSpec.from_dict(spec_dict)
@@ -378,7 +487,10 @@ def _compare_with_costs(candidate_cost):
         def compare(self, base, cand):
             return {
                 "baseline": {"capability.score": 0.80, "total_spend_usd": 5.0},
-                "candidate": {"capability.score": 0.86, "total_spend_usd": candidate_cost},
+                "candidate": {
+                    "capability.score": 0.86,
+                    "total_spend_usd": candidate_cost,
+                },
             }
 
     return FakeCli()
@@ -390,7 +502,9 @@ def test_live_verdict_constraint_within_baseline_passes():
         cli=_compare_with_costs(5.0),
         baseline_run_id="run-a",
         candidate_run_id="run-b",
-        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
     )
     assert result["verdict"] == "PASS"
     [constraint] = result["constraints"]
@@ -404,7 +518,9 @@ def test_live_verdict_constraint_violated_fails():
         cli=_compare_with_costs(6.0),
         baseline_run_id="run-a",
         candidate_run_id="run-b",
-        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
     )
     assert result["verdict"] == "FAIL"
     assert "constraint cost-not-worse violated" in result["reasons"][0]
@@ -419,7 +535,9 @@ def test_live_verdict_unknown_cost_is_inconclusive_not_zero():
         cli=_compare_with_costs(None),
         baseline_run_id="run-a",
         candidate_run_id="run-b",
-        measurements=[{"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}],
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
     )
     assert result["verdict"] == "INCONCLUSIVE"
     assert "not evaluable" in result["reasons"][0]
@@ -436,26 +554,60 @@ def test_guard_violation_is_listed_before_constraint_violation():
     )
     assert result["verdict"] == "FAIL"
     assert result["reasons"][0].startswith("guard floor violated")
-    assert any("constraint cost-not-worse violated" in reason for reason in result["reasons"])
+    assert any(
+        "constraint cost-not-worse violated" in reason for reason in result["reasons"]
+    )
 
 
 def test_numeric_bound_and_tolerance_relax_in_permissive_direction():
     from recipe_lab.verdict import evaluate_verdict
 
     # tolerance 10% on an lte baseline bound of 5.0 -> 5.5 allowed
-    evidence = [{"name": "c", "metric": "m", "op": "lte", "bound": "baseline", "tolerance_pct": 10.0, "baseline": 5.0, "candidate": 5.4}]
+    evidence = [
+        {
+            "name": "c",
+            "metric": "m",
+            "op": "lte",
+            "bound": "baseline",
+            "tolerance_pct": 10.0,
+            "baseline": 5.0,
+            "candidate": 5.4,
+        }
+    ]
     result = evaluate_verdict(
-        baseline_metric=0.8, candidate_metric=0.9, direction="maximize",
-        min_improvement_pct=0.0, guards=[], incomplete_reasons=[], constraints=evidence,
+        baseline_metric=0.8,
+        candidate_metric=0.9,
+        direction="maximize",
+        min_improvement_pct=0.0,
+        guards=[],
+        incomplete_reasons=[],
+        constraints=evidence,
     )
     assert result.verdict == "PASS" and result.constraints[0]["bound_value"] == 5.5
     # gte with 10% tolerance on a numeric bound of 0.9 -> 0.81 required
-    evidence = [{"name": "c", "metric": "m", "op": "gte", "bound": 0.9, "tolerance_pct": 10.0, "baseline": 1.0, "candidate": 0.85}]
+    evidence = [
+        {
+            "name": "c",
+            "metric": "m",
+            "op": "gte",
+            "bound": 0.9,
+            "tolerance_pct": 10.0,
+            "baseline": 1.0,
+            "candidate": 0.85,
+        }
+    ]
     result = evaluate_verdict(
-        baseline_metric=0.8, candidate_metric=0.9, direction="maximize",
-        min_improvement_pct=0.0, guards=[], incomplete_reasons=[], constraints=evidence,
+        baseline_metric=0.8,
+        candidate_metric=0.9,
+        direction="maximize",
+        min_improvement_pct=0.0,
+        guards=[],
+        incomplete_reasons=[],
+        constraints=evidence,
     )
-    assert result.verdict == "PASS" and result.constraints[0]["bound_value"] == pytest.approx(0.81)
+    assert result.verdict == "PASS" and result.constraints[0][
+        "bound_value"
+    ] == pytest.approx(0.81)
 
 
 def test_live_cli_record_carries_constraint_evidence(monkeypatch, tmp_path, capsys):
@@ -464,7 +616,13 @@ def test_live_cli_record_carries_constraint_evidence(monkeypatch, tmp_path, caps
     spec_path = _write_splits_dataset(tmp_path)
     spec_dict = yaml.safe_load(Path(spec_path).read_text(encoding="utf-8"))
     spec_dict["objective"]["constraints"] = [
-        {"name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte", "bound": "baseline", "tolerance_pct": 0.0}
+        {
+            "name": "cost-not-worse",
+            "metric": "total_spend_usd",
+            "op": "lte",
+            "bound": "baseline",
+            "tolerance_pct": 0.0,
+        }
     ]
     spec_path = tmp_path / "spec-constraints.yaml"
     spec_path.write_text(yaml.safe_dump(spec_dict), encoding="utf-8")
@@ -476,9 +634,15 @@ def test_live_cli_record_carries_constraint_evidence(monkeypatch, tmp_path, caps
             "gates": {"pii-recall-floor": "pass"},
             "constraints": [
                 {
-                    "name": "cost-not-worse", "metric": "total_spend_usd", "op": "lte",
-                    "bound": "baseline", "tolerance_pct": 0.0,
-                    "baseline": 5.0, "candidate": 5.0, "bound_value": 5.0, "status": "pass",
+                    "name": "cost-not-worse",
+                    "metric": "total_spend_usd",
+                    "op": "lte",
+                    "bound": "baseline",
+                    "tolerance_pct": 0.0,
+                    "baseline": 5.0,
+                    "candidate": 5.0,
+                    "bound_value": 5.0,
+                    "status": "pass",
                 }
             ],
             "bench_refs": ["run-a", "run-b"],
@@ -487,8 +651,12 @@ def test_live_cli_record_carries_constraint_evidence(monkeypatch, tmp_path, caps
 
     monkeypatch.setattr(cli, "live_verdict_from_runs", fake_verdict)
     ledger_path = tmp_path / "ledger.jsonl"
-    assert main(_live_verdict_args(str(spec_path), str(ledger_path)) + ["--final"]) == 0
-    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    assert main([*_live_verdict_args(str(spec_path), str(ledger_path)), "--final"]) == 0
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     constraint = rows[-1]["constraints"]["cost-not-worse"]
     assert constraint["status"] == "pass"
     assert constraint["candidate"] == 5.0
@@ -556,7 +724,14 @@ def test_live_verdict_final_cites_frozen_test(monkeypatch, tmp_path, capsys):
     )
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["verdict"] == "PASS"
-    rows = [json.loads(line) for line in ledger_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     assert rows[-1]["split"] == "frozen_test"
-    expected = "sha256:" + hashlib.sha256((tmp_path / "frozen_test.jsonl").read_bytes()).hexdigest()
+    expected = (
+        "sha256:"
+        + hashlib.sha256((tmp_path / "frozen_test.jsonl").read_bytes()).hexdigest()
+    )
     assert rows[-1]["dataset_hash"] == expected

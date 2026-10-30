@@ -230,7 +230,7 @@ def test_run_round_beyond_budget_exits_2(tmp_path, capsys):
 def test_run_records_declared_gates_as_not_evaluated(monkeypatch, tmp_path):
     # A3: replay never evaluates guards; every declared gate lands in the
     # replay record as explicitly not evaluated (never null).
-    from recipe_lab import cli  # noqa: PLC0415
+    from recipe_lab import cli
 
     spec_path, cases = _write_frozen_spec(tmp_path)
     bank = tmp_path / "bank.jsonl"

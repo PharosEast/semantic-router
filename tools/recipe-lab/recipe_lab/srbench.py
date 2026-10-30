@@ -56,7 +56,9 @@ class SrbenchCli:
                 check=False,
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
-            raise SrbenchError(f"sr-bench CLI failed ({' '.join(args)}): {exc}") from exc
+            raise SrbenchError(
+                f"sr-bench CLI failed ({' '.join(args)}): {exc}"
+            ) from exc
         if completed.returncode != 0:
             tail = (completed.stderr or completed.stdout or "")[-500:]
             raise SrbenchError(
@@ -67,7 +69,9 @@ class SrbenchCli:
         except json.JSONDecodeError:
             return completed.stdout
 
-    def compare(self, baseline_run_id: str, candidate_run_id: str) -> dict[str, Any] | str:
+    def compare(
+        self, baseline_run_id: str, candidate_run_id: str
+    ) -> dict[str, Any] | str:
         return self.run_command(["compare", baseline_run_id, candidate_run_id])
 
     def preview(self, run_id: str) -> dict[str, Any] | str:
