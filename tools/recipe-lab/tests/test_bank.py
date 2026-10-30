@@ -5,10 +5,8 @@ from __future__ import annotations
 import json
 
 import pytest
-
-from recipe_lab.bank import apply_bank, grade, load_bank, write_bank
+from recipe_lab.bank import BankEntry, apply_bank, grade, load_bank, write_bank
 from recipe_lab.contract import ContractError
-from recipe_lab.bank import BankEntry
 
 
 def test_grade_substring_case_insensitive():

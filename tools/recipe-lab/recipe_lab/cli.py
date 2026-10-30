@@ -29,7 +29,6 @@ import yaml
 from . import __version__
 from .adapters.router_replay import (
     fetch_replays,
-    load_cases,
     records_to_cases,
     records_to_rows,
     write_cases,
@@ -219,8 +218,8 @@ def cmd_bank(args: argparse.Namespace) -> int:
     if args.bank_action == "build":
         cases = []
         with Path(args.cases).open("r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
+            for raw in fh:
+                line = raw.strip()
                 if line:
                     cases.append(json.loads(line))
         models = [m.strip() for m in args.models.split(",") if m.strip()]
@@ -408,6 +407,7 @@ def _validate_config(path: Path, validate_bin: str) -> str | None:
             capture_output=True,
             text=True,
             timeout=300.0,
+            check=False,
         )
     except FileNotFoundError as exc:
         raise ContractError(f"validator binary not found: {validate_bin}") from exc
