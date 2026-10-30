@@ -195,3 +195,7 @@ ignore = [
 "tools/recipe-lab/recipe_lab/live.py" = [
   "PLR2004",  # the two-arm pairing count is part of the compare contract
 ]
+"tools/recipe-lab/recipe_lab/bank.py" = [
+  "PLC0415",  # model_eval is an optional sys.path dependency, imported lazily
+  "PLW0603",  # module-level mcq grader cache; tests monkeypatch it
+]

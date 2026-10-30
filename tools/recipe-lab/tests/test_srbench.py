@@ -29,9 +29,11 @@ def test_compare_parses_json_stdout():
 
 
 def test_compare_nonzero_exit_raises():
-    with fake_run(returncode=3, stderr="boom"):
-        with pytest.raises(SrbenchError, match="returned 3"):
-            SrbenchCli().compare("run-a", "run-b")
+    with (
+        fake_run(returncode=3, stderr="boom"),
+        pytest.raises(SrbenchError, match="returned 3"),
+    ):
+        SrbenchCli().compare("run-a", "run-b")
 
 
 def test_compare_non_json_is_kept_raw():
@@ -149,18 +151,24 @@ def test_wait_for_run_polls_until_terminal():
 
 
 def test_wait_for_run_rejects_non_document():
-    with _sequence(["not json"]):
-        with pytest.raises(SrbenchError, match="did not return a run document"):
-            SrbenchCli().wait_for_run("run-x")
+    with (
+        _sequence(["not json"]),
+        pytest.raises(SrbenchError, match="did not return a run document"),
+    ):
+        SrbenchCli().wait_for_run("run-x")
 
 
 def test_wait_for_run_rejects_missing_status():
-    with _sequence([json.dumps({"id": "run-x"})]):
-        with pytest.raises(SrbenchError, match="no status"):
-            SrbenchCli().wait_for_run("run-x")
+    with (
+        _sequence([json.dumps({"id": "run-x"})]),
+        pytest.raises(SrbenchError, match="no status"),
+    ):
+        SrbenchCli().wait_for_run("run-x")
 
 
 def test_submit_without_run_id_is_an_error():
-    with _sequence([json.dumps({"error": "nope"})]):
-        with pytest.raises(SrbenchError, match="did not return a run id"):
-            SrbenchCli().run_manifest("m.json")
+    with (
+        _sequence([json.dumps({"error": "nope"})]),
+        pytest.raises(SrbenchError, match="did not return a run id"),
+    ):
+        SrbenchCli().run_manifest("m.json")

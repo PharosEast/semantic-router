@@ -45,7 +45,7 @@ from pathlib import Path
 from typing import Any
 
 from . import abba
-from .contract import ContractError, ExperimentSpec, Gate
+from .contract import Constraint, ContractError, ExperimentSpec, Gate
 from .srbench import SrbenchCli, extract_metric_values
 from .verdict import GuardResult, evaluate_verdict
 

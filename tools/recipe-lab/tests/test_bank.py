@@ -37,7 +37,7 @@ def test_grade_mcq_uses_extracted_letter(monkeypatch):
 
 def test_grade_mcq_requires_judge_module(monkeypatch):
     monkeypatch.setattr("recipe_lab.bank._MCQ_LETTER", None)
-    import builtins  # noqa: PLC0415
+    import builtins
 
     real_import = builtins.__import__
 
@@ -108,7 +108,7 @@ def _real_mcq_available() -> bool:
     if repo_src.is_dir() and str(repo_src) not in sys.path:
         sys.path.insert(0, str(repo_src))
     try:
-        import training.model_eval.mcq_judge  # noqa: F401, PLC0415
+        import training.model_eval.mcq_judge  # noqa: F401
 
         return True
     except ImportError:
@@ -121,7 +121,7 @@ def _real_mcq_available() -> bool:
 )
 def test_grade_mcq_with_real_judge():
     # verified (I): mcq_judge is importable as a plain function module
-    from training.model_eval.mcq_judge import extract_letter  # noqa: F401, PLC0415
+    from training.model_eval.mcq_judge import extract_letter  # noqa: F401
 
     case = {"grader": "mcq", "expected": "B", "case_id": "c2"}
     assert grade("Answer: B", case) is True
