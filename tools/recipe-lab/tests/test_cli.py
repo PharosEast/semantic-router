@@ -346,7 +346,7 @@ def test_run_proposer_rejects_invalid_tags(tag, capsys):
 
 def test_run_agent_proposer_lands_in_ledger_provenance(monkeypatch, tmp_path):
     # S5: a self-authored candidate tagged agent:<id> keeps the tag verbatim.
-    from recipe_lab import cli  # noqa: PLC0415
+    from recipe_lab import cli
 
     spec_path, cases = _write_frozen_spec(tmp_path)
     bank = tmp_path / "bank.jsonl"
