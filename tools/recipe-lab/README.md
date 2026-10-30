@@ -5,7 +5,7 @@ Closed-loop experiments for semantic-router routing recipes（RSI 工作台）�
 本层覆盖 replay-tier 闭环：冻结题集身份（A4）→ 题集三分（B）→ 答案库与归因 →
 候选提议（信号级 / 规则级 / 分布校准）→ replay 层评估入台账（A1/A5）→ 台账检索与洞察引用（G1/G2），
 以及 live 层终裁 `live-verdict`（守卫以契约为准 A3、洞察引用 G2、经济约束 E）。
-另含无需标注的分布诊断（D）、oracle policy 的规则/默认形态（F2）、replay 热加载（H）。
+另含无需标注的分布诊断（D）、oracle policy 的规则/默认形态（F2）、replay 热加载（H）与成本代理（E2）。
 
 ## 安装
 
@@ -43,7 +43,9 @@ pip install -e '.[dev]'
    `budget.max_minutes_per_trial` 是单个 trial 的 deadline（A5），超时记 `status=timeout`
    且不参与排序。`--validate` 用 `vllm-sr config validate` 预检候选，被拒候选不进台账，
    全部被拒则 exit 2。`--reload hot` 用单路由 + `PUT /api/v1/config` 切换候选，
-   失败回退 restart 并记录（H）。
+   失败回退 restart 并记录（H）。spec 带 `cost_model` 时额外产出
+   `routed_cost_index` 成本代理：声明约束被代理评估，违约候选带
+   `constraint_warning` 且不参与 `best_replay`（E2）。
 8. **台账（ledger）**：append / show / top。每条记录有稳定 `record_id`（G1），
    provenance 可携带 insight-refs（G2）。`ledger top --spec` 按 replay_metric 取最优。
 9. **报告与上下文（report / provenance / record-draft / next）**：报告、manifest 与
@@ -66,7 +68,7 @@ pip install -e '.[dev]'
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
 | `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |
-| `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2；`--reload restart|hot` H） |
+| `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2；`--reload restart|hot` H；`cost_model` 成本代理 E2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
 | `live-verdict` | 比较两个 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
 | `report` | 只从台账重放的运行报告（G1） |
@@ -190,16 +192,7 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
   `total_spend_usd` / `cache_neutral_cost_usd` / `cost_usd` / `evaluation_cost_usd`；
   用量未知序列化为 null → 约束不可评估 → INCONCLUSIVE（绝不记 0，也绝不记违规）。
   约束证据进入裁决输出与台账记录（`constraints` 字段），供报告重放。
-- **replay 成本代理（E2）**：可选顶层 `cost_model`（模型名 → 相对成本，必须为正数）。
-  声明后 `run` 在每个 replay 记录的 `metrics` 里追加 `routed_cost_index` =
-  已作答样本（`answer_ok` 非 null）按路由模型相对成本求均值；未作答 / no_bank_entry
-  不计。路由到 `cost_model` 未覆盖的模型时指标不可计算（未知成本绝不记 0），
-  记入 `reasons`。有 `cost_model` 时 replay 按该代理评估全部已声明约束：越界候选
-  标 `constraint_warning: true` 并附约束证据（`proxy: routed_cost_index`，
-  `bound: baseline` 解析为 baseline 臂的代理值，未评 baseline 时 not_evaluated），
-  `best_replay` / `ledger top` / `next` 的最优候选一律排除越界记录。
-  没有 `cost_model` 时 replay 不做约束，`next` 契约摘要提示"成本仅在 live 档裁决"。
-  报告列出主指标、`routed_cost_index` 与每个约束的状态 / 候选值 / bound 值。
+  replay 层的代理评估见下节（E2）。
 
 ## 记录格式（归因输入）
 
@@ -275,7 +268,9 @@ input record carries (e.g. from `collect-replays --family`).
   "default": {...}?}`。条件按标签串、有限数值或 `gte|lte|gt|lt` 谓词映射匹配信号事实
   （路由器语义：`gte` 在值小于 bound 时不命中）；首条命中的规则生效，缺省兜底
   `default`，两者都不覆盖的真值是 policy gap。
-- 顶层 `cost_model`（E2）是可选的 replay 成本代理声明；缺省时 replay 不评约束。
+- 顶层可选 `cost_model`（E2）：served 模型名 → 相对成本（必须有限正数）。
+  声明后 replay 层产出 `routed_cost_index`（已作答样本按路由模型成本均值；
+  未知模型成本绝不记 0）并代理评估成本约束；不声明则成本只在 live 层裁决。
 - `workload` 声明三分 split（B）时必须给出 `split_rule` 文本且三分互不相交；
   旧的单数据集形态按 dev-only 处理并告警。
 - `budget.max_minutes_per_trial` 覆盖就绪等待 + 请求循环 + replay 拉取全程（A5）。

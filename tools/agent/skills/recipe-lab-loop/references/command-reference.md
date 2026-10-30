@@ -22,6 +22,10 @@ for `live-verdict`.
   `gte|lte|gt|lt` (router semantics: `gte` fails when the value is below
   the bound). The first matching rule wins, the optional default covers
   the rest, and truth no rule covers is a policy gap.
+- Optional top-level `cost_model` (E2): map of served model name to a
+  finite positive relative cost. Its presence lets the replay tier compute
+  `routed_cost_index` and proxy cost constraints; without it, cost is
+  adjudicated only in the live tier.
 
 ## Dataset identity and splits (stage 2)
 
@@ -130,6 +134,17 @@ proposals.
     `--api-key-env` for the management bearer token (the same env var
     covers the replay fetch). A hot-path failure falls back to restart;
     the record notes always say which mode ran (`reload=`).
+  - Replay cost proxy (E2): with `cost_model` in the spec, every candidate
+    also reports `routed_cost_index` - the mean relative cost of the routed
+    models over answered rows (a routed model missing from `cost_model`
+    makes the index incomputable; unknown cost is never counted as zero).
+    Declared constraints are proxied onto that measurement: the evidence
+    keeps the declared live metric name and adds
+    `proxy: routed_cost_index`, and `bound: baseline` resolves against the
+    baseline arm's proxy. A violated candidate carries `constraint_warning`
+    in its ledger record and is excluded from `best_replay` selection.
+    Without `cost_model` replay does no constraint work - the `next`
+    context states that cost is adjudicated only in the live tier.
 
 ## Insight references (stage 2)
 
@@ -163,7 +178,9 @@ proposals.
   cost fields: `total_spend_usd`, `cache_neutral_cost_usd`, `cost_usd`,
   `evaluation_cost_usd` on the baseline_targets/candidate_targets entries.
   Unknown usage is null -> the constraint is INCONCLUSIVE (never zero).
-  Constraint evidence lands in the record's `constraints` field.
+  Constraint evidence lands in the record's `constraints` field. In the
+  replay tier the same constraints are proxied onto `routed_cost_index`
+  when the spec has `cost_model` (see `run`, E2).
 
 ## Reporting
 
@@ -173,14 +190,17 @@ proposals.
 - `recipe-lab next --spec S --ledger L [--diagnosis diag/diagnosis.json]
   --output C [--tail N]` - full agent context export (G3), byte-stable for
   the same inputs. Sections: untrusted-material header; contract summary
-  (objective, replay_metric, constraints, gates, split names + hashes,
-  budget used/remaining); ledger tail; best replay candidate (ranked by
-  `objective.replay_metric` through the same `best_replay` selection as
-  `ledger top`, A2); last live verdict with reasons, gates, constraints and
-  bench_refs; latest attribution summary read through the newest record's
-  hash-verified `attribution_ref`; optional diagnosis highlights (dead/rare
-  decisions, unreachable threshold sites); and a citable insight-ref list -
-  paste those refs verbatim into `--insight-refs` when proposing (step 3).
+  (objective, replay_metric, constraints, gates, cost_model, split names +
+  hashes, budget used/remaining); ledger tail; best replay candidate (ranked
+  by `objective.replay_metric` through the same `best_replay` selection as
+  `ledger top`, A2 - cost-proxy-violating candidates excluded, E2); last
+  live verdict with reasons, gates, constraints and bench_refs; latest
+  attribution summary read through the newest record's hash-verified
+  `attribution_ref`; optional diagnosis highlights (dead/rare decisions,
+  unreachable threshold sites); and a citable insight-ref list - paste
+  those refs verbatim into `--insight-refs` when proposing (step 3). When
+  cost constraints exist but `cost_model` does not, the summary states that
+  cost is adjudicated only in the live tier.
 - `recipe-lab provenance --ledger L --output M` - recipe-lab-run-v1 manifest.
 - `recipe-lab record-draft --ledger L --output D` - promotion draft from the
   latest PASS live record (human checklist included).
