@@ -13,9 +13,9 @@ import json
 from pathlib import Path
 
 import yaml
-
 from recipe_lab.cli import main
 from recipe_lab.proposers import rule_threshold
+
 from tests.fixtures import pilot_rows_jsonl
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -47,7 +47,10 @@ def test_calibration_smoke_reproduces_bug3(tmp_path, capsys):
     )
     assert diag["dead_decisions"] == ["domain_code_complex", "complex_general"]
     assert len(diag["unreachable_sites"]) == 4
-    assert any(a["type"] == "compressed_range" and a["signal"] == "difficulty" for a in diag["alerts"])
+    assert any(
+        a["type"] == "compressed_range" and a["signal"] == "difficulty"
+        for a in diag["alerts"]
+    )
     assert (tmp_path / "diag" / "diagnosis.md").is_file()
 
     payload = _run(
@@ -69,8 +72,12 @@ def test_calibration_smoke_reproduces_bug3(tmp_path, capsys):
     )
     assert payload["candidates"] == ["difficulty gte 2.5 -> 1.75 (p75 of n=344)"]
     candidate_path = Path(payload["files"][0])
-    sidecar = json.loads(candidate_path.with_suffix(".candidate.json").read_text(encoding="utf-8"))
-    assert sidecar["provenance"]["insight_refs"], "the candidate must cite its diagnosis"
+    sidecar = json.loads(
+        candidate_path.with_suffix(".candidate.json").read_text(encoding="utf-8")
+    )
+    assert sidecar["provenance"][
+        "insight_refs"
+    ], "the candidate must cite its diagnosis"
 
     # identical to what the rule-level proposer produces for 1.75 (site for site)
     calibrated = yaml.safe_load(candidate_path.read_text(encoding="utf-8"))

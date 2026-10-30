@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from recipe_lab import diagnose
 from recipe_lab.contract import ContractError, dataset_content_hash
+
 from tests.fixtures import pilot_rows
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -99,21 +99,26 @@ def test_distribution_quantiles_range_and_utilization():
 
 def test_distribution_unknown_signal_falls_back_to_observed_range():
     rows = pilot_rows()[:50]
-    for index, row in enumerate(rows):
+    for _index, row in enumerate(rows):
         row["signal_values"]["decision:ghost"] = 0.42
     distribution = diagnose.signal_distribution(rows, _config())
     ghost = _entry(distribution, "decision:ghost")
     assert ghost["signal"] == "ghost"
     assert ghost["range"] is None
     assert ghost["range_utilization"] is None
-    assert ghost["histogram"]["counts"][9] == 50  # a degenerate range parks everything in the last bucket
+    assert (
+        ghost["histogram"]["counts"][9] == 50
+    )  # a degenerate range parks everything in the last bucket
 
 
 def test_reachability_flags_the_four_bug3_sites():
     reachability = diagnose.threshold_reachability(pilot_rows(), _config())
     unreachable = [s for s in reachability["sites"] if s["status"] == "unreachable"]
     assert len(unreachable) == 4
-    assert all(s["signal"] == "difficulty" and s["op"] == "gte" and s["value"] == 2.5 for s in unreachable)
+    assert all(
+        s["signal"] == "difficulty" and s["op"] == "gte" and s["value"] == 2.5
+        for s in unreachable
+    )
     assert all(s["satisfied"] == 0 and s["evaluated"] == 344 for s in unreachable)
     # two of the four sites live under NOT branches and keep their written predicate
     assert sorted(s["negated"] for s in unreachable) == [False, False, True, True]
@@ -125,7 +130,9 @@ def test_reachability_flags_the_four_bug3_sites():
 
 
 def test_unobserved_site_never_makes_a_group_unreachable():
-    rows = [{"request_id": "r0", "matched_decision": "simple_general", "signal_values": {}}]
+    rows = [
+        {"request_id": "r0", "matched_decision": "simple_general", "signal_values": {}}
+    ]
     reachability = diagnose.threshold_reachability(rows, _config())
     assert all(site["status"] == "unobserved" for site in reachability["sites"])
     assert all(group["status"] == "unobserved" for group in reachability["groups"])
@@ -134,14 +141,20 @@ def test_unobserved_site_never_makes_a_group_unreachable():
 def test_choice_predicate_evaluated_against_strongest_choice():
     config = {
         "routing": {
-            "signals": {"decision": [{"name": "domain", "question": {"type": "choice"}}]},
+            "signals": {
+                "decision": [{"name": "domain", "question": {"type": "choice"}}]
+            },
             "decisions": [
                 {
                     "name": "only",
                     "rules": {
                         "operator": "AND",
                         "conditions": [
-                            {"type": "decision", "name": "domain", "predicate": {"gte": 0.9}}
+                            {
+                                "type": "decision",
+                                "name": "domain",
+                                "predicate": {"gte": 0.9},
+                            }
                         ],
                     },
                     "fallback_model": "m",
@@ -150,8 +163,20 @@ def test_choice_predicate_evaluated_against_strongest_choice():
         }
     }
     rows = [
-        {"matched_decision": "only", "signal_values": {"decision:domain:code": 0.3, "decision:domain:other": 0.95}},
-        {"matched_decision": "only", "signal_values": {"decision:domain:code": 0.8, "decision:domain:other": 0.4}},
+        {
+            "matched_decision": "only",
+            "signal_values": {
+                "decision:domain:code": 0.3,
+                "decision:domain:other": 0.95,
+            },
+        },
+        {
+            "matched_decision": "only",
+            "signal_values": {
+                "decision:domain:code": 0.8,
+                "decision:domain:other": 0.4,
+            },
+        },
     ]
     reachability = diagnose.threshold_reachability(rows, config)
     site = reachability["sites"][0]
@@ -192,8 +217,12 @@ def test_small_sample_warns():
 def test_byte_stable_output(tmp_path):
     rows = pilot_rows()
     config = _config()
-    first = diagnose.build_diagnosis(rows, config, rows_path="rows.jsonl", config_path="config.yaml")
-    second = diagnose.build_diagnosis(rows, config, rows_path="rows.jsonl", config_path="config.yaml")
+    first = diagnose.build_diagnosis(
+        rows, config, rows_path="rows.jsonl", config_path="config.yaml"
+    )
+    second = diagnose.build_diagnosis(
+        rows, config, rows_path="rows.jsonl", config_path="config.yaml"
+    )
     first_json, first_md = diagnose.write_diagnosis(first, tmp_path / "one")
     second_json, second_md = diagnose.write_diagnosis(second, tmp_path / "two")
     assert first_json.read_bytes() == second_json.read_bytes()
