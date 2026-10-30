@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from pathlib import Path
 from typing import Any
 
 SESSION_CLASS_LANE_FLAP = "lane_flap"
@@ -171,11 +172,7 @@ def analyze_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
             )
             turn = _turn_index(req)
             resumed = next(
-                (
-                    later
-                    for later in requests[i + 1 :]
-                    if _turn_index(later) == turn
-                ),
+                (later for later in requests[i + 1 :] if _turn_index(later) == turn),
                 None,
             )
             if resumed is not None:
@@ -195,7 +192,11 @@ def analyze_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
             {
                 "conversation": conversation,
                 "requests_recorded": len(requests),
-                "turn_span": [_turn_index(requests[0]), _turn_index(requests[-1])] if requests else [],
+                "turn_span": (
+                    [_turn_index(requests[0]), _turn_index(requests[-1])]
+                    if requests
+                    else []
+                ),
                 "lane_flaps": lane_flaps,
                 "selection_failures": selection_failures,
                 "tool_loop_interruptions": interruptions,
@@ -246,10 +247,16 @@ def render_session_report(analysis: dict[str, Any]) -> str:
     if analysis["events"]:
         lines += ["", "## Events", ""]
         for event in analysis["events"]:
-            detail = json.dumps(event.get("detail") or {}, ensure_ascii=False, sort_keys=True)
+            detail = json.dumps(
+                event.get("detail") or {}, ensure_ascii=False, sort_keys=True
+            )
             lines.append(
                 f"- `{event['class']}` conversation `{event['conversation']}`"
-                + (f" turn {event['turn_index']}" if event.get("turn_index") is not None else "")
+                + (
+                    f" turn {event['turn_index']}"
+                    if event.get("turn_index") is not None
+                    else ""
+                )
                 + f" {detail}"
             )
     else:
@@ -266,8 +273,6 @@ def render_session_report(analysis: dict[str, Any]) -> str:
 
 def write_session_report(rows: list[dict[str, Any]], output_dir: str) -> dict[str, Any]:
     """Analyze + render + write session attribution artifacts; returns summary."""
-    from pathlib import Path
-
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
     analysis = analyze_sessions(rows)
@@ -275,7 +280,8 @@ def write_session_report(rows: list[dict[str, Any]], output_dir: str) -> dict[st
     report_path.write_text(render_session_report(analysis), encoding="utf-8")
     events_path = out / "session-events.json"
     events_path.write_text(
-        json.dumps(analysis["events"], ensure_ascii=False, indent=1, allow_nan=False) + "\n",
+        json.dumps(analysis["events"], ensure_ascii=False, indent=1, allow_nan=False)
+        + "\n",
         encoding="utf-8",
     )
     return {
