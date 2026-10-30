@@ -13,7 +13,9 @@ from recipe_lab.contract import ContractError
 def test_grade_substring_case_insensitive():
     # I: grade(answer, case) dispatches on the case's grader; contains is the
     # default when the case carries expected_contains.
-    assert grade("The capital of France is Paris.", {"expected_contains": "paris"}) is True
+    assert (
+        grade("The capital of France is Paris.", {"expected_contains": "paris"}) is True
+    )
     assert grade("Bonjour!", {"expected_contains": "paris"}) is False
     assert grade("anything", {"expected_contains": None}) is None
     assert grade("anything", {}) is None
@@ -21,7 +23,9 @@ def test_grade_substring_case_insensitive():
 
 
 def test_grade_mcq_uses_extracted_letter(monkeypatch):
-    monkeypatch.setattr("recipe_lab.bank._MCQ_LETTER", lambda text: "A" if "Option A" in text else None)
+    monkeypatch.setattr(
+        "recipe_lab.bank._MCQ_LETTER", lambda text: "A" if "Option A" in text else None
+    )
     case = {"grader": "mcq", "expected": "a", "case_id": "c1"}
     assert grade("Option A is correct", case) is True  # expected letter is normalized
     assert grade("Option B is correct", case) is False
@@ -110,7 +114,10 @@ def _real_mcq_available() -> bool:
         return False
 
 
-@pytest.mark.skipif(not _real_mcq_available(), reason="src/training not importable from this environment")
+@pytest.mark.skipif(
+    not _real_mcq_available(),
+    reason="src/training not importable from this environment",
+)
 def test_grade_mcq_with_real_judge():
     # verified (I): mcq_judge is importable as a plain function module
     from training.model_eval.mcq_judge import extract_letter  # noqa: F401
