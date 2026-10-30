@@ -169,7 +169,8 @@ def cmd_attribute(args: argparse.Namespace) -> int:
     summary_path = out_dir / "summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
     summary_path.write_text(
-        json.dumps(summary, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n", encoding="utf-8"
+        json.dumps(summary, ensure_ascii=False, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
     )
     report_path = out_dir / "report.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
@@ -792,14 +793,26 @@ def cmd_next(args: argparse.Namespace) -> int:
     highlights, each with its citable insight-ref. Byte-stable for the same
     inputs; frozen_test case content is never exported."""
     spec = _load_spec(args.spec)
-    context = write_next_context(args.ledger, args.output, spec=spec, diagnosis_path=args.diagnosis, tail=args.tail)
+    context = write_next_context(
+        args.ledger,
+        args.output,
+        spec=spec,
+        diagnosis_path=args.diagnosis,
+        tail=args.tail,
+    )
     _print_json({"context": args.output, "bytes": len(context)})
     return 0
 
 
 def cmd_provenance(args: argparse.Namespace) -> int:
     manifest = write_run_manifest(args.ledger, args.output)
-    _print_json({"manifest": args.output, "kind": manifest["kind"], "rounds": manifest["rounds"]["count"]})
+    _print_json(
+        {
+            "manifest": args.output,
+            "kind": manifest["kind"],
+            "rounds": manifest["rounds"]["count"],
+        }
+    )
     return 0
 
 
@@ -812,7 +825,9 @@ def cmd_record_draft(args: argparse.Namespace) -> int:
     draft = render_promotion_draft(record)
     Path(args.output).parent.mkdir(parents=True, exist_ok=True)
     Path(args.output).write_text(draft, encoding="utf-8")
-    _print_json({"draft": args.output, "candidate": (record.get("candidate") or {}).get("ref")})
+    _print_json(
+        {"draft": args.output, "candidate": (record.get("candidate") or {}).get("ref")}
+    )
     return 0
 
 
@@ -1268,11 +1283,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_report.add_argument("--output", required=True, help="output Markdown path")
     p_report.set_defaults(func=cmd_report)
 
-    p_next = sub.add_parser("next", help="agent context export (untrusted reference material header included)")
-    p_next.add_argument("--spec", required=True, help="experiment spec YAML (objective.replay_metric ranks the best replay candidate, A2)")
+    p_next = sub.add_parser(
+        "next",
+        help="agent context export (untrusted reference material header included)",
+    )
+    p_next.add_argument(
+        "--spec",
+        required=True,
+        help="experiment spec YAML (objective.replay_metric ranks the best replay candidate, A2)",
+    )
     p_next.add_argument("--ledger", required=True, help="ledger JSONL")
     p_next.add_argument("--output", required=True, help="output Markdown path")
-    p_next.add_argument("--tail", type=int, default=10, help="how many recent records to include")
+    p_next.add_argument(
+        "--tail", type=int, default=10, help="how many recent records to include"
+    )
     p_next.add_argument(
         "--diagnosis",
         default=None,
@@ -1280,7 +1304,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_next.set_defaults(func=cmd_next)
 
-    p_prov = sub.add_parser("provenance", help="emit the recipe-lab-run-v1 manifest for a ledger")
+    p_prov = sub.add_parser(
+        "provenance", help="emit the recipe-lab-run-v1 manifest for a ledger"
+    )
     p_prov.add_argument("--ledger", required=True, help="ledger JSONL")
     p_prov.add_argument("--output", required=True, help="output manifest JSON path")
     p_prov.set_defaults(func=cmd_provenance)
