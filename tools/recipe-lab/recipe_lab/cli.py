@@ -13,8 +13,20 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .adapters.router_replay import fetch_replays, load_cases, records_to_cases, records_to_rows, write_cases
-from .attribution import attribute, load_records, render_markdown, summarize, write_jsonl
+from .adapters.router_replay import (
+    fetch_replays,
+    load_cases,
+    records_to_cases,
+    records_to_rows,
+    write_cases,
+)
+from .attribution import (
+    attribute,
+    load_records,
+    render_markdown,
+    summarize,
+    write_jsonl,
+)
 from .contract import ContractError, ExperimentSpec
 
 
@@ -60,7 +72,9 @@ def cmd_attribute(args: argparse.Namespace) -> int:
     jsonl_path = write_jsonl(rows, out_dir / "attribution.jsonl")
     report_path = out_dir / "report.md"
     report_path.parent.mkdir(parents=True, exist_ok=True)
-    report_path.write_text(render_markdown(summary, spec.workload.content_hash), encoding="utf-8")
+    report_path.write_text(
+        render_markdown(summary, spec.workload.content_hash), encoding="utf-8"
+    )
 
     _print_json(
         {
@@ -78,9 +92,13 @@ def cmd_collect_replays(args: argparse.Namespace) -> int:
     them against the labeled case list -> attribution input records, or with
     --unlabeled emit one raw diagnostic row per record (no labels needed)."""
     if args.unlabeled and args.cases:
-        raise SystemExit("collect-replays: --unlabeled and --cases are mutually exclusive")
+        raise SystemExit(
+            "collect-replays: --unlabeled and --cases are mutually exclusive"
+        )
     if not args.unlabeled and not args.cases:
-        raise SystemExit("collect-replays: one of --cases (labeled join) or --unlabeled (raw rows) is required")
+        raise SystemExit(
+            "collect-replays: one of --cases (labeled join) or --unlabeled (raw rows) is required"
+        )
     try:
         records = fetch_replays(
             args.url,
@@ -117,37 +135,73 @@ def build_parser() -> argparse.ArgumentParser:
         prog="recipe-lab",
         description="Closed-loop experiments for semantic-router routing recipes (RSI workbench).",
     )
-    parser.add_argument("--version", action="version", version=f"recipe-lab {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"recipe-lab {__version__}"
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_plan = sub.add_parser("plan", help="load and validate an experiment spec, print it normalized")
-    p_plan.add_argument("--spec", required=True, help="path to the experiment spec YAML")
+    p_plan = sub.add_parser(
+        "plan", help="load and validate an experiment spec, print it normalized"
+    )
+    p_plan.add_argument(
+        "--spec", required=True, help="path to the experiment spec YAML"
+    )
     p_plan.set_defaults(func=cmd_plan)
 
-    p_attr = sub.add_parser("attribute", help="run E1/E2/E3 misroute attribution over labeled records")
-    p_attr.add_argument("--spec", required=True, help="path to the experiment spec YAML (provides oracle policy)")
-    p_attr.add_argument("--records", required=True, help="path to the attribution records JSONL")
-    p_attr.add_argument("--output-dir", default=".", help="directory for attribution.jsonl and report.md")
+    p_attr = sub.add_parser(
+        "attribute", help="run E1/E2/E3 misroute attribution over labeled records"
+    )
+    p_attr.add_argument(
+        "--spec",
+        required=True,
+        help="path to the experiment spec YAML (provides oracle policy)",
+    )
+    p_attr.add_argument(
+        "--records", required=True, help="path to the attribution records JSONL"
+    )
+    p_attr.add_argument(
+        "--output-dir",
+        default=".",
+        help="directory for attribution.jsonl and report.md",
+    )
     p_attr.set_defaults(func=cmd_attribute)
 
     p_collect = sub.add_parser(
         "collect-replays",
         help="pull router_replay records from the management API and join them with labeled cases (--unlabeled for raw diagnostic rows)",
     )
-    p_collect.add_argument("--url", required=True, help="router management base URL, e.g. http://127.0.0.1:8080")
     p_collect.add_argument(
-        "--cases", default=None, help="labeled case list JSONL (case_id/prompt/truth); omit with --unlabeled"
+        "--url",
+        required=True,
+        help="router management base URL, e.g. http://127.0.0.1:8080",
+    )
+    p_collect.add_argument(
+        "--cases",
+        default=None,
+        help="labeled case list JSONL (case_id/prompt/truth); omit with --unlabeled",
     )
     p_collect.add_argument(
         "--unlabeled",
         action="store_true",
         help="skip the labeled join and emit one raw diagnostic row per replay record (no --cases needed)",
     )
-    p_collect.add_argument("--output", required=True, help="output attribution-records JSONL path")
-    p_collect.add_argument("--family", default="d3", help="signal family tag for the records")
-    p_collect.add_argument("--no-details", action="store_true", help="do not request showDetails=true")
-    p_collect.add_argument("--timeout", type=float, default=30.0, help="management API timeout in seconds")
-    p_collect.add_argument("--api-key-env", default=None, help="env var name holding the management API bearer token")
+    p_collect.add_argument(
+        "--output", required=True, help="output attribution-records JSONL path"
+    )
+    p_collect.add_argument(
+        "--family", default="d3", help="signal family tag for the records"
+    )
+    p_collect.add_argument(
+        "--no-details", action="store_true", help="do not request showDetails=true"
+    )
+    p_collect.add_argument(
+        "--timeout", type=float, default=30.0, help="management API timeout in seconds"
+    )
+    p_collect.add_argument(
+        "--api-key-env",
+        default=None,
+        help="env var name holding the management API bearer token",
+    )
     p_collect.set_defaults(func=cmd_collect_replays)
 
     return parser

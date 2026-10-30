@@ -5,8 +5,8 @@ from __future__ import annotations
 import copy
 
 import pytest
-
 from recipe_lab.contract import ContractError, ExperimentSpec, OraclePolicy
+
 from tests.fixtures import POLICY, VALID_SPEC
 
 
@@ -83,7 +83,7 @@ def test_zero_rounds_rejected():
 def test_bad_stack_mode_rejected():
     raw = copy.deepcopy(VALID_SPEC)
     raw["stack"]["mode"] = "possessed"
-    with pytest.raises(ContractError, match="stack.mode"):
+    with pytest.raises(ContractError, match=r"stack\.mode"):
         ExperimentSpec.from_dict(raw)
 
 

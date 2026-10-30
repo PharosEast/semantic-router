@@ -43,6 +43,7 @@ answer_ok stays null here: correctness is joined later from saved answers
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -65,7 +66,6 @@ _MIN_PAGE_SIZE = 4
 def _get_json(url: str, timeout: float, api_key_env: str | None) -> Any:
     """GET one JSON document from the management API (shared error mapping)."""
     request = urllib.request.Request(url, headers={"Accept": "application/json"})
-    import os
 
     if api_key_env and os.environ.get(api_key_env):
         request.add_header("Authorization", f"Bearer {os.environ[api_key_env]}")
@@ -73,7 +73,9 @@ def _get_json(url: str, timeout: float, api_key_env: str | None) -> Any:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        raise ReplayFetchError(f"management API returned HTTP {exc.code}: {url}") from exc
+        raise ReplayFetchError(
+            f"management API returned HTTP {exc.code}: {url}"
+        ) from exc
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise ReplayFetchError(f"cannot reach management API at {url}: {exc}") from exc
     except json.JSONDecodeError as exc:
@@ -116,7 +118,9 @@ def fetch_replays(
             raise
         page = payload.get("data", payload) if isinstance(payload, dict) else payload
         if not isinstance(page, list):
-            raise ReplayFetchError("unexpected replay list payload: expected {'data': [...]}" )
+            raise ReplayFetchError(
+                "unexpected replay list payload: expected {'data': [...]}"
+            )
         records.extend(record for record in page if isinstance(record, dict))
         if not isinstance(payload, dict) or not payload.get("has_more"):
             break
@@ -143,18 +147,26 @@ def load_cases(path: str | Path) -> list[CaseJoin]:
         raise ContractError(f"cases file not found: {path}")
     cases: list[CaseJoin] = []
     with path.open("r", encoding="utf-8") as fh:
-        for lineno, line in enumerate(fh, 1):
-            line = line.strip()
+        for lineno, raw_line in enumerate(fh, 1):
+            line = raw_line.strip()
             if not line:
                 continue
             try:
                 raw = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"cases line {lineno} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"cases line {lineno} is not valid JSON: {exc}"
+                ) from exc
             for name in ("case_id", "prompt", "truth"):
                 if not isinstance(raw.get(name), str) or not raw[name].strip():
-                    raise ContractError(f"cases line {lineno}: {name} must be a non-empty string")
-            cases.append(CaseJoin(case_id=raw["case_id"], prompt=raw["prompt"], truth=raw["truth"]))
+                    raise ContractError(
+                        f"cases line {lineno}: {name} must be a non-empty string"
+                    )
+            cases.append(
+                CaseJoin(
+                    case_id=raw["case_id"], prompt=raw["prompt"], truth=raw["truth"]
+                )
+            )
     return cases
 
 
@@ -195,7 +207,10 @@ def record_to_case(
         "answer_ok": None,  # correctness is joined later from the answer bank
         "request_id": str(request_id),
         "signal_values": _record_field(record, "signal_values", "SignalValues") or {},
-        "signal_confidences": _record_field(record, "signal_confidences", "SignalConfidences") or {},
+        "signal_confidences": _record_field(
+            record, "signal_confidences", "SignalConfidences"
+        )
+        or {},
         "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
     }
     return row, "matched"
@@ -214,12 +229,19 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         prompt = _record_field(record, "prompt", "Prompt")
         rows.append(
             {
-                "request_id": str(_record_field(record, "request_id", "RequestID") or ""),
+                "request_id": str(
+                    _record_field(record, "request_id", "RequestID") or ""
+                ),
                 "matched_decision": _record_field(record, "decision", "Decision") or "",
-                "routed": _record_field(record, "selected_model", "SelectedModel") or "",
+                "routed": _record_field(record, "selected_model", "SelectedModel")
+                or "",
                 "prompt": prompt if isinstance(prompt, str) else "",
-                "signal_values": _record_field(record, "signal_values", "SignalValues") or {},
-                "signal_confidences": _record_field(record, "signal_confidences", "SignalConfidences") or {},
+                "signal_values": _record_field(record, "signal_values", "SignalValues")
+                or {},
+                "signal_confidences": _record_field(
+                    record, "signal_confidences", "SignalConfidences"
+                )
+                or {},
                 "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
             }
         )
@@ -241,7 +263,12 @@ def records_to_cases(
     for case in cases:
         by_prompt.setdefault(case.prompt, case)
     rows: list[dict[str, Any]] = []
-    stats: dict[str, int] = {"matched": 0, "no_prompt": 0, "unlabeled": 0, "duplicate_prompt": 0}
+    stats: dict[str, int] = {
+        "matched": 0,
+        "no_prompt": 0,
+        "unlabeled": 0,
+        "duplicate_prompt": 0,
+    }
     seen_prompts: set[str] = set()
     for record in records:
         row, state = record_to_case(record, by_prompt, family=family)
@@ -263,7 +290,11 @@ def write_cases(cases: list[CaseJoin], path: str | Path) -> Path:
         for case in cases:
             fh.write(
                 json.dumps(
-                    {"case_id": case.case_id, "prompt": case.prompt, "truth": case.truth},
+                    {
+                        "case_id": case.case_id,
+                        "prompt": case.prompt,
+                        "truth": case.truth,
+                    },
                     ensure_ascii=False,
                 )
                 + "\n"

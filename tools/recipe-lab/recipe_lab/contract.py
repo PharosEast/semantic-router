@@ -52,7 +52,9 @@ def _require_mapping(value: Any, where: str) -> dict:
 
 def _require_number(value: Any, where: str) -> float:
     _require(
-        isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value),
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value),
         f"{where} must be a finite number",
     )
     return float(value)
@@ -65,16 +67,24 @@ class Objective:
     min_improvement_pct: float
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Objective":
+    def from_dict(cls, raw: dict) -> Objective:
         metric_key = raw.get("metric_key")
-        _require(isinstance(metric_key, str) and metric_key.strip(), "objective.metric_key must be a non-empty string")
+        _require(
+            isinstance(metric_key, str) and metric_key.strip(),
+            "objective.metric_key must be a non-empty string",
+        )
         _require(
             all(part.strip() for part in metric_key.split(".")),
             "objective.metric_key must be a non-empty dotted JSON key",
         )
         direction = raw.get("direction")
-        _require(direction in DIRECTIONS, f"objective.direction must be one of {sorted(DIRECTIONS)}")
-        pct = _require_number(raw.get("min_improvement_pct", 0.0), "objective.min_improvement_pct")
+        _require(
+            direction in DIRECTIONS,
+            f"objective.direction must be one of {sorted(DIRECTIONS)}",
+        )
+        pct = _require_number(
+            raw.get("min_improvement_pct", 0.0), "objective.min_improvement_pct"
+        )
         _require(pct >= 0, "objective.min_improvement_pct must be >= 0")
         return cls(metric_key=metric_key, direction=direction, min_improvement_pct=pct)
 
@@ -93,20 +103,29 @@ class Workload:
     profile: str
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Workload":
+    def from_dict(cls, raw: dict) -> Workload:
         manifest = raw.get("manifest")
-        _require(isinstance(manifest, str) and manifest.strip(), "workload.manifest must be a non-empty string")
+        _require(
+            isinstance(manifest, str) and manifest.strip(),
+            "workload.manifest must be a non-empty string",
+        )
         content_hash = raw.get("content_hash")
         _require(
             isinstance(content_hash, str) and content_hash.strip(),
             "workload.content_hash is required (frozen dataset hash; cross-round comparability depends on it)",
         )
         profile = raw.get("profile", "quick")
-        _require(profile in PROFILES, f"workload.profile must be one of {sorted(PROFILES)}")
+        _require(
+            profile in PROFILES, f"workload.profile must be one of {sorted(PROFILES)}"
+        )
         return cls(manifest=manifest, content_hash=content_hash, profile=profile)
 
     def to_dict(self) -> dict:
-        return {"manifest": self.manifest, "content_hash": self.content_hash, "profile": self.profile}
+        return {
+            "manifest": self.manifest,
+            "content_hash": self.content_hash,
+            "profile": self.profile,
+        }
 
 
 @dataclass(frozen=True)
@@ -117,10 +136,16 @@ class OraclePolicy:
     mapping: dict[str, str]
 
     @classmethod
-    def from_dict(cls, raw: Any) -> "OraclePolicy":
-        _require(isinstance(raw, dict) and raw, "attribution.oracle_policy must be a non-empty mapping of label -> model")
+    def from_dict(cls, raw: Any) -> OraclePolicy:
+        _require(
+            isinstance(raw, dict) and raw,
+            "attribution.oracle_policy must be a non-empty mapping of label -> model",
+        )
         for label, model in raw.items():
-            _require(isinstance(label, str) and label.strip(), f"oracle policy label must be a non-empty string: {label!r}")
+            _require(
+                isinstance(label, str) and label.strip(),
+                f"oracle policy label must be a non-empty string: {label!r}",
+            )
             _require(
                 isinstance(model, str) and model.strip(),
                 f"oracle policy model for label {label!r} must be a non-empty string",
@@ -144,9 +169,12 @@ class Gate:
     floor: str | float  # "baseline" or a numeric floor
 
     @classmethod
-    def from_dict(cls, raw: dict, index: int) -> "Gate":
+    def from_dict(cls, raw: dict, index: int) -> Gate:
         name = raw.get("name")
-        _require(isinstance(name, str) and name.strip(), f"gates[{index}].name must be a non-empty string")
+        _require(
+            isinstance(name, str) and name.strip(),
+            f"gates[{index}].name must be a non-empty string",
+        )
         metric = raw.get("metric")
         _require(
             isinstance(metric, str) and all(part.strip() for part in metric.split(".")),
@@ -167,15 +195,23 @@ class Budget:
     max_minutes_per_trial: float
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Budget":
+    def from_dict(cls, raw: dict) -> Budget:
         rounds = raw.get("rounds", 1)
-        _require(isinstance(rounds, int) and not isinstance(rounds, bool) and rounds >= 1, "budget.rounds must be an integer >= 1")
-        minutes = _require_number(raw.get("max_minutes_per_trial", 120.0), "budget.max_minutes_per_trial")
+        _require(
+            isinstance(rounds, int) and not isinstance(rounds, bool) and rounds >= 1,
+            "budget.rounds must be an integer >= 1",
+        )
+        minutes = _require_number(
+            raw.get("max_minutes_per_trial", 120.0), "budget.max_minutes_per_trial"
+        )
         _require(minutes > 0, "budget.max_minutes_per_trial must be > 0")
         return cls(rounds=rounds, max_minutes_per_trial=minutes)
 
     def to_dict(self) -> dict:
-        return {"rounds": self.rounds, "max_minutes_per_trial": self.max_minutes_per_trial}
+        return {
+            "rounds": self.rounds,
+            "max_minutes_per_trial": self.max_minutes_per_trial,
+        }
 
 
 @dataclass(frozen=True)
@@ -185,17 +221,29 @@ class Stack:
     baseline_ref: str
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Stack":
+    def from_dict(cls, raw: dict) -> Stack:
         mode = raw.get("mode", "external")
-        _require(mode in STACK_MODES, f"stack.mode must be one of {sorted(STACK_MODES)}")
+        _require(
+            mode in STACK_MODES, f"stack.mode must be one of {sorted(STACK_MODES)}"
+        )
         endpoint = raw.get("endpoint")
-        _require(isinstance(endpoint, str) and endpoint.strip(), "stack.endpoint must be a non-empty string")
+        _require(
+            isinstance(endpoint, str) and endpoint.strip(),
+            "stack.endpoint must be a non-empty string",
+        )
         baseline_ref = raw.get("baseline_ref")
-        _require(isinstance(baseline_ref, str) and baseline_ref.strip(), "stack.baseline_ref must be a non-empty string")
+        _require(
+            isinstance(baseline_ref, str) and baseline_ref.strip(),
+            "stack.baseline_ref must be a non-empty string",
+        )
         return cls(mode=mode, endpoint=endpoint, baseline_ref=baseline_ref)
 
     def to_dict(self) -> dict:
-        return {"mode": self.mode, "endpoint": self.endpoint, "baseline_ref": self.baseline_ref}
+        return {
+            "mode": self.mode,
+            "endpoint": self.endpoint,
+            "baseline_ref": self.baseline_ref,
+        }
 
 
 @dataclass(frozen=True)
@@ -204,11 +252,16 @@ class Evaluation:
     final_tier: str
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Evaluation":
+    def from_dict(cls, raw: dict) -> Evaluation:
         search_tier = raw.get("search_tier", "replay")
         final_tier = raw.get("final_tier", "live")
-        _require(search_tier in TIERS, f"evaluation.search_tier must be one of {sorted(TIERS)}")
-        _require(final_tier in TIERS, f"evaluation.final_tier must be one of {sorted(TIERS)}")
+        _require(
+            search_tier in TIERS,
+            f"evaluation.search_tier must be one of {sorted(TIERS)}",
+        )
+        _require(
+            final_tier in TIERS, f"evaluation.final_tier must be one of {sorted(TIERS)}"
+        )
         return cls(search_tier=search_tier, final_tier=final_tier)
 
     def to_dict(self) -> dict:
@@ -222,19 +275,25 @@ class ExperimentSpec:
     workload: Workload
     oracle_policy: OraclePolicy
     gates: tuple[Gate, ...] = field(default=())
-    budget: Budget = field(default_factory=lambda: Budget(rounds=1, max_minutes_per_trial=120.0))
+    budget: Budget = field(
+        default_factory=lambda: Budget(rounds=1, max_minutes_per_trial=120.0)
+    )
     stack: Stack | None = None
-    evaluation: Evaluation = field(default_factory=lambda: Evaluation(search_tier="replay", final_tier="live"))
+    evaluation: Evaluation = field(
+        default_factory=lambda: Evaluation(search_tier="replay", final_tier="live")
+    )
 
     @classmethod
-    def from_dict(cls, raw: Any) -> "ExperimentSpec":
+    def from_dict(cls, raw: Any) -> ExperimentSpec:
         raw = _require_mapping(raw, "spec")
         api_version = raw.get("api_version")
         _require(
             api_version == API_VERSION,
             f"api_version must be {API_VERSION!r} (got {api_version!r})",
         )
-        objective = Objective.from_dict(_require_mapping(raw.get("objective"), "objective"))
+        objective = Objective.from_dict(
+            _require_mapping(raw.get("objective"), "objective")
+        )
         workload = Workload.from_dict(_require_mapping(raw.get("workload"), "workload"))
         attribution = _require_mapping(raw.get("attribution", {}), "attribution")
         oracle_policy = OraclePolicy.from_dict(attribution.get("oracle_policy"))
@@ -243,8 +302,14 @@ class ExperimentSpec:
         gates = tuple(Gate.from_dict(g, i) for i, g in enumerate(gates_raw))
         budget = Budget.from_dict(_require_mapping(raw.get("budget", {}), "budget"))
         stack_raw = raw.get("stack")
-        stack = Stack.from_dict(_require_mapping(stack_raw, "stack")) if stack_raw is not None else None
-        evaluation = Evaluation.from_dict(_require_mapping(raw.get("evaluation", {}), "evaluation"))
+        stack = (
+            Stack.from_dict(_require_mapping(stack_raw, "stack"))
+            if stack_raw is not None
+            else None
+        )
+        evaluation = Evaluation.from_dict(
+            _require_mapping(raw.get("evaluation", {}), "evaluation")
+        )
         return cls(
             api_version=api_version,
             objective=objective,
@@ -257,14 +322,16 @@ class ExperimentSpec:
         )
 
     @classmethod
-    def from_yaml(cls, path: str | Path) -> "ExperimentSpec":
+    def from_yaml(cls, path: str | Path) -> ExperimentSpec:
         path = Path(path)
         _require(path.is_file(), f"spec file not found: {path}")
         with path.open("r", encoding="utf-8") as fh:
             try:
                 raw = yaml.safe_load(fh)
             except yaml.YAMLError as exc:
-                raise ContractError(f"spec file is not valid YAML: {path} ({exc})") from exc
+                raise ContractError(
+                    f"spec file is not valid YAML: {path} ({exc})"
+                ) from exc
         return cls.from_dict(raw)
 
     def validate_policy_covers(self, labels: list[str]) -> list[str]:
@@ -295,15 +362,24 @@ class Candidate:
     insight_refs: tuple[str, ...] = field(default=())
 
     @classmethod
-    def from_dict(cls, raw: dict) -> "Candidate":
+    def from_dict(cls, raw: dict) -> Candidate:
         kind = raw.get("kind")
-        _require(kind in CANDIDATE_KINDS, f"candidate.kind must be one of {sorted(CANDIDATE_KINDS)}")
+        _require(
+            kind in CANDIDATE_KINDS,
+            f"candidate.kind must be one of {sorted(CANDIDATE_KINDS)}",
+        )
         ref = raw.get("ref")
-        _require(isinstance(ref, str) and ref.strip(), "candidate.ref must be a non-empty string")
+        _require(
+            isinstance(ref, str) and ref.strip(),
+            "candidate.ref must be a non-empty string",
+        )
         provenance = raw.get("provenance", {})
         provenance = _require_mapping(provenance, "candidate.provenance")
         insight_refs = provenance.get("insight_refs", [])
-        _require(isinstance(insight_refs, list), "candidate.provenance.insight_refs must be a list")
+        _require(
+            isinstance(insight_refs, list),
+            "candidate.provenance.insight_refs must be a list",
+        )
         return cls(
             kind=kind,
             ref=ref,
