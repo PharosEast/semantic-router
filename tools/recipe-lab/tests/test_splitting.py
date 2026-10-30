@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from recipe_lab.contract import ContractError
 from recipe_lab.splitting import (
     default_split_rule,
@@ -46,7 +45,9 @@ def test_groups_never_span_two_splits():
     seen: dict[str, str] = {}
     for name, rows in split_map.items():
         for row in rows:
-            assert seen.setdefault(row["source_id"], name) == name, "source group leaked across splits"
+            assert (
+                seen.setdefault(row["source_id"], name) == name
+            ), "source group leaked across splits"
     assert set(split_map) == {"calib", "dev", "frozen_test"}
 
 
@@ -60,7 +61,7 @@ def test_missing_group_key_falls_back_to_singleton_groups():
 def test_parse_ratios_rejects_bad_input():
     with pytest.raises(ContractError, match="three"):
         parse_ratios("0.5,0.5")
-    with pytest.raises(ContractError, match="sum to 1.0"):
+    with pytest.raises(ContractError, match=r"sum to 1.0"):
         parse_ratios("0.5,0.5,0.5")
     assert parse_ratios("0.4,0.3,0.3") == (0.4, 0.3, 0.3)
 
@@ -68,8 +69,10 @@ def test_parse_ratios_rejects_bad_input():
 def test_load_cases_requires_case_id_and_prompt(tmp_path):
     path = tmp_path / "cases.jsonl"
     path.write_text(
-        json.dumps({"case_id": "c1", "prompt": "p"}) + "\n"
-        + json.dumps({"case_id": "c2"}) + "\n",
+        json.dumps({"case_id": "c1", "prompt": "p"})
+        + "\n"
+        + json.dumps({"case_id": "c2"})
+        + "\n",
         encoding="utf-8",
     )
     with pytest.raises(ContractError, match="prompt"):
@@ -77,7 +80,10 @@ def test_load_cases_requires_case_id_and_prompt(tmp_path):
 
 
 def test_default_split_rule_text():
-    assert default_split_rule("source_id", 42, (0.4, 0.3, 0.3)) == "group by source_id; seed 42; 40/30/30"
+    assert (
+        default_split_rule("source_id", 42, (0.4, 0.3, 0.3))
+        == "group by source_id; seed 42; 40/30/30"
+    )
 
 
 def test_group_cases_orders_deterministically():

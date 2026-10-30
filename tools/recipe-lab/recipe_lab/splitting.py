@@ -16,7 +16,11 @@ from typing import Any
 
 from .contract import SPLIT_NAMES, ContractError, dataset_content_hash
 
-SPLIT_FILES = {"calib": "calib.jsonl", "dev": "dev.jsonl", "frozen_test": "frozen_test.jsonl"}
+SPLIT_FILES = {
+    "calib": "calib.jsonl",
+    "dev": "dev.jsonl",
+    "frozen_test": "frozen_test.jsonl",
+}
 
 
 def load_cases(path: str | Path) -> list[dict[str, Any]]:
@@ -28,7 +32,9 @@ def load_cases(path: str | Path) -> list[dict[str, Any]]:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"{path}:{line_no} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"{path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
             if not isinstance(row, dict):
                 raise ContractError(f"{path}:{line_no} must be a JSON object")
             if not row.get("case_id"):
@@ -44,7 +50,9 @@ def load_cases(path: str | Path) -> list[dict[str, Any]]:
 def parse_ratios(raw: str) -> tuple[float, float, float]:
     parts = [p.strip() for p in raw.split(",")]
     if len(parts) != 3:
-        raise ContractError(f"--ratios must be three comma-separated numbers, got {raw!r}")
+        raise ContractError(
+            f"--ratios must be three comma-separated numbers, got {raw!r}"
+        )
     try:
         values = tuple(float(p) for p in parts)
     except ValueError as exc:
@@ -54,7 +62,9 @@ def parse_ratios(raw: str) -> tuple[float, float, float]:
     return values
 
 
-def group_cases(cases: list[dict[str, Any]], group_key: str) -> dict[str, list[dict[str, Any]]]:
+def group_cases(
+    cases: list[dict[str, Any]], group_key: str
+) -> dict[str, list[dict[str, Any]]]:
     """Group cases so one source never spans two splits (leakage guard).
     Cases without the group key fall back to one singleton group per case."""
     groups: dict[str, list[dict[str, Any]]] = {}
@@ -91,8 +101,10 @@ def split_cases(
     }
 
 
-def default_split_rule(group_key: str, seed: int, ratios: tuple[float, float, float]) -> str:
-    pcts = [int(round(r * 100)) for r in ratios]
+def default_split_rule(
+    group_key: str, seed: int, ratios: tuple[float, float, float]
+) -> str:
+    pcts = [round(r * 100) for r in ratios]
     return f"group by {group_key}; seed {seed}; {pcts[0]}/{pcts[1]}/{pcts[2]}"
 
 
@@ -103,10 +115,13 @@ def write_splits(
     out_dir = Path(output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     splits: dict[str, dict[str, str]] = {}
-    for name in SPLIT_FILES:
-        target = out_dir / SPLIT_FILES[name]
+    for name, split_file in SPLIT_FILES.items():
+        target = out_dir / split_file
         with target.open("w", encoding="utf-8") as fh:
             for case in split_cases_map[name]:
                 fh.write(json.dumps(case, ensure_ascii=False) + "\n")
-        splits[name] = {"manifest": SPLIT_FILES[name], "content_hash": dataset_content_hash(target)}
+        splits[name] = {
+            "manifest": SPLIT_FILES[name],
+            "content_hash": dataset_content_hash(target),
+        }
     return splits

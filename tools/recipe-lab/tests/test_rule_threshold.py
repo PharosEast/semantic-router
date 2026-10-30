@@ -12,10 +12,10 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from recipe_lab.cli import main
 from recipe_lab.contract import ContractError
 from recipe_lab.proposers import rule_threshold
+
 from tests.test_cli import _write_frozen_spec
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "agent_recipe_min.yaml"
@@ -45,7 +45,9 @@ def test_find_threshold_sites_golden_four():
 
 
 def test_group_sites_by_signal_op_value():
-    groups = rule_threshold.group_sites(rule_threshold.find_threshold_sites(_load_base()))
+    groups = rule_threshold.group_sites(
+        rule_threshold.find_threshold_sites(_load_base())
+    )
     assert list(groups) == [("difficulty", "gte", 2.5)]
     assert len(groups[("difficulty", "gte", 2.5)]) == 4
 
@@ -80,7 +82,9 @@ def test_signal_range_unknown_signal_requires_explicit_bounds():
 
 def test_propose_values_moves_all_selected_sites():
     base = _load_base()
-    candidates = rule_threshold.propose_rule_thresholds(base, "difficulty", values=[1.75])
+    candidates = rule_threshold.propose_rule_thresholds(
+        base, "difficulty", values=[1.75]
+    )
     assert len(candidates) == 1
     candidate = candidates[0]
     assert candidate.new_value == 1.75
@@ -88,13 +92,19 @@ def test_propose_values_moves_all_selected_sites():
     assert len(candidate.sites) == 4
     # the base config is untouched
     assert all(s.value == 2.5 for s in rule_threshold.find_threshold_sites(base))
-    applied = [s for s in rule_threshold.find_threshold_sites(candidate.config) if s.signal == "difficulty"]
+    applied = [
+        s
+        for s in rule_threshold.find_threshold_sites(candidate.config)
+        if s.signal == "difficulty"
+    ]
     assert all(s.value == 1.75 for s in applied)
     assert sum(1 for s in applied if s.negated) == 2
 
 
 def test_propose_deltas_moves_relative_to_old():
-    candidates = rule_threshold.propose_rule_thresholds(_load_base(), "difficulty", deltas=[-0.75])
+    candidates = rule_threshold.propose_rule_thresholds(
+        _load_base(), "difficulty", deltas=[-0.75]
+    )
     assert len(candidates) == 1
     assert candidates[0].new_value == 1.75
 
@@ -103,7 +113,9 @@ def test_propose_deltas_rejects_mixed_old_values():
     base = _load_base()
     base["routing"]["decisions"][5]["rules"] = {
         "operator": "AND",
-        "conditions": [{"type": "decision", "name": "difficulty", "predicate": {"gte": 1.0}}]
+        "conditions": [
+            {"type": "decision", "name": "difficulty", "predicate": {"gte": 1.0}}
+        ],
     }
     with pytest.raises(ContractError, match="mixed values"):
         rule_threshold.propose_rule_thresholds(base, "difficulty", deltas=[-0.5])
@@ -113,27 +125,42 @@ def test_propose_from_filters_sites():
     base = _load_base()
     base["routing"]["decisions"][5]["rules"] = {
         "operator": "AND",
-        "conditions": [{"type": "decision", "name": "difficulty", "predicate": {"gte": 1.0}}]
+        "conditions": [
+            {"type": "decision", "name": "difficulty", "predicate": {"gte": 1.0}}
+        ],
     }
-    candidates = rule_threshold.propose_rule_thresholds(base, "difficulty", values=[1.75], from_value=2.5)
+    candidates = rule_threshold.propose_rule_thresholds(
+        base, "difficulty", values=[1.75], from_value=2.5
+    )
     applied = sorted(
-        s.value for s in rule_threshold.find_threshold_sites(candidates[0].config) if s.signal == "difficulty"
+        s.value
+        for s in rule_threshold.find_threshold_sites(candidates[0].config)
+        if s.signal == "difficulty"
     )
     assert applied == [1.0, 1.75, 1.75, 1.75, 1.75]
 
 
 def test_propose_clamps_to_signal_range():
-    candidates = rule_threshold.propose_rule_thresholds(_load_base(), "difficulty", values=[9.0, 1.75])
+    candidates = rule_threshold.propose_rule_thresholds(
+        _load_base(), "difficulty", values=[9.0, 1.75]
+    )
     assert [c.new_value for c in candidates] == [4.0, 1.75]
 
 
 def test_propose_explicit_lo_hi_overrides_range():
-    candidates = rule_threshold.propose_rule_thresholds(_load_base(), "difficulty", values=[3.0], lo=0.0, hi=1.0)
+    candidates = rule_threshold.propose_rule_thresholds(
+        _load_base(), "difficulty", values=[3.0], lo=0.0, hi=1.0
+    )
     assert [c.new_value for c in candidates] == [1.0]
 
 
 def test_propose_never_proposes_the_old_value():
-    assert rule_threshold.propose_rule_thresholds(_load_base(), "difficulty", values=[2.5, 2.5]) == []
+    assert (
+        rule_threshold.propose_rule_thresholds(
+            _load_base(), "difficulty", values=[2.5, 2.5]
+        )
+        == []
+    )
 
 
 def test_propose_requires_values_or_deltas():
@@ -149,7 +176,9 @@ def test_propose_decisions_filter_moves_only_selected():
         _load_base(), "difficulty", values=[1.75], decisions=["complex_general"]
     )
     applied = rule_threshold.find_threshold_sites(candidates[0].config)
-    moved = [s.decision for s in applied if s.signal == "difficulty" and s.value == 1.75]
+    moved = [
+        s.decision for s in applied if s.signal == "difficulty" and s.value == 1.75
+    ]
     assert moved == ["complex_general"]
     assert len([s for s in applied if s.signal == "difficulty" and s.value == 2.5]) == 3
 
@@ -157,13 +186,20 @@ def test_propose_decisions_filter_moves_only_selected():
 def test_propose_unknown_decision_requires_allow_partial():
     with pytest.raises(ContractError, match="--allow-partial"):
         rule_threshold.propose_rule_thresholds(
-            _load_base(), "difficulty", values=[1.75], decisions=["complex_general", "no_such"]
+            _load_base(),
+            "difficulty",
+            values=[1.75],
+            decisions=["complex_general", "no_such"],
         )
 
 
 def test_propose_allow_partial_warns_and_moves_covered(capsys):
     candidates = rule_threshold.propose_rule_thresholds(
-        _load_base(), "difficulty", values=[1.75], decisions=["complex_general", "no_such"], allow_partial=True
+        _load_base(),
+        "difficulty",
+        values=[1.75],
+        decisions=["complex_general", "no_such"],
+        allow_partial=True,
     )
     assert len(candidates) == 1
     assert len(candidates[0].sites) == 1
@@ -203,7 +239,11 @@ def test_cli_golden_bug3_calibration(tmp_path, capsys):
     config_path = Path(parsed["files"][0])
     assert config_path.name == "candidate-000-difficulty-1.75.yaml"
     applied = yaml.safe_load(config_path.read_text(encoding="utf-8"))
-    sites = [s for s in rule_threshold.find_threshold_sites(applied) if s.signal == "difficulty"]
+    sites = [
+        s
+        for s in rule_threshold.find_threshold_sites(applied)
+        if s.signal == "difficulty"
+    ]
     assert len(sites) == 4
     assert all(s.value == 1.75 for s in sites)
     assert sorted(s.decision for s in sites) == [
@@ -214,16 +254,46 @@ def test_cli_golden_bug3_calibration(tmp_path, capsys):
     ]
     assert sum(1 for s in sites if s.negated) == 2
     # the sidecar carries exact provenance for `run` to record in the ledger
-    sidecar = json.loads(config_path.with_suffix(".candidate.json").read_text(encoding="utf-8"))
+    sidecar = json.loads(
+        config_path.with_suffix(".candidate.json").read_text(encoding="utf-8")
+    )
     assert sidecar["kind"] == "config"
     assert sidecar["ref"] == "config-rev:difficulty=1.75"
     assert sidecar["provenance"]["proposer"] == "rule-threshold"
     assert sidecar["provenance"]["insight_refs"] == []
     assert sidecar["sites"] == [
-        {"decision": "domain_code_complex", "signal": "difficulty", "op": "gte", "from": 2.5, "to": 1.75, "negated": False},
-        {"decision": "domain_code", "signal": "difficulty", "op": "gte", "from": 2.5, "to": 1.75, "negated": True},
-        {"decision": "complex_general", "signal": "difficulty", "op": "gte", "from": 2.5, "to": 1.75, "negated": False},
-        {"decision": "medium_general", "signal": "difficulty", "op": "gte", "from": 2.5, "to": 1.75, "negated": True},
+        {
+            "decision": "domain_code_complex",
+            "signal": "difficulty",
+            "op": "gte",
+            "from": 2.5,
+            "to": 1.75,
+            "negated": False,
+        },
+        {
+            "decision": "domain_code",
+            "signal": "difficulty",
+            "op": "gte",
+            "from": 2.5,
+            "to": 1.75,
+            "negated": True,
+        },
+        {
+            "decision": "complex_general",
+            "signal": "difficulty",
+            "op": "gte",
+            "from": 2.5,
+            "to": 1.75,
+            "negated": False,
+        },
+        {
+            "decision": "medium_general",
+            "signal": "difficulty",
+            "op": "gte",
+            "from": 2.5,
+            "to": 1.75,
+            "negated": True,
+        },
     ]
 
 
@@ -316,9 +386,17 @@ def test_run_all_candidates_rejected_exits_2(tmp_path, capsys):
     cands.mkdir()
     (cands / "bad.yaml").write_text("routing: {}\n", encoding="utf-8")
     validator = tmp_path / "validator.sh"
-    validator.write_text("#!/bin/sh\necho 'signal unknown_signal not found' >&2\nexit 1\n", encoding="utf-8")
+    validator.write_text(
+        "#!/bin/sh\necho 'signal unknown_signal not found' >&2\nexit 1\n",
+        encoding="utf-8",
+    )
     validator.chmod(0o755)
-    args = _run_args(tmp_path, spec_path, cases, cands) + ["--validate", "--validate-bin", str(validator)]
+    args = [
+        *_run_args(tmp_path, spec_path, cases, cands),
+        "--validate",
+        "--validate-bin",
+        str(validator),
+    ]
     assert main(args) == 2
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["evaluated"] == 0
@@ -326,7 +404,10 @@ def test_run_all_candidates_rejected_exits_2(tmp_path, capsys):
     assert parsed["rejected"][0]["path"].endswith("bad.yaml")
     assert "config validate exit 1" in parsed["rejected"][0]["reason"]
     # nothing reached the ledger
-    assert not (tmp_path / "ledger.jsonl").exists() or (tmp_path / "ledger.jsonl").read_text(encoding="utf-8") == ""
+    assert (
+        not (tmp_path / "ledger.jsonl").exists()
+        or (tmp_path / "ledger.jsonl").read_text(encoding="utf-8") == ""
+    )
 
 
 def test_run_validate_missing_binary_exits_2(tmp_path, capsys):
@@ -335,7 +416,12 @@ def test_run_validate_missing_binary_exits_2(tmp_path, capsys):
     cands = tmp_path / "cands"
     cands.mkdir()
     (cands / "c.yaml").write_text("routing: {}\n", encoding="utf-8")
-    args = _run_args(tmp_path, spec_path, cases, cands) + ["--validate", "--validate-bin", str(tmp_path / "no-such-bin")]
+    args = [
+        *_run_args(tmp_path, spec_path, cases, cands),
+        "--validate",
+        "--validate-bin",
+        str(tmp_path / "no-such-bin"),
+    ]
     assert main(args) == 2
     assert "validator binary not found" in capsys.readouterr().err
 
@@ -348,7 +434,9 @@ def test_run_sidecar_provenance_and_partial_rejection(monkeypatch, tmp_path, cap
     cands = tmp_path / "cands"
     cands.mkdir()
     # candidate A: with sidecar provenance (valid under the stub validator)
-    (cands / "candidate-000-difficulty-1.75.yaml").write_text("routing: {}\n", encoding="utf-8")
+    (cands / "candidate-000-difficulty-1.75.yaml").write_text(
+        "routing: {}\n", encoding="utf-8"
+    )
     (cands / "candidate-000-difficulty-1.75.candidate.json").write_text(
         json.dumps(
             {
@@ -367,7 +455,8 @@ def test_run_sidecar_provenance_and_partial_rejection(monkeypatch, tmp_path, cap
     (cands / "candidate-002.yaml").write_text("routing: {}\n", encoding="utf-8")
     validator = tmp_path / "validator.sh"
     validator.write_text(
-        "#!/bin/sh\ncase \"$4\" in *candidate-002*) exit 1;; esac\nexit 0\n", encoding="utf-8"
+        '#!/bin/sh\ncase "$4" in *candidate-002*) exit 1;; esac\nexit 0\n',
+        encoding="utf-8",
     )
     validator.chmod(0o755)
 
@@ -375,17 +464,32 @@ def test_run_sidecar_provenance_and_partial_rejection(monkeypatch, tmp_path, cap
         return {"summary": {"routed_accuracy": 0.5}, "bank_stats": {}, "statuses": {}}
 
     monkeypatch.setattr(cli, "evaluate_candidate", fake_evaluate)
-    args = _run_args(tmp_path, spec_path, cases, cands) + ["--validate", "--validate-bin", str(validator)]
+    args = [
+        *_run_args(tmp_path, spec_path, cases, cands),
+        "--validate",
+        "--validate-bin",
+        str(validator),
+    ]
     assert main(args) == 0
     parsed = json.loads(capsys.readouterr().out)
     assert parsed["evaluated"] == 2
     assert len(parsed["rejected"]) == 1
     assert parsed["rejected"][0]["path"].endswith("candidate-002.yaml")
     # the ledger kept the sidecar's provenance for candidate A
-    rows = [json.loads(line) for line in (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines() if line.strip()]
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "ledger.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
     by_ref = {r["candidate"]["ref"]: r for r in rows}
-    assert set(by_ref) == {"config-rev:difficulty=1.75", str(cands / "candidate-001.yaml")}
-    assert by_ref["config-rev:difficulty=1.75"]["candidate"]["provenance"]["proposer"] == "rule-threshold"
+    assert set(by_ref) == {
+        "config-rev:difficulty=1.75",
+        str(cands / "candidate-001.yaml"),
+    }
+    assert (
+        by_ref["config-rev:difficulty=1.75"]["candidate"]["provenance"]["proposer"]
+        == "rule-threshold"
+    )
     fallback = by_ref[str(cands / "candidate-001.yaml")]
     assert fallback["candidate"]["provenance"]["proposer"] == "threshold-search"
     assert fallback["candidate"]["change_summary"] == "candidate 2/2"

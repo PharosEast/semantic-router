@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from recipe_lab.contract import ContractError, ExperimentSpec
 from recipe_lab.ledger import Ledger, LedgerRecord
+
 from tests.fixtures import VALID_SPEC
 
 
@@ -93,10 +93,20 @@ def test_filter_and_top_replay(tmp_path):
     path = tmp_path / "ledger.jsonl"
     ledger = Ledger(path)
     ledger.append(base_record(metrics={"capability.score": 0.75}, round=1))
-    ledger.append(base_record(metrics={"capability.score": 0.81}, round=2, coverage_warning=True))
+    ledger.append(
+        base_record(metrics={"capability.score": 0.81}, round=2, coverage_warning=True)
+    )
     ledger.append(base_record(metrics={"capability.score": 0.79}, round=3))
     ledger.append(
-        base_record(metrics={"capability.score": 0.95}, round=4, candidate={"kind": "config", "ref": "x", "provenance": {"proposer": "agent:1", "insight_refs": []}})
+        base_record(
+            metrics={"capability.score": 0.95},
+            round=4,
+            candidate={
+                "kind": "config",
+                "ref": "x",
+                "provenance": {"proposer": "agent:1", "insight_refs": []},
+            },
+        )
     )
     assert len(ledger.filter(tier="replay", verdict="RANKED")) == 4
     assert len(ledger.filter(round_no=2)) == 1
@@ -136,7 +146,12 @@ def test_spec_metric_key_roundtrip(tmp_path):
 def test_timeout_record_roundtrip_and_never_ranks(tmp_path):
     ledger = Ledger(tmp_path / "ledger.jsonl")
     stored = ledger.append(
-        base_record(metrics={}, reasons=["trial timeout: ..."], coverage_warning=True, status="timeout")
+        base_record(
+            metrics={},
+            reasons=["trial timeout: ..."],
+            coverage_warning=True,
+            status="timeout",
+        )
     )
     assert stored["status"] == "timeout"
     ledger.append(base_record(metrics={"capability.score": 0.77}))

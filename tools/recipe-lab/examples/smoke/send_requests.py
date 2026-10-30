@@ -9,6 +9,8 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 
+_HTTP_OK = 200
+
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="send smoke cases through the router")
@@ -21,8 +23,8 @@ def main() -> int:
     cases_path = Path(args.cases)
     ok = failed = 0
     with cases_path.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
+        for raw_line in fh:
+            line = raw_line.strip()
             if not line:
                 continue
             case = json.loads(line)
@@ -48,7 +50,7 @@ def main() -> int:
                 failed += 1
                 continue
             print(f"{case['case_id']}\t{status}")
-            if status == 200:
+            if status == _HTTP_OK:
                 ok += 1
             else:
                 failed += 1

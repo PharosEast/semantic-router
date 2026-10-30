@@ -46,10 +46,14 @@ def _decision_signal(config: dict[str, Any], signal_name: str) -> dict[str, Any]
 def _predicate_value(signal: dict[str, Any]) -> float:
     predicate = signal.get("predicate")
     if not isinstance(predicate, dict) or "gte" not in predicate:
-        raise ContractError(f"signal {signal.get('name')!r} has no gte predicate to perturb")
+        raise ContractError(
+            f"signal {signal.get('name')!r} has no gte predicate to perturb"
+        )
     value = predicate["gte"]
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ContractError(f"signal {signal.get('name')!r} gte must be a number, got {value!r}")
+        raise ContractError(
+            f"signal {signal.get('name')!r} gte must be a number, got {value!r}"
+        )
     return float(value)
 
 
@@ -87,7 +91,9 @@ def propose_thresholds(
     return candidates
 
 
-def write_candidates(candidates: list[ThresholdCandidate], output_dir: str | Path) -> list[Path]:
+def write_candidates(
+    candidates: list[ThresholdCandidate], output_dir: str | Path
+) -> list[Path]:
     """Write each candidate config as YAML plus a sidecar metadata JSON
     (`<stem>.candidate.json`) so `run` can carry the proposer's provenance
     into the ledger; returns the config file paths."""
@@ -95,7 +101,10 @@ def write_candidates(candidates: list[ThresholdCandidate], output_dir: str | Pat
     out_dir.mkdir(parents=True, exist_ok=True)
     paths: list[Path] = []
     for index, candidate in enumerate(candidates):
-        path = out_dir / f"candidate-{index:03d}-{candidate.signal_name}-{candidate.new_value}.yaml"
+        path = (
+            out_dir
+            / f"candidate-{index:03d}-{candidate.signal_name}-{candidate.new_value}.yaml"
+        )
         with path.open("w", encoding="utf-8") as fh:
             yaml.safe_dump(candidate.config, fh, allow_unicode=True, sort_keys=False)
         sidecar = {
@@ -104,7 +113,12 @@ def write_candidates(candidates: list[ThresholdCandidate], output_dir: str | Pat
             "change_summary": candidate.summary(),
             "provenance": {"proposer": "threshold-search", "insight_refs": []},
             "sites": [
-                {"signal": candidate.signal_name, "op": "gte", "from": candidate.old_value, "to": candidate.new_value}
+                {
+                    "signal": candidate.signal_name,
+                    "op": "gte",
+                    "from": candidate.old_value,
+                    "to": candidate.new_value,
+                }
             ],
         }
         path.with_suffix(".candidate.json").write_text(

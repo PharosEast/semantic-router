@@ -48,7 +48,10 @@ VALID_SPLITS_SPEC: dict = {
         "splits": {
             "calib": {"manifest": "calib.jsonl", "content_hash": "sha256:" + "1" * 64},
             "dev": {"manifest": "dev.jsonl", "content_hash": "sha256:" + "2" * 64},
-            "frozen_test": {"manifest": "frozen_test.jsonl", "content_hash": "sha256:" + "3" * 64},
+            "frozen_test": {
+                "manifest": "frozen_test.jsonl",
+                "content_hash": "sha256:" + "3" * 64,
+            },
         },
     },
 }

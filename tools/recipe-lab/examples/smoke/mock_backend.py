@@ -11,14 +11,22 @@ import argparse
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-
 ANSWER_TABLE = [
     ("capital of france", "The capital of France is Paris."),
     ("hello in french", "Bonjour!"),
     ("for loop", "A for loop repeats a block of code over a sequence."),
-    ("fun fact about honey", "Honey never spoils; edible honey was found in ancient tombs."),
-    ("quicksort", "Both are O(n log n) on average; quicksort often wins on small arrays due to cache locality."),
-    ("caching strategies", "LRU adapts to skew; TTL is simpler but can serve stale entries."),
+    (
+        "fun fact about honey",
+        "Honey never spoils; edible honey was found in ancient tombs.",
+    ),
+    (
+        "quicksort",
+        "Both are O(n log n) on average; quicksort often wins on small arrays due to cache locality.",
+    ),
+    (
+        "caching strategies",
+        "LRU adapts to skew; TTL is simpler but can serve stale entries.",
+    ),
 ]
 
 # The local lane answers the honey case badly on purpose, so the smoke has a
@@ -56,7 +64,10 @@ def _completion(model: str, prompt: str) -> bytes:
             "choices": [
                 {
                     "index": 0,
-                    "message": {"role": "assistant", "content": _answer_for(model, prompt)},
+                    "message": {
+                        "role": "assistant",
+                        "content": _answer_for(model, prompt),
+                    },
                     "finish_reason": "stop",
                 }
             ],
@@ -66,14 +77,16 @@ def _completion(model: str, prompt: str) -> bytes:
 
 
 class Handler(BaseHTTPRequestHandler):
-    def _send(self, status: int, body: bytes, content_type: str = "application/json") -> None:
+    def _send(
+        self, status: int, body: bytes, content_type: str = "application/json"
+    ) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
 
-    def do_GET(self) -> None:  # noqa: N802
+    def do_GET(self) -> None:
         if self.path.startswith("/v1/models"):
             body = json.dumps(
                 {
@@ -89,7 +102,7 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, b'{"error": "not found"}')
 
-    def do_POST(self) -> None:  # noqa: N802
+    def do_POST(self) -> None:
         length = int(self.headers.get("Content-Length", 0))
         raw = self.rfile.read(length)
         if self.path.startswith("/v1/chat/completions"):
@@ -119,11 +132,10 @@ def main() -> None:
     )
     args = parser.parse_args()
     if args.cases:
-        global _CAPABILITY_TABLE
-        _CAPABILITY_TABLE = {}
-        with open(args.cases, "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
+        _CAPABILITY_TABLE.clear()
+        with open(args.cases, encoding="utf-8") as fh:
+            for raw_line in fh:
+                line = raw_line.strip()
                 if not line:
                     continue
                 case = json.loads(line)
