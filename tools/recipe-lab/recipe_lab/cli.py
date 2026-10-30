@@ -474,8 +474,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         mock_backend_script=args.mock_backend,
         python_bin=args.python_bin,
         work_dir=output_dir,
-        router_port=args.router_port,
-        management_port=args.management_port,
         backend_port=args.backend_port,
         ready_timeout_s=args.ready_timeout,
         hf_home=args.hf_home,
@@ -997,8 +995,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_run.add_argument("--router-model", default="vllm-sr/auto")
     p_run.add_argument("--family", default="d3")
-    p_run.add_argument("--router-port", type=int, default=8899)
-    p_run.add_argument("--management-port", type=int, default=8080)
     p_run.add_argument("--backend-port", type=int, default=8000)
     p_run.add_argument(
         "--ready-timeout",
