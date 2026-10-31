@@ -237,6 +237,66 @@ def _constraint_evidence(
     return evidence
 
 
+def _dataset_identity(raw: Any) -> str | None:
+    """Normalize an sr-bench dataset sha256 (bare hexdigest) to the A4 form."""
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    value = raw.strip()
+    return value if value.startswith("sha256:") else "sha256:" + value
+
+
+def _doc_dataset_identity(doc: Any, role: str, run_id: str) -> str | None:
+    """Extract the dataset identity from one run document (M1).
+
+    sr-bench verifies the dataset bytes at submission time and projects
+    `manifest.dataset.sha256` into every run document, so this is what the
+    run actually scored - not what the caller believes it scored.
+    """
+    if not isinstance(doc, dict):
+        raise ContractError(
+            f"{role} run {run_id} did not return a run document; "
+            "cannot verify its dataset identity"
+        )
+    manifest = doc.get("manifest")
+    dataset = manifest.get("dataset") if isinstance(manifest, dict) else None
+    raw = dataset.get("sha256") if isinstance(dataset, dict) else None
+    return _dataset_identity(raw)
+
+
+def run_dataset_hash(cli: SrbenchCli, run_id: str) -> str | None:
+    """The frozen dataset identity of one sr-bench run document (M1)."""
+    return _doc_dataset_identity(cli.show(run_id), "run", run_id)
+
+
+def require_run_datasets(
+    spec: ExperimentSpec,
+    cli: SrbenchCli,
+    runs: list[tuple[str, str]],
+    workload_split: str,
+) -> None:
+    """M1: every cited run must have scored the contract's own frozen split.
+
+    `runs` carries (role, run_id) pairs. Raises ContractError - before any
+    ledger write, so callers map it to exit 2 - when a run's recorded dataset
+    identity differs from the workload split's content hash, or when the run
+    document exposes no dataset identity at all: a verdict citing evidence it
+    cannot bind to the contract is never written down.
+    """
+    expected = spec.workload.split_hash(workload_split)
+    for role, run_id in runs:
+        actual = run_dataset_hash(cli, run_id)
+        if actual is None:
+            raise ContractError(
+                f"{role} run {run_id} exposes no dataset sha256 in its run "
+                "document; cannot bind the verdict to the contract workload"
+            )
+        if actual != expected:
+            raise ContractError(
+                f"{role} run {run_id} scored dataset {actual}, but the contract "
+                f"workload.{workload_split} is {expected}"
+            )
+
+
 def live_verdict_from_runs(
     *,
     spec: ExperimentSpec,
@@ -245,6 +305,7 @@ def live_verdict_from_runs(
     candidate_run_id: str,
     measurements: list[dict[str, Any]],
     incomplete_reasons: list[str] | None = None,
+    workload_split: str = "dev",
 ) -> dict[str, Any]:
     """Compare two sr-bench runs and decide the live-tier verdict (A3).
 
@@ -253,6 +314,14 @@ def live_verdict_from_runs(
     (in `undeclared_measurements` and the reasons) but never veto. An
     empty contract adds an explicit `gates_note`.
     """
+    # M1: both runs must have scored the contract's own frozen split, else
+    # the verdict would cite evidence from a different question set.
+    require_run_datasets(
+        spec,
+        cli,
+        [("baseline", baseline_run_id), ("candidate", candidate_run_id)],
+        workload_split,
+    )
     comparison = cli.compare(baseline_run_id, candidate_run_id)
     incomplete = list(incomplete_reasons or [])
     baseline_metric, candidate_metric = _pair_metrics(
@@ -341,6 +410,7 @@ def verify_live(
     measurements: list[dict[str, Any]],
     incomplete_reasons: list[str] | None = None,
     work_dir: str | Path,
+    workload_split: str = "dev",
 ) -> dict[str, Any]:
     """Drive sr-bench for one candidate and decide the live verdict (I).
 
@@ -382,6 +452,19 @@ def verify_live(
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    # M1: the frozen baseline protocol must be the contract's own split.
+    actual = _doc_dataset_identity(baseline_doc, "baseline", baseline_run_id)
+    expected = spec.workload.split_hash(workload_split)
+    if actual is None:
+        raise ContractError(
+            f"baseline run {baseline_run_id} exposes no dataset sha256; "
+            "cannot bind the AB/BA pairs to the contract workload"
+        )
+    if actual != expected:
+        raise ContractError(
+            f"baseline run {baseline_run_id} scored dataset {actual}, but the "
+            f"contract workload.{workload_split} is {expected}"
+        )
 
     incomplete = list(incomplete_reasons or [])
     diagnostics: list[str] = []

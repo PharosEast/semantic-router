@@ -1093,6 +1093,7 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             baseline_run_id=args.baseline_run_id,
             candidate_run_id=args.candidate_run_id,
             measurements=measurements,
+            workload_split=args.split,
         )
     except (ContractError, RuntimeError) as exc:
         _fail(f"live verdict error: {exc}")
@@ -1107,7 +1108,9 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             metrics={spec.objective.metric_key: result["metrics"]["candidate"]},
             verdict=result["verdict"],
             dataset_hash=dataset_hash,
-            split=args.split,
+            # M1: the legacy single-dataset form has no real split.
+            split=None if spec.workload.legacy else args.split,
+            legacy_workload=spec.workload.legacy,
             reasons=result["reasons"],
             gates=result["gates"],
             # E: the declared constraints' measured evidence, for report replay.
@@ -1248,6 +1251,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             repetitions=args.repetitions,
             measurements=measurements,
             work_dir=work_dir,
+            workload_split=args.split,
         )
     except (ContractError, RuntimeError) as exc:
         raise SystemExit(f"verify error: {exc}") from exc
@@ -1275,7 +1279,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
             metrics={spec.objective.metric_key: result["metrics"]["candidate"]},
             verdict=result["verdict"],
             dataset_hash=dataset_hash,
-            split=args.split,
+            # M1: the legacy single-dataset form has no real split.
+            split=None if spec.workload.legacy else args.split,
+            legacy_workload=spec.workload.legacy,
             reasons=result["reasons"],
             gates=result["gates"],
             # E: the declared constraints' measured evidence, for report replay.
