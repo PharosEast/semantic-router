@@ -12,6 +12,8 @@ from recipe_lab.verdict import (
     evaluate_verdict,
     evidence_quality_reasons,
     resolve_constraint,
+    weighted_macro_average,
+    workload_guard_results,
 )
 
 
@@ -567,3 +569,72 @@ def test_evaluate_verdict_unknown_reference_is_inconclusive():
     )
     assert result.verdict == "INCONCLUSIVE"
     assert any("reference arm 'strong'" in r for r in result.reasons)
+
+
+# ---- M5: weighted macro average and the auto "not worse" guard ----
+
+
+def test_weighted_macro_average_uses_contract_weights():
+    value = weighted_macro_average(
+        {"mmlu-pro": 0.62, "office": 0.71}, {"mmlu-pro": 2.0, "office": 1.0}
+    )
+    assert math.isclose(value, (2.0 * 0.62 + 1.0 * 0.71) / 3.0)
+
+
+def test_weighted_macro_average_excludes_missing_evidence():
+    # a workload without a measurement is never counted as zero: the weights
+    # renormalize over the measured workloads
+    value = weighted_macro_average(
+        {"mmlu-pro": 0.60, "office": None}, {"mmlu-pro": 2.0, "office": 1.0}
+    )
+    assert math.isclose(value, 0.60)
+
+
+def test_weighted_macro_average_rejects_all_missing_and_bad_weights():
+    with pytest.raises(ValueError, match="at least one measured workload"):
+        weighted_macro_average(
+            {"mmlu-pro": None, "office": None}, {"mmlu-pro": 2.0, "office": 1.0}
+        )
+    with pytest.raises(ValueError, match="positive macro-average weight"):
+        weighted_macro_average({"mmlu-pro": 0.6}, {"mmlu-pro": 0.0})
+    with pytest.raises(ValueError, match="positive macro-average weight"):
+        weighted_macro_average({"mmlu-pro": 0.6}, {"office": 1.0})
+
+
+def m5_stats(ci_low: float) -> PairedStats:
+    return PairedStats(
+        paired_cases=300,
+        quality_delta=(ci_low + 0.01),
+        quality_delta_ci95=(ci_low, ci_low + 0.02),
+        quality_delta_bootstrap_ci95=None,
+        wins=150,
+        losses=100,
+        ties=50,
+    )
+
+
+def test_workload_guards_pass_when_ci_low_within_tolerance():
+    rows = workload_guard_results(
+        {"mmlu-pro": 1.0, "office": 2.0},
+        {"mmlu-pro": m5_stats(-0.008), "office": m5_stats(-0.02)},
+    )
+    by_name = {row.workload: row for row in rows}
+    # -0.8pp >= -1pp -> the default guard holds
+    assert by_name["mmlu-pro"].passed is True
+    assert by_name["mmlu-pro"].evaluated is True
+    # -2pp < -2pp is false: exactly at the tolerance boundary still passes
+    assert by_name["office"].passed is True
+
+
+def test_workload_guards_fail_beyond_tolerance_and_stay_unevaluated_without_evidence():
+    rows = workload_guard_results(
+        {"mmlu-pro": 1.0, "office": 1.0},
+        {"mmlu-pro": m5_stats(-0.015), "office": None},
+    )
+    by_name = {row.workload: row for row in rows}
+    # -1.5pp < -1pp: the candidate got worse by more than the guard allows
+    assert by_name["mmlu-pro"].passed is False
+    assert by_name["mmlu-pro"].evaluated is True
+    # no paired evidence: unevaluated, never counted as a loss
+    assert by_name["office"].evaluated is False
+    assert by_name["office"].passed is False

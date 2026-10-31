@@ -55,6 +55,7 @@ from .bank import apply_bank, build_bank, load_bank, write_bank
 from .contract import (
     ContractError,
     ExperimentSpec,
+    Workload,
     check_runnable_split,
     dataset_content_hash,
 )
@@ -116,15 +117,19 @@ def _load_spec(path: str) -> ExperimentSpec:
         _fail(f"cannot read spec: {exc}")
 
 
-def _select_split(spec: ExperimentSpec, split_name: str) -> str:
+def _select_split(
+    spec: ExperimentSpec, split_name: str, workload: Workload | None = None
+) -> str:
     """B: resolve --split against the workload; frozen_test is quarantined and
-    legacy single-dataset workloads only accept 'dev'."""
+    legacy single-dataset workloads only accept 'dev'. M5: `workload` is the
+    selected Workload (default: the spec's first)."""
+    workload = workload if workload is not None else spec.workload
     try:
         check_runnable_split(split_name)
-        spec.workload.split_hash(split_name)
+        workload.split_hash(split_name)
     except ContractError as exc:
         raise ContractError(str(exc)) from exc
-    if spec.workload.legacy:
+    if workload.legacy:
         print(
             "warning: workload uses the legacy single-dataset form; treated as split 'dev' only; "
             "migrate to workload.splits for calib/dev/frozen_test separation",
@@ -167,10 +172,12 @@ def cmd_split(args: argparse.Namespace) -> int:
 
 def cmd_attribute(args: argparse.Namespace) -> int:
     spec = _load_spec(args.spec)
-    split_name = _select_split(spec, args.split)
+    # M5: transfer workloads are quarantined from attribution like frozen_test.
+    workload = spec.require_tunable_workload(getattr(args, "workload", None))
+    split_name = _select_split(spec, args.split, workload)
     # A4 contract gates: re-hash the selected split, then any --cases input.
     # ContractError propagates to main() -> exit 2.
-    split_hash = spec.verify_workload(split=split_name)
+    split_hash = spec.verify_workload(split=split_name, workload=workload.name)
     if args.cases:
         spec.require_dataset_file(args.cases, "cases", expected_hash=split_hash)
     try:
@@ -362,8 +369,10 @@ def cmd_propose(args: argparse.Namespace) -> int:
     if args.spec:
         spec = _load_spec(args.spec)
         # A4/B contract gate: optional spec; verifies the selected split hash.
-        split_name = _select_split(spec, args.split)
-        spec.verify_workload(split=split_name)
+        # M5: transfer workloads are quarantined from proposals.
+        workload = spec.require_tunable_workload(getattr(args, "workload", None))
+        split_name = _select_split(spec, args.split, workload)
+        spec.verify_workload(split=split_name, workload=workload.name)
     try:
         with Path(args.base_config).open("r", encoding="utf-8") as fh:
             base = yaml.safe_load(fh)
@@ -616,11 +625,13 @@ def cmd_run(args: argparse.Namespace) -> int:
             f"budget exhausted: round {args.round} > budget.rounds {spec.budget.rounds}"
         )
     # B: resolve the split; frozen_test is quarantined, legacy is dev-only.
-    split_name = _select_split(spec, args.split)
-    split_hash = spec.workload.split_hash(split_name)
+    # M5: transfer workloads are quarantined from replay like frozen_test.
+    workload = spec.require_tunable_workload(getattr(args, "workload", None))
+    split_name = _select_split(spec, args.split, workload)
+    split_hash = workload.split_hash(split_name)
     # A4 contract gates: re-hash the selected split, then the --cases input
     # must be byte-identical to it (cross-round comparability).
-    spec.verify_workload(split=split_name)
+    spec.verify_workload(split=split_name, workload=workload.name)
     spec.require_dataset_file(args.cases, "cases", expected_hash=split_hash)
     try:
         bank = load_bank(args.bank)
@@ -850,6 +861,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 verdict="RANKED",
                 dataset_hash=split_hash,
                 split=split_name,
+                workload=workload.name,
                 reasons=[f"incomplete replay capture: {result['incomplete_reason']}"],
                 gates=None,
                 bench_refs=[],
@@ -923,6 +935,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             verdict="RANKED",
             dataset_hash=split_hash,
             split=split_name,
+            workload=workload.name,
             reasons=reasons,
             # A3: replay never evaluates guards; the declared gates are
             # recorded as explicitly not evaluated.
@@ -1045,7 +1058,15 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
         raise ContractError(
             "frozen_test is quarantined; pass --final for the promotion verdict"
         )
-    dataset_hash = spec.verify_workload(split=args.split)
+    # M5: a transfer workload is final-verify only (the frozen_test rule
+    # applies to the whole workload).
+    workload = spec.select_workload(getattr(args, "workload", None))
+    if workload.role == "transfer" and not args.final:
+        raise ContractError(
+            f"workload {workload.name!r} has role 'transfer' (the frozen_test rule "
+            "applies to the whole workload): pass --final for the promotion verdict"
+        )
+    dataset_hash = spec.verify_workload(split=args.split, workload=workload.name)
     try:
         raw_measurements = (
             [
@@ -1109,8 +1130,9 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             verdict=result["verdict"],
             dataset_hash=dataset_hash,
             # M1: the legacy single-dataset form has no real split.
-            split=None if spec.workload.legacy else args.split,
-            legacy_workload=spec.workload.legacy,
+            split=None if workload.legacy else args.split,
+            legacy_workload=workload.legacy,
+            workload=workload.name,
             reasons=result["reasons"],
             gates=result["gates"],
             # E: the declared constraints' measured evidence, for report replay.
@@ -1194,7 +1216,15 @@ def cmd_verify(args: argparse.Namespace) -> int:
         raise ContractError(
             "frozen_test is quarantined; pass --final for the promotion verdict"
         )
-    dataset_hash = spec.verify_workload(split=args.split)
+    # M5: a transfer workload is final-verify only (the frozen_test rule
+    # applies to the whole workload).
+    workload = spec.select_workload(getattr(args, "workload", None))
+    if workload.role == "transfer" and not args.final:
+        raise ContractError(
+            f"workload {workload.name!r} has role 'transfer' (the frozen_test rule "
+            "applies to the whole workload): pass --final for the promotion verdict"
+        )
+    dataset_hash = spec.verify_workload(split=args.split, workload=workload.name)
     try:
         raw_measurements = (
             [
@@ -1289,8 +1319,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
             verdict=result["verdict"],
             dataset_hash=dataset_hash,
             # M1: the legacy single-dataset form has no real split.
-            split=None if spec.workload.legacy else args.split,
-            legacy_workload=spec.workload.legacy,
+            split=None if workload.legacy else args.split,
+            legacy_workload=workload.legacy,
+            workload=workload.name,
             reasons=result["reasons"],
             gates=result["gates"],
             # E: the declared constraints' measured evidence, for report replay.
@@ -1382,6 +1413,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="dev",
         choices=["calib", "dev", "frozen_test"],
         help="workload split the records were produced on (frozen_test is quarantined; B)",
+    )
+    p_attr.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads the records belong to (default: the first workload; "
+        "transfer workloads are quarantined; M5)",
     )
     p_attr.add_argument(
         "--cases",
@@ -1554,6 +1591,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="workload split to verify against (frozen_test is quarantined; B)",
     )
     p_prop.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads to calibrate on (default: the first workload; "
+        "transfer workloads are quarantined; M5)",
+    )
+    p_prop.add_argument(
         "--signal", required=True, help="decision signal name whose gte to perturb"
     )
     p_prop.add_argument(
@@ -1715,6 +1758,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["calib", "dev", "frozen_test"],
         help="workload split to evaluate on (frozen_test is quarantined; B)",
     )
+    p_run.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads to replay on (default: the first workload; "
+        "transfer workloads are quarantined; M5)",
+    )
     p_run.add_argument("--bank", required=True, help="answer bank JSONL")
     p_run.add_argument(
         "--candidates",
@@ -1816,6 +1865,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="workload split the sr-bench runs were produced on (B)",
     )
     p_live.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads the runs belong to (default: the first workload; "
+        "transfer workloads need --final; M5)",
+    )
+    p_live.add_argument(
         "--final",
         action="store_true",
         help="promotion verdict; the only consumer allowed to cite the frozen_test split (B)",
@@ -1864,6 +1919,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="dev",
         choices=["calib", "dev", "frozen_test"],
         help="workload split the sr-bench baseline run was produced on (B)",
+    )
+    p_verify.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads to verify (default: the first workload; "
+        "transfer workloads need --final; M5)",
     )
     p_verify.add_argument(
         "--final",
