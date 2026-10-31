@@ -195,6 +195,83 @@ def compute_paired_stats(
     )
 
 
+@dataclass(frozen=True)
+class WorkloadGuardResult:
+    """M5: one workload's auto "not worse" guard (contract guard_pp).
+
+    The guard reads that workload's paired quality-delta CI lower bound:
+    it must not fall below -guard_pp percentage points (the candidate may
+    lose at most guard_pp pp on this workload). No paired evidence keeps
+    the guard unevaluated - missing evidence is never counted as a loss.
+    """
+
+    workload: str
+    guard_pp: float
+    ci_low: float | None
+
+    @property
+    def evaluated(self) -> bool:
+        return self.ci_low is not None
+
+    @property
+    def passed(self) -> bool:
+        return self.evaluated and self.ci_low >= -(self.guard_pp / 100.0)
+
+
+def workload_guard_results(
+    guard_pp: dict[str, float],
+    paired: dict[str, PairedStats | None],
+) -> list[WorkloadGuardResult]:
+    """M5: per-workload auto "not worse" guards from per-workload paired
+    statistics (one sr-bench compare entry or per-driver PairedStats each).
+    A workload without paired evidence stays unevaluated."""
+    results: list[WorkloadGuardResult] = []
+    for name in sorted(guard_pp):
+        stats = paired.get(name)
+        ci_low = (
+            stats.quality_delta_ci95[0]
+            if stats is not None and stats.quality_delta_ci95 is not None
+            else None
+        )
+        results.append(
+            WorkloadGuardResult(workload=name, guard_pp=guard_pp[name], ci_low=ci_low)
+        )
+    return results
+
+
+def weighted_macro_average(
+    measured: dict[str, float | None],
+    weights: dict[str, float],
+) -> float:
+    """M5: the objective's target metric over tune workloads - the weighted
+    macro average. Workloads without a measurement are excluded (missing
+    evidence is never counted as zero) and the weights renormalize over the
+    measured workloads."""
+    present = {name: value for name, value in measured.items() if value is not None}
+    if not present:
+        raise ValueError(
+            "weighted macro average needs at least one measured workload "
+            "(missing evidence is never counted as zero)"
+        )
+    for name, value in present.items():
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ValueError(f"workload {name!r} metric must be a finite number")
+        weight = weights.get(name)
+        if (
+            isinstance(weight, bool)
+            or not isinstance(weight, (int, float))
+            or not math.isfinite(weight)
+            or weight <= 0
+        ):
+            raise ValueError(f"workload {name!r} needs a positive macro-average weight")
+    total = sum(float(weights[name]) for name in present)
+    return sum(float(weights[name]) * float(v) for name, v in present.items()) / total
+
+
 def resolve_constraint(
     constraint: dict[str, Any],
     references: dict[str, float | None] | None = None,

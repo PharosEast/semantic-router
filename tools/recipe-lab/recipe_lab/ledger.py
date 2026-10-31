@@ -60,6 +60,9 @@ class LedgerRecord:
     legacy_workload: bool = (
         False  # M1: legacy single-dataset workloads record split: null
     )
+    # M5: which declared workload (spec.workloads[].name) the record's data
+    # came from; single anonymous legacy workloads omit the field.
+    workload: str | None = None
     # A5: present only when the trial produced no usable metric (e.g.
     # "timeout" when the stack exceeded budget.max_minutes_per_trial).
     # best_replay / top_replay exclude records carrying a status.
@@ -108,6 +111,8 @@ class LedgerRecord:
             out["split"] = self.split
         if self.legacy_workload:
             out["legacy_workload"] = True
+        if self.workload:
+            out["workload"] = self.workload
         if self.status:
             out["status"] = self.status
         if self.constraints is not None:
@@ -143,6 +148,7 @@ class LedgerRecord:
             notes=str(raw.get("notes", "")),
             split=raw.get("split"),
             legacy_workload=bool(raw.get("legacy_workload", False)),
+            workload=raw.get("workload"),
             status=raw.get("status"),
             constraints=(
                 dict(raw["constraints"]) if raw.get("constraints") is not None else None
@@ -202,6 +208,8 @@ def validate_record(raw: dict) -> None:
         raise ContractError(
             f"split must be one of {sorted(SPLIT_NAMES)}, got {raw['split']!r}"
         )
+    if "workload" in raw and raw["workload"] is not None:
+        _require_nonempty_str(raw["workload"], "workload")
     if "status" in raw and raw["status"] is not None:
         _require_nonempty_str(raw["status"], "status")
         # A5: "timeout" - the trial exceeded its budget. H: "incomplete" - the

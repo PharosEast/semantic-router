@@ -9,6 +9,7 @@ progress goes to stderr; exit codes are 0 success, 1 FAIL verdict
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import re
@@ -18,7 +19,7 @@ import pytest
 import yaml
 from recipe_lab.cli import build_parser, main, verdict_exit_code
 
-from tests.fixtures import VALID_SPEC
+from tests.fixtures import VALID_SPEC, VALID_WORKLOADS_SPEC
 
 EXIT_CONTRACT_ERROR = 2
 EXPECTED_TOTAL_CASES = 24
@@ -37,6 +38,177 @@ def _write_frozen_spec(tmp_path):
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
     return str(spec_path), cases
+
+
+def _write_workloads_spec(tmp_path):
+    """M5 spec with two tune workloads and one transfer workload; the split
+    manifests are real files whose hashes cover their bytes."""
+    spec = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    datasets = {
+        "calib.jsonl": b'{"case_id":"c1","prompt":"pc"}\n',
+        "dev.jsonl": b'{"case_id":"d1","prompt":"pd"}\n',
+        "frozen_test.jsonl": b'{"case_id":"f1","prompt":"pf"}\n',
+        "office.jsonl": b'{"case_id":"o1","prompt":"po"}\n',
+        "gpqa.jsonl": b'{"case_id":"g1","prompt":"pg"}\n',
+    }
+    for name, payload in datasets.items():
+        (tmp_path / name).write_bytes(payload)
+        for entry in spec["workloads"]:
+            for split in entry["splits"].values():
+                if split["manifest"] == name:
+                    split["content_hash"] = (
+                        "sha256:" + hashlib.sha256(payload).hexdigest()
+                    )
+    spec_path = tmp_path / "spec-workloads.yaml"
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return str(spec_path)
+
+
+def test_plan_accepts_the_v3_multi_workload_contract(tmp_path, capsys):
+    # M5 completion criterion: the V3-shaped contract loads and passes plan
+    spec_path = _write_workloads_spec(tmp_path)
+    assert main(["plan", "--spec", spec_path]) == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert [w["name"] for w in parsed["workloads"]] == [
+        "mmlu-pro",
+        "office",
+        "gpqa-transfer",
+    ]
+
+
+def test_attribute_honors_workload_selection(tmp_path, capsys):
+    spec_path = _write_workloads_spec(tmp_path)
+    records = tmp_path / "records.jsonl"
+    records.write_text("", encoding="utf-8")
+    assert (
+        main(
+            [
+                "attribute",
+                "--spec",
+                spec_path,
+                "--records",
+                str(records),
+                "--split",
+                "dev",
+                "--workload",
+                "office",
+            ]
+        )
+        == 0
+    )
+
+
+def test_replay_and_propose_reject_transfer_workloads(tmp_path, capsys):
+    spec_path = _write_workloads_spec(tmp_path)
+    assert (
+        main(
+            [
+                "run",
+                "--spec",
+                spec_path,
+                "--workload",
+                "gpqa-transfer",
+                "--cases",
+                str(tmp_path / "gpqa.jsonl"),
+                "--bank",
+                str(tmp_path / "bank.jsonl"),
+                "--candidates",
+                str(tmp_path),
+                "--ledger",
+                str(tmp_path / "ledger.jsonl"),
+                "--output-dir",
+                str(tmp_path / "out"),
+                "--router-bin",
+                "/bin/true",
+                "--mock-backend",
+                str(tmp_path / "mock.py"),
+            ]
+        )
+        == EXIT_CONTRACT_ERROR
+    )
+    assert "role 'transfer'" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "propose-thresholds",
+                "--spec",
+                spec_path,
+                "--workload",
+                "gpqa-transfer",
+                "--base-config",
+                str(tmp_path / "base.yaml"),
+                "--signal",
+                "decision:difficulty",
+                "--output-dir",
+                str(tmp_path / "cands"),
+            ]
+        )
+        == EXIT_CONTRACT_ERROR
+    )
+    assert "role 'transfer'" in capsys.readouterr().err
+
+
+def test_verify_and_live_verdict_reject_transfer_without_final(tmp_path, capsys):
+    spec_path = _write_workloads_spec(tmp_path)
+    assert (
+        main(
+            [
+                "verify",
+                "--spec",
+                spec_path,
+                "--workload",
+                "gpqa-transfer",
+                "--baseline-run-id",
+                "run-baseline",
+                "--candidate",
+                str(tmp_path / "candidate.json"),
+                "--candidate-targets",
+                "model-a",
+            ]
+        )
+        == EXIT_CONTRACT_ERROR
+    )
+    assert "role 'transfer'" in capsys.readouterr().err
+    assert (
+        main(
+            [
+                "live-verdict",
+                "--spec",
+                spec_path,
+                "--workload",
+                "gpqa-transfer",
+                "--baseline-run-id",
+                "run-baseline",
+                "--candidate-run-id",
+                "run-candidate",
+            ]
+        )
+        == EXIT_CONTRACT_ERROR
+    )
+    assert "role 'transfer'" in capsys.readouterr().err
+
+
+def test_ledger_records_carry_the_workload_field(tmp_path):
+    from recipe_lab.ledger import Ledger, LedgerRecord
+
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    stored = ledger.append(
+        LedgerRecord(
+            round=1,
+            ts="2026-01-01T00:00:00Z",
+            candidate={"kind": "config", "ref": "c1"},
+            tier="replay",
+            baseline_ref="base",
+            metrics={"routed_accuracy": 0.7},
+            verdict="RANKED",
+            dataset_hash="sha256:" + "0" * 64,
+            split="dev",
+            workload="office",
+        )
+    )
+    assert stored["workload"] == "office"
+    reloaded = Ledger(tmp_path / "ledger.jsonl").read()[0]
+    assert reloaded["workload"] == "office"
 
 
 def test_hash_command_prints_content_hash(tmp_path, capsys):

@@ -17,7 +17,13 @@ from recipe_lab.contract import (
     matches_condition,
 )
 
-from tests.fixtures import POLICY, RULES_POLICY, VALID_SPEC, VALID_SPLITS_SPEC
+from tests.fixtures import (
+    POLICY,
+    RULES_POLICY,
+    VALID_SPEC,
+    VALID_SPLITS_SPEC,
+    VALID_WORKLOADS_SPEC,
+)
 
 
 def test_valid_spec_roundtrip():
@@ -666,3 +672,163 @@ def test_constraint_rejects_bad_factor_and_tolerance_pp():
     raw["objective"]["constraints"][0]["tolerance_pct"] = 5.0
     with pytest.raises(ContractError, match="tolerance"):
         ExperimentSpec.from_dict(raw)
+
+
+# ---- M5: multi-workload contracts ----
+
+
+def test_legacy_workload_loads_as_single_tune_workload():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC))
+    assert len(spec.workloads) == 1
+    workload = spec.workloads[0]
+    assert workload.name == "default"
+    assert workload.kind == "mcq"
+    assert workload.driver == "srbench"
+    assert workload.role == "tune"
+    assert workload.weight == 1.0
+    assert workload.guard_pp == 1.0
+    assert workload.legacy is True
+    assert spec.workload is workload  # the historical accessor
+    assert spec.workload_guards() == {"default": 1.0}
+
+
+def test_workloads_list_parses_roles_weights_and_guards():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_WORKLOADS_SPEC))
+    assert [w.name for w in spec.workloads] == ["mmlu-pro", "office", "gpqa-transfer"]
+    first, office, transfer = spec.workloads
+    assert first.weight == 2.0 and first.kind == "mcq" and first.role == "tune"
+    assert office.driver == "model_eval" and office.split_rule is None
+    assert transfer.role == "transfer" and "eval" in transfer.splits
+    # the auto "not worse" guard covers every workload, contract-tunable
+    assert spec.workload_guards() == {
+        "mmlu-pro": 1.0,
+        "office": 1.0,
+        "gpqa-transfer": 1.0,
+    }
+    # round-trip: multi-workload specs serialize the workloads list
+    spec2 = ExperimentSpec.from_dict(spec.to_dict())
+    assert spec2.to_dict() == spec.to_dict()
+    assert "workloads" in spec.to_dict()
+
+
+def test_workloads_reject_both_keys_and_duplicate_names():
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workload"] = copy.deepcopy(VALID_SPEC["workload"])
+    with pytest.raises(ContractError, match="workload or workloads, not both"):
+        ExperimentSpec.from_dict(raw)
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][1]["name"] = "mmlu-pro"
+    with pytest.raises(ContractError, match="unique"):
+        ExperimentSpec.from_dict(raw)
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    del raw["workloads"][1]["name"]
+    with pytest.raises(ContractError, match=r"workloads\[1\].name is required"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_workloads_validate_enums_weight_and_tune_presence():
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["kind"] = "chat"
+    with pytest.raises(ContractError, match="kind"):
+        ExperimentSpec.from_dict(raw)
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["driver"] = "lm_eval"
+    with pytest.raises(ContractError, match="driver"):
+        ExperimentSpec.from_dict(raw)
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["role"] = "eval"
+    with pytest.raises(ContractError, match="role"):
+        ExperimentSpec.from_dict(raw)
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["weight"] = 0
+    with pytest.raises(ContractError, match="weight must be > 0"):
+        ExperimentSpec.from_dict(raw)
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["guard_pp"] = -0.5
+    with pytest.raises(ContractError, match="guard_pp must be >= 0"):
+        ExperimentSpec.from_dict(raw)
+    # a single transfer workload has nothing to tune on
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"] = raw["workloads"][2:]
+    with pytest.raises(ContractError, match="at least one role=tune"):
+        ExperimentSpec.from_dict(raw)
+    # an entry without splits is rejected (the legacy manifest form is
+    # only accepted at the top-level `workload:` key)
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    del raw["workloads"][1]["splits"]
+    with pytest.raises(ContractError, match=r"workloads\[1\] must declare splits"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_select_and_require_tunable_workload():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_WORKLOADS_SPEC))
+    assert spec.select_workload("office").name == "office"
+    assert spec.select_workload(None).name == "mmlu-pro"
+    with pytest.raises(ContractError, match="unknown workload 'nope'"):
+        spec.select_workload("nope")
+    # replay/propose/attribute must never touch a transfer workload
+    with pytest.raises(ContractError, match="role 'transfer'"):
+        spec.require_tunable_workload("gpqa-transfer")
+    assert spec.require_tunable_workload("office").name == "office"
+    # the final verify may select the transfer workload
+    assert spec.select_workload("gpqa-transfer").role == "transfer"
+
+
+def _write_workloads_spec(
+    tmp_path,
+    dev_text: str = '{"case_id":"d1","prompt":"d"}\n',
+    gpqa_text: str = '{"case_id":"g1","prompt":"g"}\n',
+):
+    """The multi-workload spec backed by five manifests with real hashes."""
+    contents = {
+        "calib.jsonl": '{"case_id":"c1","prompt":"c"}\n',
+        "dev.jsonl": dev_text,
+        "frozen_test.jsonl": '{"case_id":"f1","prompt":"f"}\n',
+        "office.jsonl": '{"case_id":"o1","prompt":"o"}\n',
+        "gpqa.jsonl": gpqa_text,
+    }
+    spec = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    for name, text in contents.items():
+        path = tmp_path / name
+        path.write_text(text, encoding="utf-8")
+        digest = dataset_content_hash(path)
+        for workload in spec["workloads"]:
+            for split in workload["splits"].values():
+                if split["manifest"] == name:
+                    split["content_hash"] = digest
+    spec_path = tmp_path / "spec-workloads.yaml"
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return spec_path
+
+
+def test_verify_workload_selects_the_named_workload(tmp_path):
+    spec_path = _write_workloads_spec(tmp_path)
+    spec = ExperimentSpec.from_yaml(spec_path)
+    assert spec.verify_workload(split="dev", workload="office") == (
+        spec.select_workload("office").split_hash("dev")
+    )
+    assert spec.verify_workload(split="eval", workload="gpqa-transfer") == (
+        spec.select_workload("gpqa-transfer").split_hash("eval")
+    )
+    with pytest.raises(ContractError, match="unknown workload 'nope'"):
+        spec.verify_workload(split="dev", workload="nope")
+
+
+def test_verify_workload_rejects_cross_workload_overlap(tmp_path):
+    # the transfer workload shares a case with the tune workload's dev split
+    shared = json.dumps({"case_id": "leak", "prompt": "same prompt"}) + "\n"
+    spec_path = _write_workloads_spec(
+        tmp_path,
+        dev_text='{"case_id":"d1","prompt":"d"}\n' + shared,
+        gpqa_text=shared,
+    )
+    spec = ExperimentSpec.from_yaml(spec_path)
+    with pytest.raises(ContractError, match=r"workloads .* overlap"):
+        spec.verify_workload(workload="office")
+
+
+def test_single_workload_spec_keeps_workload_key_roundtrip():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPLITS_SPEC))
+    assert "workload" in spec.to_dict() and "workloads" not in spec.to_dict()
+    spec2 = ExperimentSpec.from_dict(spec.to_dict())
+    assert spec2.to_dict() == spec.to_dict()

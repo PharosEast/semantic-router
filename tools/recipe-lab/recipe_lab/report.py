@@ -64,8 +64,10 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
     lines = [
         "# recipe-lab run report",
         "",
-        "| record | round | tier | verdict | metrics | constraints | gates | bench_refs |",
-        "|---|---|---|---|---|---|---|---|",
+        # M5: the workload column splits the evidence by workload so a
+        # multi-workload campaign can be read per workload.
+        "| record | round | tier | workload | verdict | metrics | constraints | gates | bench_refs |",
+        "|---|---|---|---|---|---|---|---|---|",
     ]
     inconsistencies: list[str] = []
     hashes = sorted({r.get("dataset_hash") for r in records if r.get("dataset_hash")})
@@ -76,7 +78,7 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
         )
         refs = record.get("bench_refs") or []
         lines.append(
-            f"| {record.get('record_id', '-')} | {record.get('round')} | {record.get('tier')} | **{record.get('verdict')}** "
+            f"| {record.get('record_id', '-')} | {record.get('round')} | {record.get('tier')} | {record.get('workload') or '-'} | **{record.get('verdict')}** "
             f"| {_metrics_line(record.get('metrics') or {})} | {_constraints_line(record.get('constraints'))} | {gates_text} | {len(refs)} ref(s) |"
         )
         if record.get("tier") == "live" and record.get("verdict") != "INCONCLUSIVE":
@@ -92,11 +94,11 @@ def render_run_report(records: list[dict[str, Any]]) -> str:
                 )
         if record.get("coverage_warning"):
             lines.append(
-                f"| - | {record.get('round')} | note | coverage_warning | evidence incomplete for some cases | - | - | - |"
+                f"| - | {record.get('round')} | note | - | coverage_warning | evidence incomplete for some cases | - | - | - |"
             )
         if record.get("constraint_warning"):
             lines.append(
-                f"| - | {record.get('round')} | note | constraint_warning | a declared constraint is violated under the "
+                f"| - | {record.get('round')} | note | - | constraint_warning | a declared constraint is violated under the "
                 "replay cost proxy; excluded from best_replay | - | - | - |"
             )
     if len(hashes) > 1:

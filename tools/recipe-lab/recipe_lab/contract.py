@@ -103,38 +103,43 @@ def check_runnable_split(split: str) -> None:
         raise ContractError("frozen_test is quarantined; use live-verdict --final")
 
 
+def _read_split_ids(manifest: Path, split: str) -> tuple[set[str], set[str]]:
+    """case_ids and prompt hashes of one split manifest (disjointness input)."""
+    case_ids: set[str] = set()
+    prompt_hashes: set[str] = set()
+    with manifest.open("r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ContractError(
+                    f"split {split!r} line {line_no} is not valid JSON: {exc}"
+                ) from exc
+            case_id = row.get("case_id")
+            if not isinstance(case_id, str) or not case_id:
+                raise ContractError(
+                    f"split {split!r} line {line_no} is missing a non-empty case_id"
+                )
+            prompt = row.get("prompt")
+            if not isinstance(prompt, str) or not prompt:
+                raise ContractError(
+                    f"split {split!r} line {line_no} is missing a non-empty prompt"
+                )
+            case_ids.add(case_id)
+            prompt_hashes.add(hashlib.sha256(prompt.encode("utf-8")).hexdigest())
+    return case_ids, prompt_hashes
+
+
 def _check_split_disjointness(base: Path, workload: Workload) -> None:
     """The three-way split must be disjoint: no case_id and no prompt content
     shared between two splits (else calibration data leaks into the frozen
     test and the final verdict is no longer honest)."""
-    seen: dict[str, tuple[set[str], set[str]]] = {}
-    for name, split in workload.splits.items():
-        manifest = base / split.manifest
-        case_ids: set[str] = set()
-        prompt_hashes: set[str] = set()
-        with manifest.open("r", encoding="utf-8") as fh:
-            for line_no, line in enumerate(fh, 1):
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError as exc:
-                    raise ContractError(
-                        f"split {name!r} line {line_no} is not valid JSON: {exc}"
-                    ) from exc
-                case_id = row.get("case_id")
-                if not isinstance(case_id, str) or not case_id:
-                    raise ContractError(
-                        f"split {name!r} line {line_no} is missing a non-empty case_id"
-                    )
-                prompt = row.get("prompt")
-                if not isinstance(prompt, str) or not prompt:
-                    raise ContractError(
-                        f"split {name!r} line {line_no} is missing a non-empty prompt"
-                    )
-                case_ids.add(case_id)
-                prompt_hashes.add(hashlib.sha256(prompt.encode("utf-8")).hexdigest())
-        seen[name] = (case_ids, prompt_hashes)
+    seen: dict[str, tuple[set[str], set[str]]] = {
+        name: _read_split_ids(base / split.manifest, name)
+        for name, split in workload.splits.items()
+    }
 
     names = sorted(seen)
     for i, left in enumerate(names):
@@ -153,12 +158,52 @@ def _check_split_disjointness(base: Path, workload: Workload) -> None:
                 )
 
 
+def _check_cross_workload_disjointness(
+    base: Path, workloads: tuple[Workload, ...]
+) -> None:
+    """M5: no case_id or prompt may appear in two different workloads - a
+    transfer workload sharing cases with a tune workload would be tuned on,
+    which defeats the transfer quarantine."""
+    seen: dict[tuple[str, str], tuple[set[str], set[str]]] = {}
+    for workload in workloads:
+        for name, split in workload.splits.items():
+            seen[(workload.name, name)] = _read_split_ids(base / split.manifest, name)
+
+    keys = sorted(seen)
+    for i, left in enumerate(keys):
+        for right in keys[i + 1 :]:
+            if left[0] == right[0]:
+                continue  # splits within one workload: _check_split_disjointness
+            shared_ids = seen[left][0] & seen[right][0]
+            shared_prompts = seen[left][1] & seen[right][1]
+            if shared_ids or shared_prompts:
+                detail = []
+                if shared_ids:
+                    detail.append(f"case_id(s) {sorted(shared_ids)[:3]}")
+                if shared_prompts:
+                    detail.append(f"{len(shared_prompts)} shared prompt(s)")
+                raise ContractError(
+                    f"workloads {left[0]!r} and {right[0]!r} overlap (splits "
+                    f"{left[1]!r} / {right[1]!r}): {'; '.join(detail)}; "
+                    "different workloads must be disjoint (case_id and prompt)"
+                )
+
+
 CONSTRAINT_OPS = ("gte", "lte")
 # M4: constraint bounds may pin a reference arm instead of the baseline;
 # the roles name the single-model targets declared in `references`.
 REF_BOUNDS = ("ref:strong", "ref:weak")
 # M4: where the verdict's cost numbers come from (cost_basis.source).
 COST_BASIS_SOURCES = {"provider_pricing", "cost_model"}
+# M5: workload vocabulary. `kind` selects the request shape, `driver` the
+# evaluation harness (C7), `role` the quarantine (tune vs frozen_test rule).
+WORKLOAD_KINDS = {"mcq", "open", "agentic"}
+WORKLOAD_DRIVERS = {"srbench", "model_eval"}
+WORKLOAD_ROLES = {"tune", "transfer"}
+# M5: default auto "not worse" guard per workload - the workload's paired
+# quality-delta CI lower bound must not fall below -guard_pp percentage
+# points (the candidate may lose at most 1pp on any workload by default).
+DEFAULT_GUARD_PP = 1.0
 
 
 @dataclass(frozen=True)
@@ -354,16 +399,16 @@ class SplitSpec:
     content_hash: str
 
     @classmethod
-    def from_dict(cls, raw: dict, name: str) -> SplitSpec:
+    def from_dict(cls, raw: dict, name: str, prefix: str = "workload") -> SplitSpec:
         manifest = raw.get("manifest")
         _require(
             isinstance(manifest, str) and manifest.strip(),
-            f"workload.splits.{name}.manifest must be a non-empty string",
+            f"{prefix}.splits.{name}.manifest must be a non-empty string",
         )
         content_hash = raw.get("content_hash")
         _require(
             isinstance(content_hash, str) and content_hash.strip(),
-            f"workload.splits.{name}.content_hash is required (frozen dataset hash)",
+            f"{prefix}.splits.{name}.content_hash is required (frozen dataset hash)",
         )
         return cls(manifest=manifest, content_hash=content_hash)
 
@@ -373,55 +418,148 @@ class SplitSpec:
 
 @dataclass(frozen=True)
 class Workload:
+    """One evaluation workload (M5).
+
+    The contract declares `workloads:` as a list; the legacy single
+    `workload:` form loads as a one-item list whose entry keeps the
+    historical defaults (name "default", kind "mcq", driver "srbench",
+    role "tune", weight 1.0). `kind` selects the request shape (mcq /
+    open / agentic), `driver` the evaluation harness (srbench or
+    model_eval, C7), and `role` the quarantine: `tune` workloads feed
+    calibration and replay, `transfer` workloads are final-verify only
+    (the frozen_test rule applies to the whole workload). `weight` is the
+    macro-average weight over tune workloads and `guard_pp` the auto
+    "not worse" guard: the workload's paired quality-delta CI lower bound
+    must not fall below -guard_pp percentage points.
+    """
+
     profile: str
     split_rule: str | None
     splits: dict[str, SplitSpec]
     legacy: bool
+    name: str = "default"
+    kind: str = "mcq"
+    weight: float = 1.0
+    driver: str = "srbench"
+    role: str = "tune"
+    guard_pp: float = DEFAULT_GUARD_PP
 
     @classmethod
-    def from_dict(cls, raw: dict) -> Workload:
+    def from_dict(
+        cls, raw: dict, prefix: str = "workload", entry: bool = False
+    ) -> Workload:
         profile = raw.get("profile", "quick")
         _require(
-            profile in PROFILES, f"workload.profile must be one of {sorted(PROFILES)}"
+            profile in PROFILES, f"{prefix}.profile must be one of {sorted(PROFILES)}"
         )
+        # M5 identity fields. Entries must declare a name; the legacy
+        # single-workload form keeps its anonymous historical default.
+        name_raw = raw.get("name")
+        if name_raw is None:
+            _require(
+                not entry,
+                f"{prefix}.name is required (each workloads entry needs a "
+                "unique non-empty name)",
+            )
+            name = "default"
+        else:
+            _require(
+                isinstance(name_raw, str) and name_raw.strip(),
+                f"{prefix}.name must be a non-empty string",
+            )
+            name = name_raw
+        kind = raw.get("kind", "mcq")
+        _require(
+            kind in WORKLOAD_KINDS,
+            f"{prefix}.kind must be one of {sorted(WORKLOAD_KINDS)}",
+        )
+        weight = _require_number(raw.get("weight", 1.0), f"{prefix}.weight")
+        _require(weight > 0, f"{prefix}.weight must be > 0")
+        driver = raw.get("driver", "srbench")
+        _require(
+            driver in WORKLOAD_DRIVERS,
+            f"{prefix}.driver must be one of {sorted(WORKLOAD_DRIVERS)}",
+        )
+        role = raw.get("role", "tune")
+        _require(
+            role in WORKLOAD_ROLES,
+            f"{prefix}.role must be one of {sorted(WORKLOAD_ROLES)}",
+        )
+        guard_pp = _require_number(
+            raw.get("guard_pp", DEFAULT_GUARD_PP), f"{prefix}.guard_pp"
+        )
+        _require(guard_pp >= 0, f"{prefix}.guard_pp must be >= 0")
+        if entry:
+            _require(
+                "splits" in raw,
+                f"{prefix} must declare splits (a mapping of split name -> "
+                "manifest + content_hash)",
+            )
         if "splits" in raw:
             split_rule = raw.get("split_rule")
-            _require(
-                isinstance(split_rule, str) and split_rule.strip(),
-                "workload.split_rule must be a non-empty string when workload.splits is used "
-                "(free text like 'group by source_id; seed 42; 40/30/30'; it is written to provenance)",
-            )
-            splits_raw = raw.get("splits")
-            _require(isinstance(splits_raw, dict), "workload.splits must be a mapping")
-            _require(
-                set(splits_raw) == set(SPLIT_NAMES),
-                f"workload.splits must declare exactly {sorted(SPLIT_NAMES)}",
-            )
-            splits = {
-                name: SplitSpec.from_dict(
-                    _require_mapping(v, f"workload.splits.{name}"), name
+            if not entry:
+                _require(
+                    isinstance(split_rule, str) and split_rule.strip(),
+                    f"{prefix}.split_rule must be a non-empty string when {prefix}.splits is used "
+                    "(free text like 'group by source_id; seed 42; 40/30/30'; it is written to provenance)",
                 )
-                for name, v in splits_raw.items()
+            splits_raw = raw.get("splits")
+            _require(
+                isinstance(splits_raw, dict) and bool(splits_raw),
+                f"{prefix}.splits must be a non-empty mapping",
+            )
+            if not entry:
+                _require(
+                    set(splits_raw) == set(SPLIT_NAMES),
+                    f"{prefix}.splits must declare exactly {sorted(SPLIT_NAMES)}",
+                )
+            splits = {
+                split_name: SplitSpec.from_dict(
+                    _require_mapping(v, f"{prefix}.splits.{split_name}"),
+                    split_name,
+                    prefix=prefix,
+                )
+                for split_name, v in splits_raw.items()
             }
             return cls(
-                profile=profile, split_rule=split_rule, splits=splits, legacy=False
+                profile=profile,
+                split_rule=split_rule,
+                splits=splits,
+                legacy=False,
+                name=name,
+                kind=kind,
+                weight=weight,
+                driver=driver,
+                role=role,
+                guard_pp=guard_pp,
             )
         # legacy single-dataset form: treated as a dev-only workload
+        _require(
+            not entry,
+            f"{prefix} must declare splits (a mapping of split name -> "
+            "manifest + content_hash)",
+        )
         manifest = raw.get("manifest")
         _require(
             isinstance(manifest, str) and manifest.strip(),
-            "workload.manifest must be a non-empty string",
+            f"{prefix}.manifest must be a non-empty string",
         )
         content_hash = raw.get("content_hash")
         _require(
             isinstance(content_hash, str) and content_hash.strip(),
-            "workload.content_hash is required (frozen dataset hash; cross-round comparability depends on it)",
+            f"{prefix}.content_hash is required (frozen dataset hash; cross-round comparability depends on it)",
         )
         return cls(
             profile=profile,
             split_rule=None,
             splits={"dev": SplitSpec(manifest=manifest, content_hash=content_hash)},
             legacy=True,
+            name=name,
+            kind=kind,
+            weight=weight,
+            driver=driver,
+            role=role,
+            guard_pp=guard_pp,
         )
 
     def split_hash(self, name: str) -> str:
@@ -439,18 +577,77 @@ class Workload:
         return self.splits[name].manifest
 
     def to_dict(self) -> dict:
+        # M5 fields serialize only when they differ from the defaults, so a
+        # legacy spec round-trips bit-identically through plan/next/report.
+        extra: dict[str, Any] = {}
+        if self.name != "default":
+            extra["name"] = self.name
+        if self.kind != "mcq":
+            extra["kind"] = self.kind
+        if self.weight != 1.0:
+            extra["weight"] = self.weight
+        if self.driver != "srbench":
+            extra["driver"] = self.driver
+        if self.role != "tune":
+            extra["role"] = self.role
+        if self.guard_pp != DEFAULT_GUARD_PP:
+            extra["guard_pp"] = self.guard_pp
         if self.legacy:
             split = self.splits["dev"]
             return {
                 "manifest": split.manifest,
                 "content_hash": split.content_hash,
                 "profile": self.profile,
+                **extra,
             }
         return {
             "profile": self.profile,
             "split_rule": self.split_rule,
             "splits": {name: split.to_dict() for name, split in self.splits.items()},
+            **extra,
         }
+
+
+def _parse_workloads(raw: dict) -> tuple[Workload, ...]:
+    """M5: `workloads:` list (each entry named) or the legacy single
+    `workload:` form (one entry with the historical defaults). Exactly one
+    of the two keys may appear; names must be unique and at least one
+    workload must be tunable."""
+    workloads_raw = raw.get("workloads")
+    workload_raw = raw.get("workload")
+    if workloads_raw is not None:
+        _require(
+            workload_raw is None,
+            "declare either workload or workloads, not both",
+        )
+        _require(
+            isinstance(workloads_raw, list) and bool(workloads_raw),
+            "workloads must be a non-empty list",
+        )
+        workloads = tuple(
+            Workload.from_dict(
+                _require_mapping(item, f"workloads[{i}]"),
+                prefix=f"workloads[{i}]",
+                entry=True,
+            )
+            for i, item in enumerate(workloads_raw)
+        )
+    elif workload_raw is not None:
+        workloads = (Workload.from_dict(_require_mapping(workload_raw, "workload")),)
+    else:
+        raise ContractError(
+            "spec must declare workload (legacy single dataset) or workloads (M5 list)"
+        )
+    names = [w.name for w in workloads]
+    _require(
+        len(set(names)) == len(names), f"workload names must be unique (got {names})"
+    )
+    _require(
+        any(w.role == "tune" for w in workloads),
+        "workloads must include at least one role=tune workload "
+        "(transfer workloads are never tuned on)",
+    )
+    return workloads
 
 
 def validate_signal_fact(value: Any, where: str) -> None:
@@ -949,7 +1146,10 @@ class CostBasis:
 class ExperimentSpec:
     api_version: str
     objective: Objective
-    workload: Workload
+    # M5: one or more evaluation workloads; the legacy single `workload:`
+    # form loads as a one-item list. `workload` (below) resolves to the
+    # first entry for the historical single-workload API.
+    workloads: tuple[Workload, ...]
     oracle_policy: OraclePolicy
     gates: tuple[Gate, ...] = field(default=())
     budget: Budget = field(
@@ -979,7 +1179,7 @@ class ExperimentSpec:
         objective = Objective.from_dict(
             _require_mapping(raw.get("objective"), "objective")
         )
-        workload = Workload.from_dict(_require_mapping(raw.get("workload"), "workload"))
+        workloads = _parse_workloads(raw)
         attribution = _require_mapping(raw.get("attribution", {}), "attribution")
         oracle_policy = OraclePolicy.from_dict(attribution.get("oracle_policy"))
         gates_raw = raw.get("gates", [])
@@ -1040,7 +1240,7 @@ class ExperimentSpec:
         return cls(
             api_version=api_version,
             objective=objective,
-            workload=workload,
+            workloads=workloads,
             oracle_policy=oracle_policy,
             gates=gates,
             budget=budget,
@@ -1050,6 +1250,41 @@ class ExperimentSpec:
             references=references,
             cost_basis=cost_basis,
         )
+
+    @property
+    def workload(self) -> Workload:
+        """The default (first declared) workload - the historical
+        single-workload accessor; multi-workload commands use
+        select_workload / require_tunable_workload instead."""
+        return self.workloads[0]
+
+    def select_workload(self, name: str | None = None) -> Workload:
+        """M5: resolve a --workload name (default: the first workload)."""
+        if name is None:
+            return self.workloads[0]
+        for workload in self.workloads:
+            if workload.name == name:
+                return workload
+        raise ContractError(
+            f"unknown workload {name!r}; declared: {[w.name for w in self.workloads]}"
+        )
+
+    def require_tunable_workload(self, name: str | None = None) -> Workload:
+        """The workload a tuning command (attribute/replay/propose) may read:
+        role=transfer workloads are quarantined like frozen_test (M5)."""
+        workload = self.select_workload(name)
+        _require(
+            workload.role == "tune",
+            f"workload {workload.name!r} has role 'transfer' (the frozen_test "
+            "rule applies to the whole workload): only the final verify may read it",
+        )
+        return workload
+
+    def workload_guards(self) -> dict[str, float]:
+        """M5: the auto per-workload "not worse" guards (name -> guard_pp).
+        Every workload carries one; workload_guard_results (verdict) turns
+        them into per-workload guard rows from the paired evidence."""
+        return {workload.name: workload.guard_pp for workload in self.workloads}
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> ExperimentSpec:
@@ -1066,17 +1301,23 @@ class ExperimentSpec:
         return cls(**{**spec.__dict__, "spec_dir": str(path.parent)})
 
     def verify_workload(
-        self, base_dir: str | Path | None = None, split: str | None = None
-    ) -> str:
+        self,
+        base_dir: str | Path | None = None,
+        split: str | None = None,
+        workload: str | None = None,
+    ) -> Any:
         """Re-hash the declared split manifests and compare with declared hashes.
 
         Returns the verified content hash of the selected split (all declared
-        splits when `split` is None). `workload.splits[*].manifest` resolves
-        against `base_dir`, defaulting to the spec file's directory. This is
-        the A4 contract check: attribute / run / propose-* call it before
-        touching any data, so a drifted dataset can never silently join two
-        rounds of results. With the full three-way form, also checks the
-        calib/dev/frozen_test slices are disjoint (case_id + prompt hash).
+        splits when `split` is None). `workload` (M5) names one declared
+        workload (default: the first); `workloads[*].splits[*].manifest`
+        resolves against `base_dir`, defaulting to the spec file's directory.
+        This is the A4 contract check: attribute / run / propose-* call it
+        before touching any data, so a drifted dataset can never silently
+        join two rounds of results. With the full three-way form, also checks
+        the calib/dev/frozen_test slices are disjoint (case_id + prompt
+        hash); with multiple workloads, checks that different workloads do
+        not share cases either (the transfer quarantine).
         """
         base = (
             Path(base_dir)
@@ -1087,22 +1328,27 @@ class ExperimentSpec:
             raise ContractError(
                 "cannot locate the workload manifest: the spec was not loaded from a file; pass base_dir"
             )
-        names = [split] if split is not None else sorted(self.workload.splits)
+        selected = self.select_workload(workload)
+        names = [split] if split is not None else sorted(selected.splits)
         verified: dict[str, str] = {}
         for name in names:
-            manifest = base / self.workload.split_manifest(name)
+            manifest = base / selected.split_manifest(name)
             if not manifest.is_file():
                 raise ContractError(
-                    f"dataset manifest not found: {manifest} (workload.splits.{name}.manifest is relative to the spec file)"
+                    f"dataset manifest not found: {manifest} (workload {selected.name!r} "
+                    f"split {name!r} manifest is relative to the spec file)"
                 )
             actual = dataset_content_hash(manifest)
-            if actual != self.workload.split_hash(name):
+            if actual != selected.split_hash(name):
                 raise ContractError(
-                    f"dataset hash mismatch for split {name!r}: spec={self.workload.split_hash(name)} file={actual}"
+                    f"dataset hash mismatch for split {name!r}: spec={selected.split_hash(name)} file={actual}"
                 )
             verified[name] = actual
-        if split is None and not self.workload.legacy:
-            _check_split_disjointness(base, self.workload)
+        if split is None:
+            if not selected.legacy:
+                _check_split_disjointness(base, selected)
+            if len(self.workloads) > 1:
+                _check_cross_workload_disjointness(base, self.workloads)
         if split is not None:
             return verified[split]
         return verified
@@ -1133,7 +1379,14 @@ class ExperimentSpec:
         out: dict[str, Any] = {
             "api_version": self.api_version,
             "objective": self.objective.to_dict(),
-            "workload": self.workload.to_dict(),
+            # M5: single workload keeps the historical `workload` key (and a
+            # legacy spec round-trips its exact legacy shape); multi-workload
+            # specs serialize the list form.
+            "workload" if len(self.workloads) == 1 else "workloads": (
+                self.workloads[0].to_dict()
+                if len(self.workloads) == 1
+                else [w.to_dict() for w in self.workloads]
+            ),
             "attribution": {"oracle_policy": self.oracle_policy.to_dict()},
             "gates": [g.to_dict() for g in self.gates],
             "budget": self.budget.to_dict(),
