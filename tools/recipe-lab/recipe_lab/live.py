@@ -896,11 +896,86 @@ def extract_routing_distribution(report: Any) -> dict[str, int]:
     return distribution
 
 
+def _submit_baseline_manifest(
+    spec: ExperimentSpec,
+    cli: SrbenchCli,
+    manifest_source: str | Path,
+    work_dir: Path,
+    workload_split: str,
+) -> str:
+    """R2: turn a caller manifest into the completed AB/BA baseline run.
+
+    The frozen AB/BA protocol needs a completed live baseline run whose
+    manifest carries at least one `kind: single` target (sr-bench refuses
+    to compare against a MoM-only baseline: "Baseline must contain a
+    single-model target"). A caller manifest without a single target - the
+    plain MoM router manifest - gets the spec's strong reference target
+    injected as the single arm, embedded verbatim from the sr-bench
+    registry (a submitted target must match the registry field-for-field
+    anyway). When the manifest binds its dataset by file reference, the
+    recorded sha256 is checked against the contract split before any run
+    is spent on it.
+    """
+    path = Path(manifest_source)
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContractError(f"cannot read baseline manifest {path}: {exc}") from exc
+    if not isinstance(raw, dict):
+        raise ContractError(f"baseline manifest {path} is not a JSON object")
+    targets = raw.get("targets")
+    if not isinstance(targets, list) or not targets:
+        raise ContractError(f"baseline manifest {path} carries no targets")
+    if not any(
+        isinstance(entry, dict) and entry.get("kind") == "single" for entry in targets
+    ):
+        if spec.references is None:
+            raise ContractError(
+                f"baseline manifest {path} has no single-model target and the "
+                "spec declares no references; cannot construct the S arm"
+            )
+        alias = spec.references.strong
+        match = next(
+            (entry for entry in cli.targets() if entry.get("id") == alias), None
+        )
+        if match is None:
+            raise ContractError(
+                f"reference target {alias!r} is not registered in sr-bench; "
+                "cannot construct the single-model baseline arm"
+            )
+        raw["targets"] = [match, *targets]
+    dataset = raw.get("dataset")
+    if isinstance(dataset, dict) and dataset.get("sha256"):
+        expected = spec.workload.split_hash(workload_split)
+        actual = _dataset_identity(dataset.get("sha256"))
+        if actual != expected:
+            raise ContractError(
+                f"baseline manifest {path} binds dataset {actual}, but the "
+                f"contract workload.{workload_split} is {expected}"
+            )
+    # R2: the submission snapshot (what was sent to sr-bench, injection
+    # included) is kept apart from verify_live's own `baseline-manifest.json`
+    # dump of the run document's echoed manifest below.
+    frozen = work_dir / "baseline-manifest.submitted.json"
+    frozen.write_text(
+        json.dumps(raw, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    doc = cli.run_manifest(frozen)
+    run_id = doc.get("id") if isinstance(doc, dict) else None
+    status = doc.get("status") if isinstance(doc, dict) else None
+    if not run_id or status != "completed":
+        raise ContractError(
+            f"baseline manifest run ended {status!r}; AB/BA pairs need a "
+            "completed baseline"
+        )
+    return run_id
+
+
 def verify_live(
     *,
     spec: ExperimentSpec,
     cli: SrbenchCli,
-    baseline_run_id: str,
+    baseline_run_id: str | None,
     targets: list[str],
     repetitions: int,
     measurements: list[dict[str, Any]],
@@ -908,6 +983,7 @@ def verify_live(
     work_dir: str | Path,
     workload_split: str = "dev",
     run_cache: str | Path | None = None,
+    baseline_manifest: str | Path | None = None,
 ) -> dict[str, Any]:
     """Drive sr-bench for one candidate and decide the live verdict (I).
 
@@ -940,11 +1016,25 @@ def verify_live(
     serving the candidate config on. The preview run is diagnostic only:
     a failed preview is recorded in the reasons but does not fail the
     verdict (it produces no quality numbers anyway).
+
+    R2: exactly one of `baseline_run_id` (a terminal completed baseline)
+    or `baseline_manifest` (a manifest file to submit as the baseline) is
+    required. A manifest without a single-model target gets the spec's
+    strong reference injected as the S arm before submission, so a plain
+    MoM router manifest can seed the AB/BA protocol directly.
     """
     if repetitions < 1:
         raise ContractError("verify needs at least one repetition")
+    if (baseline_run_id is None) == (baseline_manifest is None):
+        raise ContractError(
+            "verify needs exactly one of baseline_run_id or baseline_manifest"
+        )
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
+    if baseline_manifest is not None:
+        baseline_run_id = _submit_baseline_manifest(
+            spec, cli, baseline_manifest, work_dir, workload_split
+        )
 
     baseline_doc = cli.show(baseline_run_id)
     if not isinstance(baseline_doc, dict):
@@ -1270,6 +1360,9 @@ def verify_live(
         "constraints": verdict.constraints,
         "undeclared_measurements": undeclared,
         "bench_refs": bench_refs,
+        # R2: the resolved baseline run id (either --baseline-run-id or the run
+        # submitted from --baseline-manifest), so the CLI ledger can cite it.
+        "baseline_run_id": baseline_run_id,
         "trials": {str(rep): trials[rep] for rep in sorted(trials)},
         "abba_summary": summary,
         "preview": preview_info,

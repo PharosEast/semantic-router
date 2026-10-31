@@ -1313,6 +1313,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             spec=spec,
             cli=cli,
             baseline_run_id=args.baseline_run_id,
+            baseline_manifest=args.baseline_manifest,
             targets=targets,
             repetitions=args.repetitions,
             measurements=measurements,
@@ -1342,7 +1343,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
             candidate=candidate_row,
             tier="live",
-            baseline_ref=args.baseline_run_id,
+            # R2: when the baseline came from --baseline-manifest the run id
+            # is resolved inside verify_live and echoed in the result.
+            baseline_ref=args.baseline_run_id or result.get("baseline_run_id"),
             metrics={spec.objective.metric_key: result["metrics"]["candidate"]},
             verdict=result["verdict"],
             dataset_hash=dataset_hash,
@@ -1983,8 +1986,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_verify.add_argument(
         "--baseline-run-id",
-        required=True,
-        help="terminal completed sr-bench baseline run ID",
+        required=False,
+        default=None,
+        help="terminal completed sr-bench baseline run ID (exactly one of "
+        "--baseline-run-id / --baseline-manifest)",
+    )
+    p_verify.add_argument(
+        "--baseline-manifest",
+        default=None,
+        help="sr-bench baseline manifest JSON to submit as the baseline run "
+        "instead of citing an existing one (exactly one of --baseline-run-id / "
+        "--baseline-manifest); a MoM-only manifest gets the spec's strong "
+        "reference target injected as a single segment",
     )
     p_verify.add_argument(
         "--candidate", required=True, help="candidate JSON file for the ledger record"

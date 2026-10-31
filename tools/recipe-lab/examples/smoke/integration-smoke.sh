@@ -67,6 +67,8 @@ echo "SRBENCH-READY http://127.0.0.1:${SRBENCH_PORT}"
 export PATH="$RL:$PATH"
 export RECIPE_LAB_ROUTER_BIN="$ROUTER_BIN"
 export RECIPE_LAB_SRBENCH_URL="http://127.0.0.1:${SRBENCH_PORT}"
+export RECIPE_LAB_SRBENCH_STORE="$WORK/srbench-store"
+export RECIPE_LAB_SRBENCH_BIN="$RL/vllm-sr"
 if [ -n "${HF_HOME:-}" ]; then
   export RECIPE_LAB_HF_HOME="$HF_HOME"
 fi

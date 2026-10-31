@@ -124,6 +124,28 @@ class SrbenchCli:
         """One run document (status, manifest, ...); no evidence paging."""
         return self.run_command(["show", run_id])
 
+    def targets(self) -> list[dict[str, Any]]:
+        """The operator-registered targets (`target list` -> GET /targets).
+
+        R2: the registry is the only acceptable source for the auto-built
+        single-model baseline arm - a submitted manifest target must match
+        the registry field-for-field, so the registry document is embedded
+        verbatim.
+        """
+        payload = self.run_command(["target", "list"])
+        rows = payload.get("targets") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            raise SrbenchError("sr-bench target list did not return targets")
+        return [row for row in rows if isinstance(row, dict)]
+
+    def runs(self) -> list[dict[str, Any]]:
+        """All run summaries (`runs` -> GET /runs), newest page of the store."""
+        payload = self.run_command(["runs"])
+        rows = payload.get("runs") if isinstance(payload, dict) else payload
+        if not isinstance(rows, list):
+            raise SrbenchError("sr-bench runs did not return a list")
+        return [row for row in rows if isinstance(row, dict)]
+
     def wait_for_run(
         self, run_id: str, *, poll_interval_s: float = 2.0
     ) -> dict[str, Any]:

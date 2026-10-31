@@ -389,6 +389,7 @@ class VerifyStub:
         compare_values: dict | None = None,
         baseline_doc: dict | None = None,
         ref_statuses: dict[str, str] | None = None,
+        registry: list[dict] | None = None,
     ):
         self.baseline_doc = baseline_doc or {
             "id": "run-base",
@@ -410,6 +411,8 @@ class VerifyStub:
         self.ref_statuses = dict(ref_statuses or {})
         self.ref_reports: dict[str, dict] = {}
         self.ref_plans = 0
+        # R2: operator-registered targets, verbatim from the registry
+        self.registry = list(registry or [])
         self.events: list[tuple] = []
         self.manifest_runs = 0
         self.compares: list[tuple] = []
@@ -418,6 +421,10 @@ class VerifyStub:
     def show(self, run_id):
         self.events.append(("show", run_id))
         return self.baseline_doc
+
+    def targets(self):
+        self.events.append(("targets",))
+        return [dict(entry) for entry in self.registry]
 
     def candidate_plan(
         self, baseline_run_id, *, targets, mode="live", name=None, hypothesis=""
@@ -2155,3 +2162,180 @@ def test_verify_failed_reference_arm_is_inconclusive(tmp_path):
     # a failed reference run carries no metric evidence at all
     assert result["references"]["strong"].get("metric") is None
     assert result["references"]["weak"]["metric"] == 0.70
+
+
+# ---- R2: verify auto two-segment baseline manifest ----
+
+
+def _mom_manifest(tmp_path: Path, targets: list[dict]) -> Path:
+    path = tmp_path / "baseline-manifest-source.json"
+    path.write_text(
+        json.dumps(
+            {
+                "version": "sr-bench-1.0",
+                "name": "recipe-lab-baseline",
+                "targets": targets,
+                "cases": [],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+_REGISTRY_SINGLE = {
+    "id": "ref-strong",
+    "kind": "single",
+    "model": "vllm-sr/auto",
+    "base_url": "http://127.0.0.1:9000",
+    "config_hash": "a" * 64,
+    "max_inference_calls": 1,
+    "prices": {
+        "input_per_mtok_usd": 0.0,
+        "output_per_mtok_usd": 0.0,
+        "cache_read_per_mtok_usd": 0.0,
+        "cache_write_per_mtok_usd": 0.0,
+    },
+}
+
+_MOM_TARGET = {
+    "id": "mom-router",
+    "kind": "mom",
+    "model": "vllm-sr/auto",
+    "base_url": "http://127.0.0.1:9001",
+}
+
+
+def _manifest_verify_kwargs(manifest: Path, tmp_path: Path) -> dict:
+    return {
+        "spec": _ref_verify_spec(),
+        "cli": None,  # set by the caller
+        "baseline_run_id": None,
+        "baseline_manifest": str(manifest),
+        "targets": ["mom-router"],
+        "repetitions": 1,
+        "measurements": [
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        "work_dir": tmp_path,
+    }
+
+
+def test_verify_manifest_injects_registry_single_arm(tmp_path):
+    # a MoM-only baseline manifest gets the spec's strong reference target
+    # embedded verbatim from the sr-bench registry as the S arm
+    stub = VerifyStub(
+        candidate_statuses=["completed"],
+        baseline_statuses=["completed", "completed"],
+        compare_values=_ref_compare_payload(),
+        ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
+        registry=[_REGISTRY_SINGLE],
+    )
+    stub.ref_reports = {
+        "ref-strong": _ref_report("ref-strong", 0.85),
+        "ref-weak": _ref_report("ref-weak", 0.70),
+    }
+    manifest = _mom_manifest(tmp_path, [dict(_MOM_TARGET)])
+    kwargs = _manifest_verify_kwargs(manifest, tmp_path)
+    kwargs["cli"] = stub
+    result = verify_live(**kwargs)
+
+    assert ("targets",) in stub.events
+    assert stub.manifest_runs == 2  # submission + pair-0 baseline arm
+    frozen = json.loads(
+        (tmp_path / "baseline-manifest.submitted.json").read_text("utf-8")
+    )
+    assert frozen["targets"][0] == _REGISTRY_SINGLE
+    assert frozen["targets"][1] == _MOM_TARGET
+    assert result["baseline_run_id"] == "run-base-trial-1"
+    assert result["bench_refs"][0] == "run-base-trial-1"
+    assert result["verdict"] == "PASS"
+
+
+def test_verify_manifest_with_single_arm_submits_verbatim(tmp_path):
+    # a manifest that already carries a single target is submitted as-is:
+    # no registry lookup, no injection
+    single = {
+        "id": "local-strong",
+        "kind": "single",
+        "model": "local/strong",
+        "base_url": "http://127.0.0.1:9000",
+    }
+    stub = VerifyStub(
+        candidate_statuses=["completed"],
+        baseline_statuses=["completed", "completed"],
+        compare_values=_compare_values(0.80, 0.86),
+    )
+    manifest = _mom_manifest(tmp_path, [single, dict(_MOM_TARGET)])
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id=None,
+        baseline_manifest=str(manifest),
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+
+    assert ("targets",) not in stub.events
+    frozen = json.loads(
+        (tmp_path / "baseline-manifest.submitted.json").read_text("utf-8")
+    )
+    assert frozen["targets"][0] == single
+    assert result["baseline_run_id"] == "run-base-trial-1"
+    assert result["verdict"] == "PASS"
+
+
+def test_verify_rejects_ambiguous_baseline_source(tmp_path):
+    stub = VerifyStub()
+    manifest = _mom_manifest(tmp_path, [dict(_MOM_TARGET)])
+    base_kwargs = {
+        "spec": _verify_spec(),
+        "cli": stub,
+        "targets": ["mom-router"],
+        "repetitions": 1,
+        "measurements": [],
+        "work_dir": tmp_path,
+    }
+
+    # both sources: contract error before anything runs
+    with pytest.raises(ContractError, match="exactly one"):
+        verify_live(
+            baseline_run_id="run-base", baseline_manifest=str(manifest), **base_kwargs
+        )
+    # neither source: same contract error
+    with pytest.raises(ContractError, match="exactly one"):
+        verify_live(
+            baseline_run_id=None, baseline_manifest=None, **base_kwargs
+        )
+    assert stub.events == []
+
+
+def test_verify_manifest_dataset_mismatch_rejected_before_submission(tmp_path):
+    # a file-referenced dataset is checked against the contract split before
+    # any run is spent on it: zero-cost rejection (V2-4)
+    stub = VerifyStub()
+    manifest = _mom_manifest(tmp_path, [dict(_REGISTRY_SINGLE)])
+    raw = json.loads(manifest.read_text("utf-8"))
+    raw["dataset"] = {"path": "cases.jsonl", "sha256": "f" * 64}
+    manifest.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(ContractError, match="binds dataset"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id=None,
+            baseline_manifest=str(manifest),
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+    assert stub.manifest_runs == 0
+    assert stub.events == []
