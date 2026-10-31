@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 ANSWER_TABLE = [
@@ -59,6 +60,11 @@ def _answer_for(model: str, prompt: str) -> str:
 # the M3 integration truncation scenario drives sr-bench's output-limit
 # accounting (engine marks the case `quality_failure: "output_limit"`).
 TRUNCATION_MAX_TOKENS = 16
+
+# Per-completion artificial latency (seconds): keeps sr-bench arms in
+# flight long enough for fault-injection polls to observe them, standing
+# in for duplicating the case set many times over.
+_DELAY_SECONDS = 0.0
 
 
 def _completion(model: str, content: str, finish_reason: str = "stop") -> bytes:
@@ -117,6 +123,8 @@ class Handler(BaseHTTPRequestHandler):
                 max_tokens = payload.get("max_tokens")
             except (json.JSONDecodeError, AttributeError):
                 model, prompt, stream, max_tokens = "unknown", "", False, None
+            if _DELAY_SECONDS > 0:
+                time.sleep(_DELAY_SECONDS)
             finish_reason = (
                 "length"
                 if isinstance(max_tokens, int) and max_tokens < TRUNCATION_MAX_TOKENS
@@ -176,7 +184,16 @@ def main() -> None:
         help="cases JSONL (prompt/expected_contains/truth): enables the capability model - "
         "the local lane fails hard questions, the frontier lane answers correctly",
     )
+    parser.add_argument(
+        "--delay-ms",
+        type=float,
+        default=0.0,
+        help="artificial per-completion latency; keeps sr-bench arms in flight "
+        "for fault-injection polls (env: RECIPE_LAB_MOCK_DELAY_MS)",
+    )
     args = parser.parse_args()
+    global _DELAY_SECONDS
+    _DELAY_SECONDS = args.delay_ms / 1000.0
     if args.cases:
         _CAPABILITY_TABLE.clear()
         with open(args.cases, encoding="utf-8") as fh:

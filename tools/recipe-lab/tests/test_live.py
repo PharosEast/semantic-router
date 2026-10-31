@@ -529,6 +529,11 @@ def test_verify_live_pass_flow(tmp_path):
         len(result["bench_refs"]) == 1 + 1 + 4
     )  # baseline + preview + both arms of both reps
     assert "run-base" in result["bench_refs"] and "run-preview" in result["bench_refs"]
+    # X8: each completed pair's raw compare payload stays on disk so the
+    # merged paired statistics remain auditable against their sources
+    for rep in range(2):
+        payload = json.loads((tmp_path / f"compare-rep{rep}.json").read_text("utf-8"))
+        assert payload == stub.compare_values
 
 
 def test_verify_live_incomplete_pair_is_inconclusive(tmp_path):
@@ -550,8 +555,11 @@ def test_verify_live_incomplete_pair_is_inconclusive(tmp_path):
     )
     assert result["verdict"] == "INCONCLUSIVE"
     assert any("pair 1" in reason for reason in result["reasons"])  # reps are 0-indexed
-    # only the complete pair is compared; no numbers are invented for the broken one
+    # only the complete pair is compared; no numbers are invented for the
+    # broken one - and only its payload is kept
     assert len(stub.compares) == 1
+    assert (tmp_path / "compare-rep0.json").exists()
+    assert not (tmp_path / "compare-rep1.json").exists()
 
 
 def test_verify_live_baseline_arm_failure_is_inconclusive(tmp_path):
