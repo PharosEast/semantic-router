@@ -140,8 +140,11 @@ def _render_spec(
     # X8: an absolute paired bar (the CI decision path needs it) and the
     # assumed pricing that mirrors the registry's 4x price gap, so the
     # reference arms' costs are comparable even when sr-bench cannot
-    # measure spend.
-    spec["objective"]["min_improvement_pp"] = 1.0
+    # measure spend. The paired bar is percentage-point based; the shared
+    # template's percent bar is mutually exclusive with it, so drop it.
+    objective = spec["objective"]
+    objective.pop("min_improvement_pct", None)
+    objective["min_improvement_pp"] = 1.0
     spec["cost_basis"] = {
         "source": "provider_pricing",
         "assumed_pricing": _ASSUMED_PRICING,
