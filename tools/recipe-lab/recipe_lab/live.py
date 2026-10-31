@@ -1005,7 +1005,8 @@ def verify_live(
     `evidence_quality` for the ledger.
 
     M4: when the spec declares `references`, each reference arm runs once
-    as a single-model candidate-plan on the frozen protocol; run ids are
+    as a single-model run on the frozen protocol (the baseline manifest
+    with its targets replaced by the registry document); run ids are
     cached by (dataset hash, protocol hash, alias) in `run_cache` so
     several candidates reuse the same reference runs. The arms' values
     anchor ref-bound constraints, and a Pareto table (accuracy with its
@@ -1228,19 +1229,39 @@ def verify_live(
             cached = run_id is not None
             completed = cached
             if not cached:
-                ref_run = cli.candidate_plan(
-                    baseline_run_id, targets=[alias], mode="live"
+                registry_doc = next(
+                    (entry for entry in cli.targets() if entry.get("id") == alias),
+                    None,
                 )
-                run_id = ref_run.get("id")
-                completed = ref_run.get("status") == "completed"
-                if completed:
-                    cache[key] = run_id
-                    cache_dirty = True
-                else:
+                if registry_doc is None:
                     incomplete.append(
-                        f"reference arm {role!r} run {run_id} ended "
-                        f"{ref_run.get('status')!r}"
+                        f"reference arm {role!r}: target {alias!r} is not "
+                        "registered in sr-bench"
                     )
+                else:
+                    # Single-model targets have no candidate-plan protocol
+                    # (sr-bench reserves candidate plans for MoM targets);
+                    # submit the frozen baseline manifest with its targets
+                    # replaced by the registry document - the same
+                    # field-for-field validation path as the injected S arm.
+                    ref_manifest = dict(manifest)
+                    ref_manifest["targets"] = [registry_doc]
+                    ref_path = work_dir / f"reference-{role}-manifest.json"
+                    ref_path.write_text(
+                        json.dumps(ref_manifest, ensure_ascii=False, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                    ref_run = cli.run_manifest(ref_path)
+                    run_id = ref_run.get("id")
+                    completed = ref_run.get("status") == "completed"
+                    if completed:
+                        cache[key] = run_id
+                        cache_dirty = True
+                    else:
+                        incomplete.append(
+                            f"reference arm {role!r} run {run_id} ended "
+                            f"{ref_run.get('status')!r}"
+                        )
             references_evidence[role] = {
                 "alias": alias,
                 "run_id": run_id,

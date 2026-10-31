@@ -410,7 +410,7 @@ class VerifyStub:
         # M4: single-target reference-arm runs, keyed by target alias
         self.ref_statuses = dict(ref_statuses or {})
         self.ref_reports: dict[str, dict] = {}
-        self.ref_plans = 0
+        self.ref_runs = 0
         # R2: operator-registered targets, verbatim from the registry
         self.registry = list(registry or [])
         self.events: list[tuple] = []
@@ -429,16 +429,6 @@ class VerifyStub:
     def candidate_plan(
         self, baseline_run_id, *, targets, mode="live", name=None, hypothesis=""
     ):
-        if (
-            mode != "preview"
-            and self.ref_statuses
-            and len(targets) == 1
-            and targets[0] in self.ref_statuses
-        ):
-            alias = targets[0]
-            self.ref_plans += 1
-            self.events.append(("plan-ref", alias))
-            return {"id": f"run-ref-{alias}", "status": self.ref_statuses[alias]}
         self.events.append(("plan", mode))
         if mode == "preview":
             return {"id": "run-preview", "status": self.preview_status}
@@ -458,6 +448,20 @@ class VerifyStub:
         return self.preview_report_payload
 
     def run_manifest(self, manifest_path):
+        # M4: a reference arm submits the frozen baseline manifest with a
+        # single registry target; recognize it by its lone target alias
+        raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        submitted = raw.get("targets") if isinstance(raw, dict) else None
+        if (
+            isinstance(submitted, list)
+            and len(submitted) == 1
+            and isinstance(submitted[0], dict)
+            and submitted[0].get("id") in self.ref_statuses
+        ):
+            alias = submitted[0]["id"]
+            self.ref_runs += 1
+            self.events.append(("manifest-ref", alias))
+            return {"id": f"run-ref-{alias}", "status": self.ref_statuses[alias]}
         self.manifest_runs += 1
         self.events.append(("manifest",))
         status = (
@@ -2096,11 +2100,12 @@ def test_verify_reference_arms_bind_and_cache(tmp_path):
     stub = VerifyStub(
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
+        registry=[{"id": "ref-strong"}, {"id": "ref-weak"}],
     )
     stub.ref_reports = reports
     result = verify_live(cli=stub, **kwargs)
     assert result["verdict"] == "PASS"
-    assert stub.ref_plans == 2
+    assert stub.ref_runs == 2
     assert result["references"]["strong"] == {
         "alias": "ref-strong",
         "run_id": "run-ref-ref-strong",
@@ -2129,10 +2134,11 @@ def test_verify_reference_arms_bind_and_cache(tmp_path):
     stub2 = VerifyStub(
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
+        registry=[{"id": "ref-strong"}, {"id": "ref-weak"}],
     )
     stub2.ref_reports = reports
     result2 = verify_live(cli=stub2, **kwargs)
-    assert stub2.ref_plans == 0
+    assert stub2.ref_runs == 0
     assert result2["verdict"] == "PASS"
     assert result2["references"]["strong"]["cached"] is True
     assert result2["references"]["strong"]["metric"] == 0.85
@@ -2142,6 +2148,7 @@ def test_verify_failed_reference_arm_is_inconclusive(tmp_path):
     stub = VerifyStub(
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "failed", "ref-weak": "completed"},
+        registry=[{"id": "ref-strong"}, {"id": "ref-weak"}],
     )
     stub.ref_reports = {"ref-weak": _ref_report("ref-weak", 0.70)}
     result = verify_live(
@@ -2232,7 +2239,7 @@ def test_verify_manifest_injects_registry_single_arm(tmp_path):
         baseline_statuses=["completed", "completed"],
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
-        registry=[_REGISTRY_SINGLE],
+        registry=[_REGISTRY_SINGLE, dict(_REGISTRY_SINGLE, id="ref-weak")],
     )
     stub.ref_reports = {
         "ref-strong": _ref_report("ref-strong", 0.85),
@@ -2244,7 +2251,10 @@ def test_verify_manifest_injects_registry_single_arm(tmp_path):
     result = verify_live(**kwargs)
 
     assert ("targets",) in stub.events
-    assert stub.manifest_runs == 2  # submission + pair-0 baseline arm
+    # submission + pair-0 baseline arm; the two M4 reference arms go through
+    # their own single-target manifests
+    assert stub.manifest_runs == 2
+    assert stub.ref_runs == 2
     frozen = json.loads(
         (tmp_path / "baseline-manifest.submitted.json").read_text("utf-8")
     )
