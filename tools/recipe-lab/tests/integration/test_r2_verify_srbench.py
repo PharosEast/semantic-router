@@ -47,7 +47,22 @@ pytestmark = [
 ]
 
 _BASELINE_MANIFEST_NAME = "recipe-lab-r2-baseline"
-_BUCKETS = {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0}
+# X8: two differently-priced single targets, 4x apart per token bucket, so
+# the reference arms' costs are distinguishable whichever basis sr-bench
+# reports (measured spend or the spec's assumed per-million rates, which
+# mirror the same 4x gap).
+_STRONG_BUCKETS = {
+    "input": 1.0,
+    "cached_input": 0.5,
+    "cache_write": 1.25,
+    "output": 4.0,
+}
+_WEAK_BUCKETS = {key: value / 4 for key, value in _STRONG_BUCKETS.items()}
+_ASSUMED_PRICING = {
+    "cloud/frontier-reasoning": {"prompt_per_1m": 1.0, "completion_per_1m": 4.0},
+    "local/private-qwen": {"prompt_per_1m": 0.25, "completion_per_1m": 1.0},
+}
+_ZERO_BUCKETS = {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0}
 
 
 # ---- asset builders ----
@@ -122,7 +137,16 @@ def _render_spec(
     )
     spec = yaml.safe_load(text)
     spec["objective"]["min_cases"] = workload["min_cases"]
-    spec["references"] = {"strong": "rl-single", "weak": "rl-single"}
+    # X8: an absolute paired bar (the CI decision path needs it) and the
+    # assumed pricing that mirrors the registry's 4x price gap, so the
+    # reference arms' costs are comparable even when sr-bench cannot
+    # measure spend.
+    spec["objective"]["min_improvement_pp"] = 1.0
+    spec["cost_basis"] = {
+        "source": "provider_pricing",
+        "assumed_pricing": _ASSUMED_PRICING,
+    }
+    spec["references"] = {"strong": "rl-single-strong", "weak": "rl-single-weak"}
     if workload["declare_rendering"]:
         spec["workload"]["srbench_dataset"] = str(dataset)
         spec["workload"]["srbench_sha256"] = (
@@ -141,16 +165,28 @@ def _mom_target(target_id: str, router: dict) -> dict:
         "base_url": router["listener_url"] + "/v1",
         "config_hash": router["config_hash"],
         "max_inference_calls": 1,
-        "prices": {"vllm-sr/auto": _BUCKETS},
+        "prices": {"vllm-sr/auto": _ZERO_BUCKETS},
         "preview_url": router["mgmt_url"] + "/api/v1/routing/preview",
     }
 
 
-def _write_registry(path: Path, router_a: dict, router_b: dict, single: dict) -> Path:
-    """Register the mode-selected single target (the auto-built S arm)
-    and both routers."""
+def _single_target(target_id: str, model: str, base_url: str, prices: dict) -> dict:
+    return {
+        "id": target_id,
+        "kind": "single",
+        "model": model,
+        "base_url": base_url,
+        "prices": prices,
+    }
+
+
+def _write_registry(
+    path: Path, router_a: dict, router_b: dict, strong: dict, weak: dict
+) -> Path:
+    """Register the two priced reference arms (X8) and both routers."""
     targets = [
-        single,
+        strong,
+        weak,
         _mom_target("rl-mom-baseline", router_a),
         _mom_target("rl-mom-candidate", router_b),
     ]
@@ -268,29 +304,36 @@ def registered_targets(
     vllm_lanes: dict | None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """Register the R2 targets once: the S arm and both routers.
+    """Register the R2 targets once: the two priced reference arms (X8)
+    and both routers.
 
-    The S arm is the strong reference: the mock backend in mock mode,
-    the strong lane serving the frontier model in real-lane mode (X7).
+    The strong arm is the frontier model on the strong lane in real-lane
+    mode (the auto-built S arm); the weak arm is the local model on the
+    weak lane. In mock mode both hit the shared mock backend with the
+    same 4x-apart price lists.
     """
     if vllm_lanes is None:
-        single = {
-            "id": "rl-single",
-            "kind": "single",
-            "model": "local/private-qwen",
-            "base_url": mock_backend["endpoint"] + "/v1",
-            "prices": {"local/private-qwen": _BUCKETS},
-        }
+        strong_url = mock_backend["endpoint"] + "/v1"
+        weak_url = strong_url
     else:
-        single = {
-            "id": "rl-single",
-            "kind": "single",
-            "model": "cloud/frontier-reasoning",
-            "base_url": vllm_lanes["strong"] + "/v1",
-            "prices": {"cloud/frontier-reasoning": _BUCKETS},
-        }
+        strong_url = vllm_lanes["strong"] + "/v1"
+        weak_url = vllm_lanes["weak"] + "/v1"
+    strong = _single_target(
+        "rl-single-strong",
+        "cloud/frontier-reasoning",
+        strong_url,
+        {"cloud/frontier-reasoning": _STRONG_BUCKETS},
+    )
+    weak = _single_target(
+        "rl-single-weak",
+        "local/private-qwen",
+        weak_url,
+        {"local/private-qwen": _WEAK_BUCKETS},
+    )
     registry = tmp_path_factory.mktemp("r2-registry") / "targets.json"
-    _register_targets(srbench_bin, srbench_store, _write_registry(registry, router_a, router_b, single))
+    _register_targets(
+        srbench_bin, srbench_store, _write_registry(registry, router_a, router_b, strong, weak)
+    )
 
 
 # ---- V2-2: verify completes 3 AB/BA pairs and builds the S arm ----
@@ -303,6 +346,12 @@ def _bound_dataset(workload: dict, dataset: Path | None) -> Path:
     if bound is None:  # pragma: no cover - guarded by the fixtures
         raise RuntimeError("no dataset bound for the active workload mode")
     return bound
+
+
+def _run_doc(api: str, run_id: str) -> dict:
+    """One run document straight from the sr-bench service API."""
+    with urllib.request.urlopen(f"{api}/runs/{run_id}", timeout=10.0) as resp:
+        return json.loads(resp.read().decode("utf-8"))
 
 
 def test_verify_srbench_end_to_end(
@@ -339,17 +388,89 @@ def test_verify_srbench_end_to_end(
     frozen = json.loads(
         (work / "baseline-manifest.submitted.json").read_text("utf-8")
     )
-    assert frozen["targets"][0]["id"] == "rl-single"
+    assert frozen["targets"][0]["id"] == "rl-single-strong"
     assert frozen["targets"][1]["id"] == "rl-mom-baseline"
 
     # three AB/BA repetitions against the real service
     assert len(result["trials"]) == 3
     assert result["baseline_run_id"], "verify must resolve the submitted baseline"
     assert result["baseline_run_id"] in result["bench_refs"]
-    # the reference single-model arm was auto-constructed and completed
-    assert result["references"]["strong"]["run_id"], result["references"]
     assert result["verdict"] in {"PASS", "FAIL", "INCONCLUSIVE"}
     assert rc == {"PASS": 0, "FAIL": 1, "INCONCLUSIVE": 2}[result["verdict"]]
+
+    # X8 (1): the two priced reference arms are distinct runs and the weak
+    # one is the cheaper one
+    strong_ref = result["references"]["strong"]
+    weak_ref = result["references"]["weak"]
+    assert strong_ref["alias"] == "rl-single-strong"
+    assert weak_ref["alias"] == "rl-single-weak"
+    assert strong_ref["run_id"] and weak_ref["run_id"], result["references"]
+    assert strong_ref["run_id"] != weak_ref["run_id"]
+    assert (
+        strong_ref["cost_usd"] is not None and weak_ref["cost_usd"] is not None
+    ), result["references"]
+    assert weak_ref["cost_usd"] < strong_ref["cost_usd"], (
+        strong_ref["cost_usd"],
+        weak_ref["cost_usd"],
+    )
+
+    # X8 (2): the verdict is decidable, or inconclusive only for the
+    # expected small-sample reason (a 14-case smoke set cannot clear a
+    # conservative paired CI; a pipeline failure may not hide behind it)
+    if result["verdict"] == "INCONCLUSIVE":
+        expected = [
+            reason
+            for reason in result["reasons"]
+            if reason.startswith("insufficient paired sample")
+            or (reason.startswith("paired CI [") and "spans the threshold" in reason)
+        ]
+        assert expected and len(expected) == len(result["reasons"]), result["reasons"]
+
+    # X8 (3): the merged paired statistics are the conservative span of the
+    # per-pair compare payloads verify keeps in the work dir
+    spans: list[tuple[float, float]] = []
+    paired_counts: list[int] = []
+    for rep in range(3):
+        payload = json.loads((work / f"compare-rep{rep}.json").read_text("utf-8"))
+        entry = payload["comparisons"][0]
+        lo, hi = entry["quality_delta_ci95"]
+        spans.append((lo, hi))
+        paired_counts.append(int(entry["paired_cases"]))
+    merged = result["paired"]
+    assert merged is not None, "compare payloads carry paired statistics"
+    assert merged["quality_delta_ci95"] == [
+        min(lo for lo, _ in spans),
+        max(hi for _, hi in spans),
+    ]
+    assert merged["paired_cases"] == min(paired_counts)
+
+    # X8 (4): the trial runs executed in AB, BA, AB order
+    label_of = {
+        arm["run_id"]: label
+        for trial in result["trials"].values()
+        for label, arm in trial.items()
+    }
+    order = [label_of[run_id] for run_id in result["bench_refs"][2:8]]
+    assert order == [
+        "baseline",
+        "candidate",  # AB
+        "candidate",
+        "baseline",  # BA
+        "baseline",
+        "candidate",  # AB
+    ]
+
+    # the reference arms ran on the frozen protocol: sampling, limits, and
+    # dataset match the baseline run's field for field
+    api = srbench_url.rstrip("/") + "/api/sr-bench/v1"
+    baseline_doc = _run_doc(api, result["baseline_run_id"])
+    for role in ("strong", "weak"):
+        ref_doc = _run_doc(api, result["references"][role]["run_id"])
+        for key in ("sampling", "limits", "dataset"):
+            assert ref_doc["manifest"].get(key) == baseline_doc["manifest"].get(key), (
+                role,
+                key,
+            )
 
 
 # ---- V2-3: fault injection during a pair arm is INCONCLUSIVE ----
@@ -361,10 +482,15 @@ def test_verify_fault_injection_is_inconclusive(
     srbench_url: str,
     router_a: dict,
     registered_targets: None,
+    mock_delay_ms: int,
     tmp_path: Path,
 ) -> None:
     if workload["mode"] == "mock":
-        dataset = _long_dataset(tmp_path / "dataset.jsonl", workload["cases"], 16)
+        # X8/1398: per-request mock latency keeps the arms observable, so
+        # the dataset only needs duplicating when the delay is off
+        dataset = _long_dataset(
+            tmp_path / "dataset.jsonl", workload["cases"], 2 if mock_delay_ms >= 250 else 16
+        )
     else:
         # the real smoke set at real model latency keeps every arm in
         # flight for seconds - no case duplication needed (X7)

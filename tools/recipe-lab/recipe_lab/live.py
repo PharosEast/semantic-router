@@ -1132,6 +1132,12 @@ def verify_live(
             )
             continue
         comparison = cli.compare(base_run["run_id"], cand_run["run_id"])
+        # X8: keep each pair's raw compare payload on disk so the verdict's
+        # merged paired statistics stay auditable against their sources.
+        (work_dir / f"compare-rep{rep}.json").write_text(
+            json.dumps(comparison, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
         stats = paired_stats_from_comparison(comparison)
         if stats is not None:
             pair_stats.append(stats)

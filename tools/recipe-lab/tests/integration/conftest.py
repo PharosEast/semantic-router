@@ -99,23 +99,41 @@ def smoke_cases(smoke_dir: Path) -> Path:
 
 
 @pytest.fixture(scope="session")
-def mock_backend(smoke_cases: Path) -> dict:
+def mock_delay_ms() -> int:
+    """The shared mock backend's per-completion latency (X8/1398).
+
+    ``RECIPE_LAB_MOCK_DELAY_MS`` keeps sr-bench arms in flight so the
+    fault-injection poll can observe them without duplicating the case
+    set; the fault test widens its dataset only when the delay is off.
+    """
+    raw = os.environ.get("RECIPE_LAB_MOCK_DELAY_MS", "").strip()
+    try:
+        return int(float(raw)) if raw else 0
+    except ValueError:
+        return 0
+
+
+@pytest.fixture(scope="session")
+def mock_backend(smoke_cases: Path, mock_delay_ms: int) -> dict:
     """One shared mock OpenAI backend on an ephemeral port.
 
     Serves the answer-bank build (R1) and the sr-bench single-model
-    reference target (R2). Trial backends inside the runner use their own
+    reference targets (R2). Trial backends inside the runner use their own
     instances on separate ports.
     """
     port = free_port()
+    command = [
+        sys.executable,
+        str(SMOKE_DIR / "mock_backend.py"),
+        "--port",
+        str(port),
+        "--cases",
+        str(smoke_cases),
+    ]
+    if mock_delay_ms:
+        command += ["--delay-ms", str(mock_delay_ms)]
     proc = subprocess.Popen(
-        [
-            sys.executable,
-            str(SMOKE_DIR / "mock_backend.py"),
-            "--port",
-            str(port),
-            "--cases",
-            str(smoke_cases),
-        ],
+        command,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
     )
