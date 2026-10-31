@@ -54,12 +54,12 @@ trap cleanup EXIT
   > "$WORK/srbench-serve.log" 2>&1 &
 SRBENCH_PID=$!
 for _ in $(seq 1 60); do
-  curl -sf "http://127.0.0.1:${SRBENCH_PORT}/targets" > /dev/null 2>&1 && break
+  curl -sf "http://127.0.0.1:${SRBENCH_PORT}/health" > /dev/null 2>&1 && break
   kill -0 "$SRBENCH_PID" 2>/dev/null \
     || { echo "SMOKE-FAILED sr-bench died"; tail -30 "$WORK/srbench-serve.log"; exit 1; }
   sleep 1
 done
-curl -sf "http://127.0.0.1:${SRBENCH_PORT}/targets" > /dev/null \
+curl -sf "http://127.0.0.1:${SRBENCH_PORT}/health" > /dev/null \
   || { echo "SMOKE-FAILED sr-bench not ready"; tail -30 "$WORK/srbench-serve.log"; exit 1; }
 echo "SRBENCH-READY http://127.0.0.1:${SRBENCH_PORT}"
 
