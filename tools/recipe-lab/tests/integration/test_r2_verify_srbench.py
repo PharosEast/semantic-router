@@ -223,17 +223,29 @@ def _mom_only_manifest(
     must be auto-constructed from the registry by verify). Limits come
     from the workload mode: the real-lane runs need wider timeouts and
     some concurrency (X7)."""
+    binding = {
+        "path": str(dataset),
+        "sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
+    }
     manifest = {
         "version": "sr-bench-1.0",
         "name": _BASELINE_MANIFEST_NAME,
         "cost_policy": "capability_only",
         "targets": [_mom_target("rl-mom-baseline", router_a)],
-        "dataset": {
-            "path": str(dataset),
-            "sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
-        },
+        "dataset": binding,
         "limits": dict(limits),
     }
+    # A store-prepared dataset requires the run to request its profile and
+    # seed (sr-bench resolve_dataset checks both against the prepared
+    # manifest; mock-mode renderings have no sibling manifest and keep the
+    # defaults).
+    prepared = dataset.parent / "manifest.json"
+    if prepared.is_file() and prepared != dataset:
+        metadata = json.loads(prepared.read_text(encoding="utf-8"))
+        if metadata.get("sha256") == binding["sha256"]:
+            for key in ("profile", "seed"):
+                if key in metadata:
+                    manifest[key] = metadata[key]
     path.write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     return path
 
