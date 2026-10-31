@@ -6,7 +6,8 @@ invalid contracts are rejected at load time with actionable errors, never
 mid-experiment.
 
 Layout follows the recipe-lab design §5.3:
-  objective:    metric_key / direction / min_improvement_pct / replay_metric
+  objective:    metric_key / direction / min_improvement_pct or
+                min_improvement_pp (M2, paired CI) / min_cases / replay_metric
                 / constraints (E: economic conditions, distinct from gates)
   workload:     manifest / content_hash / profile
   attribution:  oracle_policy (label -> model mapping, or F2 rules/default)
@@ -47,6 +48,8 @@ STACK_MODES = {"external", "serve"}
 # `metric_key` stays the live sr-bench metric; `replay_metric` is what the
 # replay ledger records and `ledger top --spec` ranks by.
 REPLAY_METRICS = {"routed_accuracy"}
+# M2: default minimum paired sample for a live verdict (objective.min_cases).
+DEFAULT_MIN_CASES = 200
 # B: the frozen dataset is split three ways; frozen_test is quarantined from
 # replay/propose work and may only be touched by live-verdict --final, once.
 SPLIT_NAMES = ("calib", "dev", "frozen_test")
@@ -212,6 +215,13 @@ class Objective:
     direction: str
     min_improvement_pct: float
     replay_metric: str = "routed_accuracy"
+    # M2: paired-decision thresholds. `min_cases` is the minimum paired
+    # sample a live verdict needs (fewer -> INCONCLUSIVE). `min_improvement_pp`
+    # is an absolute percentage-point bar applied to the paired confidence
+    # interval; it is mutually exclusive with the relative `min_improvement_pct`,
+    # which cannot be applied to an absolute interval.
+    min_cases: int = 200
+    min_improvement_pp: float | None = None
     constraints: tuple[Constraint, ...] = ()
 
     @classmethod
@@ -234,6 +244,26 @@ class Objective:
             raw.get("min_improvement_pct", 0.0), "objective.min_improvement_pct"
         )
         _require(pct >= 0, "objective.min_improvement_pct must be >= 0")
+        # M2: min_improvement_pp (absolute, applied to the paired CI) and
+        # min_improvement_pct (relative, applied to point estimates) are
+        # mutually exclusive.
+        pp_raw = raw.get("min_improvement_pp")
+        min_pp: float | None = None
+        if pp_raw is not None:
+            min_pp = _require_number(pp_raw, "objective.min_improvement_pp")
+            _require(min_pp >= 0, "objective.min_improvement_pp must be >= 0")
+            _require(
+                "min_improvement_pct" not in raw,
+                "objective.min_improvement_pp and min_improvement_pct are mutually "
+                "exclusive; declare min_improvement_pp for the paired CI decision",
+            )
+        min_cases = raw.get("min_cases", DEFAULT_MIN_CASES)
+        _require(
+            isinstance(min_cases, int)
+            and not isinstance(min_cases, bool)
+            and min_cases >= 1,
+            "objective.min_cases must be an integer >= 1",
+        )
         replay_metric = raw.get("replay_metric", "routed_accuracy")
         _require(
             replay_metric in REPLAY_METRICS,
@@ -251,6 +281,8 @@ class Objective:
             direction=direction,
             min_improvement_pct=pct,
             replay_metric=replay_metric,
+            min_cases=min_cases,
+            min_improvement_pp=min_pp,
             constraints=constraints,
         )
 
@@ -261,6 +293,10 @@ class Objective:
             "min_improvement_pct": self.min_improvement_pct,
             "replay_metric": self.replay_metric,
         }
+        if self.min_cases != DEFAULT_MIN_CASES:
+            out["min_cases"] = self.min_cases
+        if self.min_improvement_pp is not None:
+            out["min_improvement_pp"] = self.min_improvement_pp
         if self.constraints:
             out["constraints"] = [c.to_dict() for c in self.constraints]
         return out
