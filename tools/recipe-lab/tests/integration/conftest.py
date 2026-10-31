@@ -453,10 +453,14 @@ def workload(vllm_lanes: dict | None, smoke_cases: Path, request) -> dict:
         "dataset": mmlu["path"],
         "min_cases": mmlu["case_count"],
         "declare_rendering": False,
-        # MMLU-Pro completions are long-form; the sr-bench default cap
-        # truncated ~50% of the 14-case set on the first real-lane run,
-        # so the runs request an explicit generous budget (X7).
-        "sampling": {"max_tokens": 8192},
+        # Qwen3.5 thinking chains blew the budget even at 8192 tokens
+        # (21-29% truncation on the second real-lane run); the runs disable
+        # thinking through the chat template and keep a generous ceiling, so
+        # completions land far under the cap on every arm (X7).
+        "sampling": {
+            "max_tokens": 8192,
+            "chat_template_kwargs": {"enable_thinking": False},
+        },
         "limits": {
             "concurrency": 4,
             "total_timeout_s": 7200,
