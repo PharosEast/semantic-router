@@ -1245,6 +1245,11 @@ def verify_live(
                     # replaced by the registry document - the same
                     # field-for-field validation path as the injected S arm.
                     ref_manifest = dict(manifest)
+                    # The frozen echo carries the baseline's review receipt;
+                    # after the targets swap it no longer matches this
+                    # derived plan, so drop it and let the service freeze
+                    # the reference plan fresh.
+                    ref_manifest.pop("plan_sha256", None)
                     ref_manifest["targets"] = [registry_doc]
                     ref_path = work_dir / f"reference-{role}-manifest.json"
                     ref_path.write_text(

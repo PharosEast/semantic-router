@@ -394,7 +394,11 @@ class VerifyStub:
         self.baseline_doc = baseline_doc or {
             "id": "run-base",
             "status": "completed",
-            "manifest": {"manifest_id": "m1", "dataset": {"sha256": _LEGACY_HASH}},
+            "manifest": {
+                "manifest_id": "m1",
+                "dataset": {"sha256": _LEGACY_HASH},
+                "plan_sha256": "sha256:baseline-review",
+            },
         }
         self.preview_status = preview_status
         self.candidate_statuses = list(candidate_statuses or [])
@@ -2106,6 +2110,13 @@ def test_verify_reference_arms_bind_and_cache(tmp_path):
     result = verify_live(cli=stub, **kwargs)
     assert result["verdict"] == "PASS"
     assert stub.ref_runs == 2
+    # the derived reference manifest drops the baseline's stale review
+    # receipt before submission (the targets swap invalidates it)
+    strong_manifest = json.loads(
+        (tmp_path / "reference-strong-manifest.json").read_text("utf-8")
+    )
+    assert "plan_sha256" not in strong_manifest
+    assert strong_manifest["targets"] == [{"id": "ref-strong"}]
     assert result["references"]["strong"] == {
         "alias": "ref-strong",
         "run_id": "run-ref-ref-strong",
