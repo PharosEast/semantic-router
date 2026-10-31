@@ -10,6 +10,7 @@ from recipe_lab.verdict import (
     PairedStats,
     compute_paired_stats,
     evaluate_verdict,
+    evidence_quality_reasons,
 )
 
 
@@ -363,3 +364,75 @@ def test_compute_paired_stats_rejects_bad_inputs():
         compute_paired_stats([1.0], groups={"a": [1.0]}, weights={})
     with pytest.raises(ValueError, match="cover"):
         compute_paired_stats([1.0, 1.0], groups={"a": [1.0]}, weights={"a": 1.0})
+
+
+# --- M3: evidence quality floors (truncation / no-answer rates) ---
+
+
+def test_evidence_quality_truncation_over_ceiling_is_reported():
+    reasons = evidence_quality_reasons(
+        "baseline",
+        truncation_rate=32 / 60,
+        no_answer_rate=None,
+        max_truncation_pct=2.0,
+        max_no_answer_pct=2.0,
+    )
+    assert reasons == ["baseline truncation rate 53.33% exceeds max 2.00%"]
+
+
+def test_evidence_quality_no_answer_over_ceiling_is_reported():
+    reasons = evidence_quality_reasons(
+        "candidate",
+        truncation_rate=0.0,
+        no_answer_rate=5 / 60,
+        max_truncation_pct=2.0,
+        max_no_answer_pct=2.0,
+    )
+    assert reasons == ["candidate no-answer rate 8.33% exceeds max 2.00%"]
+
+
+def test_evidence_quality_within_ceilings_is_clean():
+    assert (
+        evidence_quality_reasons(
+            "baseline",
+            truncation_rate=0.01,
+            no_answer_rate=0.02,
+            max_truncation_pct=2.0,
+            max_no_answer_pct=2.0,
+        )
+        == []
+    )
+
+
+def test_evidence_quality_unknown_rate_is_not_penalized():
+    assert (
+        evidence_quality_reasons(
+            "candidate",
+            truncation_rate=None,
+            no_answer_rate=None,
+            max_truncation_pct=2.0,
+            max_no_answer_pct=2.0,
+        )
+        == []
+    )
+
+
+def test_evidence_quality_ceiling_breach_is_incomplete_evidence():
+    # A breach lands in incomplete_reasons, so the verdict is INCONCLUSIVE -
+    # a truncated arm is unreliable evidence, not a quality loss.
+    result = evaluate_verdict(
+        baseline_metric=0.80,
+        candidate_metric=0.90,
+        direction="maximize",
+        min_improvement_pct=1.0,
+        guards=[],
+        incomplete_reasons=evidence_quality_reasons(
+            "baseline",
+            truncation_rate=0.10,
+            no_answer_rate=None,
+            max_truncation_pct=2.0,
+            max_no_answer_pct=2.0,
+        ),
+    )
+    assert result.verdict == "INCONCLUSIVE"
+    assert "baseline truncation rate 10.00% exceeds max 2.00%" in result.reasons

@@ -35,6 +35,14 @@ the confidence interval against `objective.min_improvement_pp`, with
 `objective.min_cases` as the minimum paired sample. The stats are recorded
 in the ledger record's `paired` field.
 
+Evidence quality (M3): each compare payload's `baseline_targets` /
+`candidate_targets` entries carry `output_diagnostics` (planned/result
+cases, finish reasons). Truncation and no-answer rates beyond the
+spec's `evidence_quality` ceilings mark the arm's score unreliable
+evidence and turn the verdict INCONCLUSIVE; unknown rates (no
+diagnostics) are reported as null, never guessed as zero. Across
+repeated pairs each rate merges conservatively (worst pair).
+
 Live `verify` orchestration (I): `verify_live` drives sr-bench end to end
 for one candidate - a preview run (routing distribution into the ledger
 notes) plus `repetitions` AB/BA pairs, where each pair re-runs the
@@ -53,9 +61,14 @@ from pathlib import Path
 from typing import Any
 
 from . import abba
-from .contract import Constraint, ContractError, ExperimentSpec, Gate
+from .contract import Constraint, ContractError, EvidenceQuality, ExperimentSpec, Gate
 from .srbench import SrbenchCli, extract_metric_values
-from .verdict import GuardResult, PairedStats, evaluate_verdict
+from .verdict import (
+    GuardResult,
+    PairedStats,
+    evaluate_verdict,
+    evidence_quality_reasons,
+)
 
 _MEASUREMENT_KEYS = ("name", "candidate", "baseline")
 
@@ -326,6 +339,105 @@ def _merge_paired_stats(stats: list[PairedStats]) -> PairedStats | None:
     )
 
 
+def arm_evidence_quality(
+    targets: Any,
+    *,
+    routing_arm: bool,
+    selected_id: str | None = None,
+) -> tuple[float | None, float | None]:
+    """M3: one arm's (truncation_rate, no_answer_rate) from its targets.
+
+    sr-bench compares whole targets and each target summary carries
+    `output_diagnostics` (planned/result cases, finish reasons). The
+    baseline arm pins the target compare named
+    (`baseline_selected_target_id`); the candidate arm is the routing
+    target (`mom` kind, else the last target), matching `_arm_accuracy`.
+    Rates are fractions of the target's planned cases. No diagnostics or
+    a non-positive planned count yield (None, None): missing evidence is
+    reported, never guessed as zero.
+    """
+    if not isinstance(targets, list):
+        return None, None
+    entries = [t for t in targets if isinstance(t, dict)]
+
+    def _rates(entry: dict) -> tuple[float, float] | None:
+        diagnostics = entry.get("output_diagnostics")
+        if not isinstance(diagnostics, dict):
+            return None
+        planned = diagnostics.get("planned_cases")
+        if isinstance(planned, bool) or not isinstance(planned, int) or planned <= 0:
+            return None
+        result_cases = diagnostics.get("result_cases")
+        if isinstance(result_cases, bool) or not isinstance(result_cases, int):
+            result_cases = 0
+        finish = diagnostics.get("finish_reasons")
+        truncated = 0
+        if isinstance(finish, dict):
+            length = finish.get("length")
+            if isinstance(length, int) and not isinstance(length, bool):
+                truncated = length
+        return truncated / planned, (planned - result_cases) / planned
+
+    if isinstance(selected_id, str):
+        for entry in entries:
+            if entry.get("id") == selected_id:
+                rates = _rates(entry)
+                if rates is not None:
+                    return rates
+    if routing_arm:
+        for entry in entries:
+            if entry.get("kind") == "mom":
+                rates = _rates(entry)
+                if rates is not None:
+                    return rates
+    for entry in reversed(entries):
+        rates = _rates(entry)
+        if rates is not None:
+            return rates
+    return None, None
+
+
+def _evidence_entry(
+    rates: tuple[float | None, float | None],
+    arm: str,
+    ceilings: EvidenceQuality,
+    incomplete: list[str],
+) -> dict[str, float | None]:
+    """M3: one arm's evidence-quality result block plus its reasons.
+
+    Rates are fractions (0-1); reasons compare them against the spec's
+    percentage ceilings and land in `incomplete_reasons` (INCONCLUSIVE).
+    """
+    truncation_rate, no_answer_rate = rates
+    incomplete.extend(
+        evidence_quality_reasons(
+            arm,
+            truncation_rate=truncation_rate,
+            no_answer_rate=no_answer_rate,
+            max_truncation_pct=ceilings.max_truncation_pct,
+            max_no_answer_pct=ceilings.max_no_answer_pct,
+        )
+    )
+    return {"truncation_rate": truncation_rate, "no_answer_rate": no_answer_rate}
+
+
+def _worst_rates(
+    rates: list[tuple[float | None, float | None]],
+) -> tuple[float | None, float | None]:
+    """M3: worst-case per-arm rates across repeated pairs (max each).
+
+    A pair without diagnostics contributes nothing and never masks a
+    breach seen in another pair; if no pair has diagnostics the rate
+    stays unknown (None).
+    """
+    truncations = [t for t, _ in rates if t is not None]
+    no_answers = [n for _, n in rates if n is not None]
+    return (
+        max(truncations) if truncations else None,
+        max(no_answers) if no_answers else None,
+    )
+
+
 def _dataset_identity(raw: Any) -> str | None:
     """Normalize an sr-bench dataset sha256 (bare hexdigest) to the A4 form."""
     if not isinstance(raw, str) or not raw.strip():
@@ -407,6 +519,11 @@ def live_verdict_from_runs(
     the verdict is decided from the paired confidence interval (see
     `paired_stats_from_comparison`); the entry's stats are returned in
     `paired` for the ledger.
+
+    M3: both arms' output-quality rates come from the compare payload's
+    target summaries; a rate beyond the spec's `evidence_quality` ceiling
+    marks the evidence unreliable (INCONCLUSIVE) and the rates are
+    returned in `evidence_quality` for the ledger.
     """
     # M1: both runs must have scored the contract's own frozen split, else
     # the verdict would cite evidence from a different question set.
@@ -423,6 +540,36 @@ def live_verdict_from_runs(
     )
     # M2: paired statistics ride along when the compare payload carries them.
     stats = paired_stats_from_comparison(comparison)
+    # M3: output-quality ceilings from the compare payload's target summaries.
+    base_targets = (
+        comparison.get("baseline_targets") if isinstance(comparison, dict) else None
+    )
+    cand_targets = (
+        comparison.get("candidate_targets") if isinstance(comparison, dict) else None
+    )
+    selected = (
+        comparison.get("baseline_selected_target_id")
+        if isinstance(comparison, dict)
+        else None
+    )
+    evidence = {
+        "baseline": _evidence_entry(
+            arm_evidence_quality(
+                base_targets,
+                routing_arm=False,
+                selected_id=selected if isinstance(selected, str) else None,
+            ),
+            "baseline",
+            spec.evidence_quality,
+            incomplete,
+        ),
+        "candidate": _evidence_entry(
+            arm_evidence_quality(cand_targets, routing_arm=True),
+            "candidate",
+            spec.evidence_quality,
+            incomplete,
+        ),
+    }
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
     constraint_evidence = _constraint_evidence(
@@ -464,6 +611,7 @@ def live_verdict_from_runs(
         "undeclared_measurements": undeclared,
         "bench_refs": [baseline_run_id, candidate_run_id],
         "paired": stats.to_dict() if stats else None,
+        "evidence_quality": evidence,
     }
     if not spec.gates:
         result["gates_note"] = "no guard declared"
@@ -526,6 +674,10 @@ def verify_live(
     M2: the pairs' `comparisons[]` statistics merge conservatively (counts
     sum, intervals take the widest span) and drive the paired decision, so
     every repeated case counts toward `min_cases`.
+
+    M3: the pairs' output-quality rates merge conservatively (worst pair)
+    against the spec's `evidence_quality` ceilings and are returned in
+    `evidence_quality` for the ledger.
 
     `targets` are the registered sr-bench MoM target ids the router is
     serving the candidate config on. The preview run is diagnostic only:
@@ -608,6 +760,9 @@ def verify_live(
     metric_key = spec.objective.metric_key
     rows: list[dict[str, Any]] = []
     pair_stats: list[PairedStats] = []
+    pair_evidence: list[
+        tuple[tuple[float | None, float | None], tuple[float | None, float | None]]
+    ] = []
     constraint_values: dict[str, list[tuple[float | None, float | None]]] = {
         constraint.name: [] for constraint in spec.objective.constraints
     }
@@ -626,6 +781,30 @@ def verify_live(
         stats = paired_stats_from_comparison(comparison)
         if stats is not None:
             pair_stats.append(stats)
+        # M3: per-pair output quality; merged worst-case below.
+        base_sec = (
+            comparison.get("baseline_targets") if isinstance(comparison, dict) else None
+        )
+        cand_sec = (
+            comparison.get("candidate_targets")
+            if isinstance(comparison, dict)
+            else None
+        )
+        selected = (
+            comparison.get("baseline_selected_target_id")
+            if isinstance(comparison, dict)
+            else None
+        )
+        pair_evidence.append(
+            (
+                arm_evidence_quality(
+                    base_sec,
+                    routing_arm=False,
+                    selected_id=selected if isinstance(selected, str) else None,
+                ),
+                arm_evidence_quality(cand_sec, routing_arm=True),
+            )
+        )
         baseline_value, candidate_value = _pair_metrics(
             comparison, metric_key, incomplete
         )
@@ -675,6 +854,23 @@ def verify_live(
             }
         )
 
+    # M3: conservative merge - each rate takes the worst observed pair; a
+    # pair without diagnostics never masks a breach seen in another pair.
+    evidence = {
+        "baseline": _evidence_entry(
+            _worst_rates([base for base, _ in pair_evidence]),
+            "baseline",
+            spec.evidence_quality,
+            incomplete,
+        ),
+        "candidate": _evidence_entry(
+            _worst_rates([cand for _, cand in pair_evidence]),
+            "candidate",
+            spec.evidence_quality,
+            incomplete,
+        ),
+    }
+
     guards, undeclared = resolve_gates(spec.gates, measurements)
     # M2: the pairs' statistics merge conservatively and drive the paired
     # decision (all repeated cases count toward min_cases).
@@ -719,6 +915,7 @@ def verify_live(
         "abba_summary": summary,
         "preview": preview_info,
         "paired": stats.to_dict() if stats else None,
+        "evidence_quality": evidence,
     }
     if not spec.gates:
         result["gates_note"] = "no guard declared"

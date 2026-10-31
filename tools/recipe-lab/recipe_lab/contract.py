@@ -50,6 +50,8 @@ STACK_MODES = {"external", "serve"}
 REPLAY_METRICS = {"routed_accuracy"}
 # M2: default minimum paired sample for a live verdict (objective.min_cases).
 DEFAULT_MIN_CASES = 200
+# M3: default output-quality ceilings for live evidence (evidence_quality).
+DEFAULT_MAX_EVIDENCE_PCT = 2.0
 # B: the frozen dataset is split three ways; frozen_test is quarantined from
 # replay/propose work and may only be touched by live-verdict --final, once.
 SPLIT_NAMES = ("calib", "dev", "frozen_test")
@@ -750,6 +752,48 @@ class Stack:
 
 
 @dataclass(frozen=True)
+class EvidenceQuality:
+    """M3: output-quality ceilings for live evidence.
+
+    Truncated outputs and missing answers make an arm's score unreliable
+    evidence rather than a quality loss: a rate beyond its ceiling turns
+    the live verdict INCONCLUSIVE. sr-bench reports the per-target counts
+    (target summary `output_diagnostics`), and the verdict reads them
+    from the compare payload's `baseline_targets`/`candidate_targets`.
+    """
+
+    max_truncation_pct: float = DEFAULT_MAX_EVIDENCE_PCT
+    max_no_answer_pct: float = DEFAULT_MAX_EVIDENCE_PCT
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> EvidenceQuality:
+        unknown = sorted(set(raw) - {"max_truncation_pct", "max_no_answer_pct"})
+        _require(
+            not unknown,
+            f"evidence_quality has unknown keys: {', '.join(unknown)}",
+        )
+        truncation = _require_number(
+            raw.get("max_truncation_pct", DEFAULT_MAX_EVIDENCE_PCT),
+            "evidence_quality.max_truncation_pct",
+        )
+        _require(truncation >= 0, "evidence_quality.max_truncation_pct must be >= 0")
+        no_answer = _require_number(
+            raw.get("max_no_answer_pct", DEFAULT_MAX_EVIDENCE_PCT),
+            "evidence_quality.max_no_answer_pct",
+        )
+        _require(no_answer >= 0, "evidence_quality.max_no_answer_pct must be >= 0")
+        return cls(max_truncation_pct=truncation, max_no_answer_pct=no_answer)
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {}
+        if self.max_truncation_pct != DEFAULT_MAX_EVIDENCE_PCT:
+            out["max_truncation_pct"] = self.max_truncation_pct
+        if self.max_no_answer_pct != DEFAULT_MAX_EVIDENCE_PCT:
+            out["max_no_answer_pct"] = self.max_no_answer_pct
+        return out
+
+
+@dataclass(frozen=True)
 class ExperimentSpec:
     api_version: str
     objective: Objective
@@ -762,6 +806,8 @@ class ExperimentSpec:
     stack: Stack | None = None
     # E2: optional model -> relative-cost map for the replay cost proxy.
     cost_model: dict[str, float] | None = None
+    # M3: output-quality ceilings; rates beyond them are unreliable evidence.
+    evidence_quality: EvidenceQuality = field(default_factory=EvidenceQuality)
     # directory of the YAML file this spec was loaded from (from_yaml only);
     # workload.manifest resolves against it. Not part of the contract.
     spec_dir: str | None = None
@@ -791,6 +837,15 @@ class ExperimentSpec:
             else None
         )
         cost_model = _check_cost_model(raw.get("cost_model"))
+        # M3: optional output-quality ceilings; absent means the defaults.
+        evidence_raw = raw.get("evidence_quality")
+        evidence_quality = (
+            EvidenceQuality.from_dict(
+                _require_mapping(evidence_raw, "evidence_quality")
+            )
+            if evidence_raw is not None
+            else EvidenceQuality()
+        )
         # A5: `evaluation` is retired - replay and live are separate commands,
         # tiers are fixed by the CLI, not contracted per experiment.
         _require(
@@ -806,6 +861,7 @@ class ExperimentSpec:
             budget=budget,
             stack=stack,
             cost_model=cost_model,
+            evidence_quality=evidence_quality,
         )
 
     @classmethod
@@ -899,6 +955,8 @@ class ExperimentSpec:
             out["stack"] = self.stack.to_dict()
         if self.cost_model is not None:
             out["cost_model"] = dict(self.cost_model)
+        if self.evidence_quality != EvidenceQuality():
+            out["evidence_quality"] = self.evidence_quality.to_dict()
         return out
 
 

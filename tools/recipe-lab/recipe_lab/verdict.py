@@ -238,6 +238,35 @@ def resolve_constraint(constraint: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+def evidence_quality_reasons(
+    arm: str,
+    *,
+    truncation_rate: float | None,
+    no_answer_rate: float | None,
+    max_truncation_pct: float,
+    max_no_answer_pct: float,
+) -> list[str]:
+    """M3: incomplete-evidence reasons when an arm's output quality degrades.
+
+    A truncated output or a missing answer is unreliable evidence, not a
+    quality loss: a rate beyond its ceiling turns the verdict INCONCLUSIVE.
+    Unknown rates (the payload carries no output diagnostics) are not
+    penalized - missing evidence is reported, never guessed as zero.
+    """
+    reasons: list[str] = []
+    if truncation_rate is not None and truncation_rate * 100.0 > max_truncation_pct:
+        reasons.append(
+            f"{arm} truncation rate {truncation_rate * 100.0:.2f}% exceeds max "
+            f"{max_truncation_pct:.2f}%"
+        )
+    if no_answer_rate is not None and no_answer_rate * 100.0 > max_no_answer_pct:
+        reasons.append(
+            f"{arm} no-answer rate {no_answer_rate * 100.0:.2f}% exceeds max "
+            f"{max_no_answer_pct:.2f}%"
+        )
+    return reasons
+
+
 def evaluate_verdict(
     *,
     baseline_metric: float | None,
