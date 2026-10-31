@@ -339,13 +339,20 @@ def paired_stats_from_comparison(comparison: Any) -> PairedStats | None:
 
 
 def _merge_paired_stats(stats: list[PairedStats]) -> PairedStats | None:
-    """M2: conservative merge of the per-pair statistics across AB/BA pairs.
+    """M2: conservative merge of the per-pair statistics across AB/BA pairs
+    and repeated runs.
 
-    Counts sum and the delta averages; each interval takes the widest span
-    (min low, max high). A recomputed merged interval would need the
-    per-case diffs, which a compare payload does not expose, so the merged
-    bounds are conservative, never optimistic. Any pair without an interval
-    drops the merged interval to None (the verdict then says why).
+    `paired_cases` takes the minimum, not the sum: every pair replays the
+    same case set, so summing would inflate the distinct-case count and let
+    repetitions dilute the min_cases bar (70 cases x 3 runs would read 210).
+    The merge width and the total observation count are kept in
+    `repetitions` and `paired_observations`. wins/losses/ties still sum
+    (each observation counts) and the delta averages; each interval takes
+    the widest span (min low, max high). A recomputed merged interval would
+    need the per-case diffs, which a compare payload does not expose, so
+    the merged bounds are conservative, never optimistic. Any pair without
+    an interval drops the merged interval to None (the verdict then says
+    why).
     """
     if not stats:
         return None
@@ -358,13 +365,15 @@ def _merge_paired_stats(stats: list[PairedStats]) -> PairedStats | None:
         return (min(lo for lo, _ in values), max(hi for _, hi in values))
 
     return PairedStats(
-        paired_cases=sum(s.paired_cases for s in stats),
+        paired_cases=min(s.paired_cases for s in stats),
         quality_delta=statistics.mean([s.quality_delta for s in stats]),
         quality_delta_ci95=_span(intervals),
         quality_delta_bootstrap_ci95=_span(boots),
         wins=sum(s.wins for s in stats),
         losses=sum(s.losses for s in stats),
         ties=sum(s.ties for s in stats),
+        repetitions=len(stats),
+        paired_observations=sum(s.paired_cases for s in stats),
     )
 
 
@@ -1218,7 +1227,8 @@ def verify_live(
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
     # M2: the pairs' statistics merge conservatively and drive the paired
-    # decision (all repeated cases count toward min_cases).
+    # decision (min_cases reads the distinct-case count, not the sum over
+    # repeated runs - see _merge_paired_stats).
     stats = _merge_paired_stats(pair_stats)
     verdict = evaluate_verdict(
         baseline_metric=baseline_metric,
