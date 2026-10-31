@@ -946,7 +946,9 @@ def _submit_baseline_manifest(
         raw["targets"] = [match, *targets]
     dataset = raw.get("dataset")
     if isinstance(dataset, dict) and dataset.get("sha256"):
-        expected = spec.workload.split_hash(workload_split)
+        # X3: bound via the split's srbench_dataset hash when declared,
+        # else the legacy cases hash.
+        expected = spec.workload.live_dataset_hash(workload_split)
         actual = _dataset_identity(dataset.get("sha256"))
         if actual != expected:
             raise ContractError(

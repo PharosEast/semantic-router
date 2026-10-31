@@ -315,6 +315,52 @@ def test_srbench_split_fields_require_both():
         ExperimentSpec.from_dict(raw2)
 
 
+def test_legacy_workload_binds_srbench_rendering(tmp_path):
+    # X3 on the legacy single-workload form: the workload declares the
+    # sr-bench rendering of the same cases, verify_workload checks its hash
+    # and 1:1 pairing, and live binds the rendering's hash.
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        "".join(
+            json.dumps({"case_id": cid, "prompt": f"p{n}", "truth": "math"}) + "\n"
+            for n, cid in enumerate(("c1", "c2"), 1)
+        ),
+        encoding="utf-8",
+    )
+    rendering = tmp_path / "cases.srbench.jsonl"
+    rendering.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "id": cid,
+                    "benchmark": "recipe-lab",
+                    "messages": [{"role": "user", "content": f"p{n}"}],
+                    "answer": "math",
+                },
+                sort_keys=True,
+            )
+            + "\n"
+            for n, cid in enumerate(("c1", "c2"), 1)
+        ),
+        encoding="utf-8",
+    )
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["workload"]["manifest"] = "cases.jsonl"
+    raw["workload"]["content_hash"] = dataset_content_hash(cases)
+    raw["workload"]["srbench_dataset"] = "cases.srbench.jsonl"
+    raw["workload"]["srbench_sha256"] = dataset_content_hash(rendering)
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    spec = ExperimentSpec.from_yaml(spec_path)
+    assert spec.workload.split_srbench_dataset("dev") == "cases.srbench.jsonl"
+    assert spec.workload.live_dataset_hash("dev") == dataset_content_hash(rendering)
+    # the declared hashes and the 1:1 pairing verify against the real files
+    assert spec.verify_workload(split="dev") == dataset_content_hash(cases)
+    # the round-trip keeps the legacy single-workload shape with the new keys
+    assert spec.to_dict()["workload"] == raw["workload"]
+
+
 def test_verify_workload_checks_srbench_hash_and_pairing(tmp_path):
     # the happy path: the rendering re-hashes to its declared hash and pairs
     spec_path = _write_srbench_splits_dataset(tmp_path)
