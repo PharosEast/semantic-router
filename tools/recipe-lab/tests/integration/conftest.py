@@ -463,5 +463,8 @@ def workload(vllm_lanes: dict | None, smoke_cases: Path, request) -> dict:
             "idle_timeout_s": 600,
             "max_run_seconds": 14400,
             "case_timeout_s": 900,
+            # sr-bench's default output cap is 4096; raising it here lets
+            # sampling.max_tokens=8192 pass the request-params validation.
+            "max_output_tokens": 8192,
         },
     }
