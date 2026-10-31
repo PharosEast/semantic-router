@@ -15,6 +15,8 @@ from recipe_lab.ledger import Ledger, LedgerRecord
 from recipe_lab.live import (
     _merge_paired_stats,
     _pair_metrics,
+    _worst_rates,
+    arm_evidence_quality,
     live_verdict_from_runs,
     measurements_from_rows,
     paired_stats_from_comparison,
@@ -1364,3 +1366,163 @@ def test_merge_paired_stats_takes_widest_span():
         _merge_paired_stats([one(60, (0.01, 0.03)), one(60, None)]).quality_delta_ci95
         is None
     )
+
+
+# ---- M3: evidence quality (truncation / no-answer ceilings) ----
+
+
+def _target(
+    target_id: str,
+    *,
+    kind: str | None = None,
+    planned: int = 60,
+    results: int | None = None,
+    length: int = 0,
+) -> dict:
+    """One sr-bench target summary: id + output_diagnostics."""
+    entry: dict = {
+        "id": target_id,
+        "output_diagnostics": {
+            "planned_cases": planned,
+            "result_cases": planned if results is None else results,
+            "finish_reasons": {"length": length} if length else {"stop": planned},
+        },
+    }
+    if kind is not None:
+        entry["kind"] = kind
+    return entry
+
+
+def _sectioned_payload(
+    *,
+    baseline_targets: list[dict] | None = None,
+    candidate_targets: list[dict] | None = None,
+) -> dict:
+    """M3-shaped compare payload: target sections with output diagnostics."""
+    return {
+        "baseline_targets": (
+            baseline_targets if baseline_targets is not None else [_target("single-a")]
+        ),
+        "candidate_targets": (
+            candidate_targets
+            if candidate_targets is not None
+            else [_target("mom-x", kind="mom")]
+        ),
+        "baseline_selected_target_id": "single-a",
+    }
+
+
+def test_live_verdict_truncated_baseline_is_inconclusive():
+    # J3's single reference arm lost 32/60 cases to truncation; under the M3
+    # ceiling that silent quality loss becomes unreliable evidence.
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _sectioned_payload(
+                baseline_targets=[_target("single-a", length=32)],
+            )
+
+    result = live_verdict_from_runs(
+        spec=_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert "baseline truncation rate 53.33% exceeds max 2.00%" in result["reasons"][0]
+    assert result["evidence_quality"]["baseline"]["truncation_rate"] == pytest.approx(
+        32 / 60
+    )
+    assert result["evidence_quality"]["candidate"] == {
+        "truncation_rate": 0.0,
+        "no_answer_rate": 0.0,
+    }
+
+
+def test_live_verdict_no_answer_over_ceiling_is_inconclusive():
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _sectioned_payload(
+                candidate_targets=[_target("mom-x", kind="mom", results=52)],
+            )
+
+    result = live_verdict_from_runs(
+        spec=_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert "candidate no-answer rate 13.33% exceeds max 2.00%" in result["reasons"][0]
+    assert result["evidence_quality"]["candidate"]["no_answer_rate"] == pytest.approx(
+        8 / 60
+    )
+
+
+def test_live_verdict_missing_diagnostics_does_not_veto():
+    # A payload without output diagnostics reports unknown rates and lets
+    # the paired decision stand - missing evidence is never guessed as zero.
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _paired_payload(paired_cases=400, delta=0.05, ci=(0.03, 0.07))
+
+    result = live_verdict_from_runs(
+        spec=_pp_spec(2.0),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "PASS"
+    assert not any("rate" in reason for reason in result["reasons"])
+    assert result["evidence_quality"] == {
+        "baseline": {"truncation_rate": None, "no_answer_rate": None},
+        "candidate": {"truncation_rate": None, "no_answer_rate": None},
+    }
+
+
+def test_arm_evidence_quality_selection_rules():
+    reference = _target("single-a", length=6)
+    mom = _target("mom-x", kind="mom", planned=50, results=48, length=1)
+
+    # baseline: the target compare pinned via baseline_selected_target_id wins
+    truncation, _ = arm_evidence_quality(
+        [reference, _target("single-b", length=40)],
+        routing_arm=False,
+        selected_id="single-a",
+    )
+    assert truncation == pytest.approx(6 / 60)
+
+    # candidate: the routing (mom) target wins over the reference lane
+    truncation, no_answer = arm_evidence_quality([reference, mom], routing_arm=True)
+    assert truncation == pytest.approx(1 / 50)
+    assert no_answer == pytest.approx(2 / 50)
+
+    # no diagnostics anywhere, or nonsense planned count -> unknown
+    assert arm_evidence_quality([{"id": "x"}], routing_arm=False) == (None, None)
+    assert arm_evidence_quality(None, routing_arm=True) == (None, None)
+    bad = _target("single-c")
+    bad["output_diagnostics"]["planned_cases"] = 0
+    assert arm_evidence_quality([bad], routing_arm=False) == (None, None)
+
+
+def test_worst_rates_takes_max_and_keeps_unknown():
+    assert _worst_rates([(0.01, 0.02), (0.05, None), (None, 0.03)]) == (0.05, 0.03)
+    assert _worst_rates([(None, None)]) == (None, None)
+    assert _worst_rates([]) == (None, None)
