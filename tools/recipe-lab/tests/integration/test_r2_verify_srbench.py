@@ -337,8 +337,11 @@ def test_verify_fault_injection_is_inconclusive(
     # Poll the service until a pair arm re-runs the baseline manifest (the
     # same frozen manifest submitted again after the preview) and cancel it.
     # Direct HTTP for both the observation and the cancel: the CLI's own
-    # startup takes seconds, longer than the arms stay in flight.
-    runs_url = srbench_url.rstrip("/") + "/runs"
+    # startup takes seconds, longer than the arms stay in flight. All
+    # routes live under the sr-bench service's API prefix (mirrors
+    # vllm-sr's service PREFIX; a bare /run path 404s into an empty list).
+    api = srbench_url.rstrip("/") + "/api/sr-bench/v1"
+    runs_url = api + "/runs"
     baseline_id = None
     cancelled = False
     deadline = time.monotonic() + 600.0
