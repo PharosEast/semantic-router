@@ -41,6 +41,10 @@ echo "INTEGRATION-WORK=$WORK"
 [ -x "$RL/vllm-sr" ] || { echo "SMOKE-FAILED vllm-sr missing in $RL"; exit 1; }
 "$RL/python" -c "import pytest" 2>/dev/null \
   || { echo "SMOKE-FAILED pytest missing in $RL"; exit 1; }
+# The real router execs vllm-srun to serve its decision model; without it
+# every router process dies at startup with "runtime command cannot run".
+command -v vllm-srun > /dev/null 2>&1 \
+  || { echo "SMOKE-FAILED vllm-srun not on PATH (router model-runtime serve command)"; exit 1; }
 
 SRBENCH_PID=""
 cleanup() {

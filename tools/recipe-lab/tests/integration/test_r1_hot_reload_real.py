@@ -28,17 +28,21 @@ pytestmark = [
 
 
 def _run_cli(capsys: pytest.CaptureFixture[str], argv: list[str]) -> dict:
-    """Invoke the CLI in-process and parse its stdout JSON document."""
+    """Invoke the CLI in-process and parse its stdout JSON document.
+
+    ``_print_json`` pretty-prints with ``indent=2``, so the document spans
+    several lines and must be parsed as a whole, not per line.
+    """
     assert main(argv) == 0
     out = capsys.readouterr().out
-    for line in reversed(out.strip().splitlines()):
-        try:
-            document = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(document, dict):
-            return document
-    raise AssertionError(f"no JSON document on stdout for: {' '.join(argv)}")
+    try:
+        document = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise AssertionError(
+            f"no JSON document on stdout for: {' '.join(argv)}"
+        ) from exc
+    assert isinstance(document, dict), document
+    return document
 
 
 def _notes_statuses(notes: str) -> list:
