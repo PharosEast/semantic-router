@@ -613,10 +613,33 @@ class Workload:
             isinstance(content_hash, str) and content_hash.strip(),
             f"{prefix}.content_hash is required (frozen dataset hash; cross-round comparability depends on it)",
         )
+        srbench_dataset = raw.get("srbench_dataset")
+        srbench_sha256 = raw.get("srbench_sha256")
+        _require(
+            (srbench_dataset is None) == (srbench_sha256 is None),
+            f"{prefix} must declare srbench_dataset and srbench_sha256 "
+            "together (the sr-bench rendering of the same cases)",
+        )
+        if srbench_dataset is not None:
+            _require(
+                isinstance(srbench_dataset, str) and srbench_dataset.strip(),
+                f"{prefix}.srbench_dataset must be a non-empty string",
+            )
+            _require(
+                isinstance(srbench_sha256, str) and srbench_sha256.strip(),
+                f"{prefix}.srbench_sha256 must be a non-empty string",
+            )
         return cls(
             profile=profile,
             split_rule=None,
-            splits={"dev": SplitSpec(manifest=manifest, content_hash=content_hash)},
+            splits={
+                "dev": SplitSpec(
+                    manifest=manifest,
+                    content_hash=content_hash,
+                    srbench_dataset=srbench_dataset,
+                    srbench_sha256=srbench_sha256,
+                )
+            },
             legacy=True,
             name=name,
             kind=kind,
@@ -686,12 +709,16 @@ class Workload:
             extra["guard_pp"] = self.guard_pp
         if self.legacy:
             split = self.splits["dev"]
-            return {
+            out = {
                 "manifest": split.manifest,
                 "content_hash": split.content_hash,
                 "profile": self.profile,
                 **extra,
             }
+            if split.srbench_dataset is not None:
+                out["srbench_dataset"] = split.srbench_dataset
+                out["srbench_sha256"] = split.srbench_sha256
+            return out
         return {
             "profile": self.profile,
             "split_rule": self.split_rule,

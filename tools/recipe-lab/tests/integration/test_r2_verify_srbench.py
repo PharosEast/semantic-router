@@ -22,6 +22,8 @@ from pathlib import Path
 import pytest
 import yaml
 from recipe_lab.cli import main
+from recipe_lab.splitting import load_cases
+from recipe_lab.srbench import cases_to_srbench_rows
 
 pytestmark = [
     pytest.mark.integration,
@@ -46,26 +48,18 @@ _BUCKETS = {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0}
 
 
 def _manifest_cases(smoke_cases: Path) -> list[dict]:
-    """The smoke cases as sr-bench manifest cases.
+    """The smoke cases rendered as sr-bench manifest rows (X3).
 
-    The user message is the smoke case's prompt verbatim: the capability-aware
-    mock backend keys its behavior on the exact prompt text, so the two
-    routers' depth gates produce real routing movement.
+    Rendered by the shared ``cases to-srbench`` transform rather than a
+    bespoke copy, so the contract can declare this rendering next to the
+    cases file and pair the two 1:1. The answer is pinned to "A" (the
+    answer the mock backend is graded against); the user message is the
+    smoke case's prompt verbatim: the capability-aware mock backend keys
+    its behavior on the exact prompt text, so the two routers' depth
+    gates produce real routing movement.
     """
-    rows = [
-        json.loads(line)
-        for line in smoke_cases.read_text(encoding="utf-8").splitlines()
-        if line.strip()
-    ]
-    return [
-        {
-            "id": row["case_id"],
-            "benchmark": "mmlu-pro",
-            "messages": [{"role": "user", "content": row["prompt"]}],
-            "answer": "A",
-        }
-        for row in rows
-    ]
+    rows = cases_to_srbench_rows(load_cases(smoke_cases), benchmark="mmlu-pro")
+    return [dict(row, answer="A") for row in rows]
 
 
 def _write_dataset(path: Path, cases: list[dict]) -> Path:
@@ -90,22 +84,29 @@ def _long_dataset(path: Path, smoke_cases: Path, repeat: int) -> Path:
     return _write_dataset(path, rows)
 
 
-def _render_spec(smoke_dir: Path, dataset: Path, work: Path) -> Path:
-    """The smoke spec bound to the R2 dataset, plus R2-only test knobs.
+def _render_spec(smoke_dir: Path, cases: Path, dataset: Path, work: Path) -> Path:
+    """The smoke spec bound to the dual-format contract (X3) + R2 knobs.
 
-    The references section names the registry's single target (the auto-built
-    S arm); min_cases=3 matches the 6-case dataset (the shared template keeps
-    its default of 200 for the e2e profile and must not change).
+    The contract declares the recipe-lab cases file (``manifest`` +
+    ``content_hash``) and the sr-bench rendering of the same cases
+    (``srbench_dataset`` + ``srbench_sha256``): replay ranks on the cases
+    file while live evidence binds to the rendering's hash. The
+    references section names the registry's single target (the auto-built
+    S arm); min_cases=3 matches the 6-case dataset (the shared template
+    keeps its default of 200 for the e2e profile and must not change).
     """
+    cases_hash = "sha256:" + hashlib.sha256(cases.read_bytes()).hexdigest()
     digest = "sha256:" + hashlib.sha256(dataset.read_bytes()).hexdigest()
     text = (
         (smoke_dir / "smoke-spec.yaml.tmpl")
         .read_text(encoding="utf-8")
-        .replace("${CASES_FILE}", str(dataset))
-        .replace("${CASES_HASH}", digest)
+        .replace("${CASES_FILE}", str(cases))
+        .replace("${CASES_HASH}", cases_hash)
     )
     spec = yaml.safe_load(text)
     spec["objective"]["min_cases"] = 3
+    spec["workload"]["srbench_dataset"] = str(dataset)
+    spec["workload"]["srbench_sha256"] = digest
     spec["references"] = {"strong": "rl-single", "weak": "rl-single"}
     spec_path = work / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
@@ -270,7 +271,7 @@ def test_verify_srbench_end_to_end(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     dataset = _write_dataset(tmp_path / "dataset.jsonl", _manifest_cases(smoke_cases))
-    spec_path = _render_spec(smoke_dir, dataset, tmp_path)
+    spec_path = _render_spec(smoke_dir, smoke_cases, dataset, tmp_path)
     manifest_path = _mom_only_manifest(
         tmp_path / "baseline-manifest-src.json", dataset, router_a
     )
@@ -312,7 +313,7 @@ def test_verify_fault_injection_is_inconclusive(
     tmp_path: Path,
 ) -> None:
     dataset = _long_dataset(tmp_path / "dataset.jsonl", smoke_cases, 16)
-    spec_path = _render_spec(smoke_dir, dataset, tmp_path)
+    spec_path = _render_spec(smoke_dir, smoke_cases, dataset, tmp_path)
     manifest_path = _mom_only_manifest(
         tmp_path / "baseline-manifest-src.json", dataset, router_a
     )
@@ -396,7 +397,7 @@ def test_verify_dataset_mismatch_rejected_before_submission(
     tmp_path: Path,
 ) -> None:
     dataset = _write_dataset(tmp_path / "dataset.jsonl", _manifest_cases(smoke_cases))
-    spec_path = _render_spec(smoke_dir, dataset, tmp_path)
+    spec_path = _render_spec(smoke_dir, smoke_cases, dataset, tmp_path)
     manifest_path = _mom_only_manifest(
         tmp_path / "baseline-manifest-src.json", dataset, router_a
     )

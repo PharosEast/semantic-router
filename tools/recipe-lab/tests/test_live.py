@@ -2360,3 +2360,24 @@ def test_verify_manifest_dataset_mismatch_rejected_before_submission(tmp_path):
         )
     assert stub.manifest_runs == 0
     assert stub.events == []
+
+
+def test_verify_manifest_check_binds_srbench_rendering(tmp_path):
+    # X3: with a rendering declared, the pre-submission manifest check binds
+    # the rendering's hash - the legacy cases hash is no longer accepted
+    manifest = _mom_manifest(tmp_path, [dict(_REGISTRY_SINGLE)])
+    raw = json.loads(manifest.read_text("utf-8"))
+    raw["dataset"] = {"path": "cases.jsonl", "sha256": _LEGACY_HASH}
+    manifest.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
+
+    with pytest.raises(ContractError, match="binds dataset"):
+        verify_live(
+            spec=_srbench_bound_spec(),
+            cli=VerifyStub(),
+            baseline_run_id=None,
+            baseline_manifest=str(manifest),
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
