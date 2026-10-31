@@ -11,6 +11,7 @@ import pytest
 import yaml
 from recipe_lab.cli import main
 from recipe_lab.contract import ContractError, ExperimentSpec
+from recipe_lab.ledger import Ledger, LedgerRecord
 from recipe_lab.live import (
     _pair_metrics,
     live_verdict_from_runs,
@@ -23,6 +24,15 @@ from tests.fixtures import VALID_SPEC
 from tests.test_contract import _write_splits_dataset
 
 # ---- A3: the contract is the only source of guard floors ----
+
+# VALID_SPEC's legacy workload hash (tests.fixtures); every FakeCli run doc
+# carries it so the M1 dataset binding passes unless a test overrides it.
+_LEGACY_HASH = "sha256:" + "0" * 64
+_RUN_DOC = {
+    "id": "run-x",
+    "status": "completed",
+    "manifest": {"dataset": {"sha256": _LEGACY_HASH}},
+}
 
 
 def test_measurements_from_rows_rejects_floors_and_unknown_keys():
@@ -157,6 +167,9 @@ def _spec():
 
 def test_live_verdict_pass_flow():
     class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
         def compare(self, base, cand):
             return {
                 "baseline": {"capability.score": 0.80},
@@ -181,6 +194,9 @@ def test_live_verdict_pass_flow():
 
 def test_live_verdict_baseline_floor_breach_fails():
     class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
         def compare(self, base, cand):
             return {
                 "baseline": {"capability.score": 0.80},
@@ -203,6 +219,9 @@ def test_live_verdict_baseline_floor_breach_fails():
 
 def test_live_verdict_missing_measurement_is_inconclusive():
     class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
         def compare(self, base, cand):
             return {
                 "baseline": {"capability.score": 0.80},
@@ -223,6 +242,9 @@ def test_live_verdict_missing_measurement_is_inconclusive():
 
 def test_live_verdict_undeclared_measurement_does_not_veto():
     class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
         def compare(self, base, cand):
             return {
                 "baseline": {"capability.score": 0.80},
@@ -251,6 +273,9 @@ def test_live_verdict_empty_gates_is_explicit():
     spec_dict["gates"] = []
 
     class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
         def compare(self, base, cand):
             return {
                 "baseline": {"capability.score": 0.80},
@@ -271,6 +296,9 @@ def test_live_verdict_empty_gates_is_explicit():
 
 def test_live_verdict_ambiguous_is_inconclusive():
     class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
         def compare(self, base, cand):
             return {"capability.score": 0.8}  # only one value -> ambiguous
 
@@ -356,7 +384,7 @@ class VerifyStub:
         self.baseline_doc = baseline_doc or {
             "id": "run-base",
             "status": "completed",
-            "manifest": {"manifest_id": "m1"},
+            "manifest": {"manifest_id": "m1", "dataset": {"sha256": _LEGACY_HASH}},
         }
         self.preview_status = preview_status
         self.candidate_statuses = list(candidate_statuses or [])
@@ -823,6 +851,9 @@ def _spec_with_constraints(**overrides) -> ExperimentSpec:
 
 def _compare_with_costs(candidate_cost):
     class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
         def compare(self, base, cand):
             return {
                 "baseline": {"capability.score": 0.80, "total_spend_usd": 5.0},
@@ -1074,3 +1105,130 @@ def test_live_verdict_final_cites_frozen_test(monkeypatch, tmp_path, capsys):
         + hashlib.sha256((tmp_path / "frozen_test.jsonl").read_bytes()).hexdigest()
     )
     assert rows[-1]["dataset_hash"] == expected
+
+
+# ---- M1: live verdicts bind the runs to the contract's own frozen split ----
+
+
+def test_live_verdict_rejects_run_from_other_dataset():
+    class FakeCli:
+        def show(self, run_id):
+            return {
+                "id": run_id,
+                "status": "completed",
+                "manifest": {"dataset": {"sha256": "f" * 64}},
+            }
+
+        def compare(self, base, cand):
+            raise AssertionError("compare must not run on a dataset mismatch")
+
+    with pytest.raises(ContractError) as excinfo:
+        live_verdict_from_runs(
+            spec=_spec(),
+            cli=FakeCli(),
+            baseline_run_id="run-a",
+            candidate_run_id="run-b",
+            measurements=[],
+        )
+    assert "scored dataset" in str(excinfo.value)
+    assert "baseline run run-a" in str(excinfo.value)
+
+
+def test_live_verdict_rejects_run_without_dataset_identity():
+    class FakeCli:
+        def show(self, run_id):
+            return {"id": run_id, "status": "completed", "manifest": {}}
+
+        def compare(self, base, cand):
+            raise AssertionError("compare must not run without a dataset identity")
+
+    with pytest.raises(ContractError) as excinfo:
+        live_verdict_from_runs(
+            spec=_spec(),
+            cli=FakeCli(),
+            baseline_run_id="run-a",
+            candidate_run_id="run-b",
+            measurements=[],
+        )
+    assert "no dataset sha256" in str(excinfo.value)
+
+
+def test_live_verdict_accepts_bare_hexdigest_dataset_hash():
+    # sr-bench records a bare hexdigest; the A4 sha256: prefix is normalized.
+    class FakeCli:
+        def show(self, run_id):
+            return {
+                "id": run_id,
+                "status": "completed",
+                "manifest": {"dataset": {"sha256": "0" * 64}},
+            }
+
+        def compare(self, base, cand):
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
+
+    result = live_verdict_from_runs(
+        spec=_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "PASS"
+    assert result["bench_refs"] == ["run-a", "run-b"]
+
+
+def test_verify_live_rejects_baseline_from_other_dataset(tmp_path):
+    stub = VerifyStub(
+        baseline_doc={
+            "id": "run-base",
+            "status": "completed",
+            "manifest": {"dataset": {"sha256": "f" * 64}},
+        },
+    )
+    with pytest.raises(ContractError) as excinfo:
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+    assert "scored dataset" in str(excinfo.value)
+
+
+def test_legacy_verdict_record_uses_null_split(tmp_path):
+    # M1: a legacy single-dataset contract records split: null + the
+    # legacy_workload marker, while a three-way contract keeps its split.
+    ledger_path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(ledger_path)
+    record = LedgerRecord(
+        round=1,
+        ts="2026-10-31T00:00:00Z",
+        candidate={"kind": "config", "ref": "run-b"},
+        tier="live",
+        baseline_ref="run-a",
+        metrics={"capability.score": 0.86},
+        verdict="PASS",
+        dataset_hash=_LEGACY_HASH,
+        gates={},
+        bench_refs=["run-a", "run-b"],
+        split=None,
+        legacy_workload=True,
+    )
+    ledger.append(record)
+    rows = [
+        json.loads(line)
+        for line in ledger_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows[0].get("split") is None
+    assert rows[0]["legacy_workload"] is True
+    roundtrip = LedgerRecord.from_dict(rows[0])
+    assert roundtrip.legacy_workload is True and roundtrip.split is None

@@ -57,6 +57,9 @@ class LedgerRecord:
     # B: which frozen split the record's data came from (calib/dev/frozen_test).
     # Legacy single-dataset records omit the field (equivalent to "dev").
     split: str | None = None
+    legacy_workload: bool = (
+        False  # M1: legacy single-dataset workloads record split: null
+    )
     # A5: present only when the trial produced no usable metric (e.g.
     # "timeout" when the stack exceeded budget.max_minutes_per_trial).
     # best_replay / top_replay exclude records carrying a status.
@@ -98,6 +101,8 @@ class LedgerRecord:
             out["notes"] = self.notes
         if self.split:
             out["split"] = self.split
+        if self.legacy_workload:
+            out["legacy_workload"] = True
         if self.status:
             out["status"] = self.status
         if self.constraints is not None:
@@ -130,6 +135,7 @@ class LedgerRecord:
             coverage_warning=bool(raw.get("coverage_warning", False)),
             notes=str(raw.get("notes", "")),
             split=raw.get("split"),
+            legacy_workload=bool(raw.get("legacy_workload", False)),
             status=raw.get("status"),
             constraints=(
                 dict(raw["constraints"]) if raw.get("constraints") is not None else None
