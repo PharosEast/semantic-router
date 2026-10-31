@@ -122,8 +122,8 @@ def test_threshold_candidates_hot_reload_matches_restart(
             str(spec_path),
             "--signal",
             "depth",
-            "--deltas",
-            "-0.2,0,0.2,0.35",
+            # `=` form: argparse would read a leading-dash value as an option.
+            "--deltas=-0.2,0,0.2,0.35",
             "--output-dir",
             str(candidates_dir),
         ],

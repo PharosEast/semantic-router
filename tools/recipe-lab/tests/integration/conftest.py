@@ -153,13 +153,17 @@ def _wait_router_ready(mgmt_url: str, proc: subprocess.Popen, log_path: Path) ->
 
 
 def _router_config_hash(mgmt_url: str) -> str:
-    """The router's frozen config document hash (64 hex) for sr-bench MoM."""
+    """The router's active config document hash (64 hex) for sr-bench MoM."""
     body = _http_get(f"{mgmt_url}/api/v1/config/hash")
     if not body:
         raise RuntimeError("router /api/v1/config/hash unavailable")
-    document_hash = str(json.loads(body).get("document_hash", ""))
+    payload = json.loads(body)
+    document_hash = str(payload.get("active_runtime_hash", ""))
     if len(document_hash) != 64:
-        raise RuntimeError(f"router config hash is not 64 hex: {document_hash!r}")
+        raise RuntimeError(
+            f"router config hash is not 64 hex: {document_hash!r} "
+            f"(config/hash keys: {sorted(payload)})"
+        )
     return document_hash
 
 
