@@ -76,6 +76,20 @@ def _write_dataset(path: Path, cases: list[dict]) -> Path:
     return path
 
 
+def _long_dataset(path: Path, smoke_cases: Path, repeat: int) -> Path:
+    """The smoke cases duplicated with unique ids: wider in-flight windows.
+
+    A smoke arm finishes in well under a second (six ~25 ms cases), so a
+    fault-injection poll can miss every pair arm; repeating the cases keeps
+    each arm in flight for seconds and makes the injection observable.
+    """
+    cases = _manifest_cases(smoke_cases)
+    rows = [
+        dict(case, id=f"{case['id']}-r{k}") for k in range(repeat) for case in cases
+    ]
+    return _write_dataset(path, rows)
+
+
 def _render_spec(smoke_dir: Path, dataset: Path, work: Path) -> Path:
     """The smoke spec bound to the R2 dataset, plus R2-only test knobs.
 
@@ -293,12 +307,11 @@ def test_verify_fault_injection_is_inconclusive(
     smoke_dir: Path,
     smoke_cases: Path,
     srbench_url: str,
-    srbench_bin: str,
     router_a: dict,
     registered_targets: None,
     tmp_path: Path,
 ) -> None:
-    dataset = _write_dataset(tmp_path / "dataset.jsonl", _manifest_cases(smoke_cases))
+    dataset = _long_dataset(tmp_path / "dataset.jsonl", smoke_cases, 16)
     spec_path = _render_spec(smoke_dir, dataset, tmp_path)
     manifest_path = _mom_only_manifest(
         tmp_path / "baseline-manifest-src.json", dataset, router_a
@@ -323,10 +336,8 @@ def test_verify_fault_injection_is_inconclusive(
 
     # Poll the service until a pair arm re-runs the baseline manifest (the
     # same frozen manifest submitted again after the preview) and cancel it.
-    # Direct HTTP instead of the SrbenchCli subprocess: the smoke pair arms
-    # live only a few seconds - less than one CLI startup - so the
-    # observation has to be cheap; the run summaries already carry the
-    # manifest name.
+    # Direct HTTP for both the observation and the cancel: the CLI's own
+    # startup takes seconds, longer than the arms stay in flight.
     runs_url = srbench_url.rstrip("/") + "/runs"
     baseline_id = None
     cancelled = False
@@ -350,16 +361,17 @@ def test_verify_fault_injection_is_inconclusive(
                 baseline_id = run_id
             elif run_id != baseline_id:
                 # a re-run of the same frozen manifest is a pair's base arm;
-                # it may complete between the poll and the cancel, so a
-                # failed cancel falls through to the next observation
-                attempt = subprocess.run(
-                    [srbench_bin, "benchmark", "--url", srbench_url, "cancel", run_id],
-                    capture_output=True,
-                    check=False,
+                # an arm that finished in between refuses the cancel, so
+                # fall through to the next observation
+                request = urllib.request.Request(
+                    f"{runs_url}/{run_id}/cancel", method="POST", data=b""
                 )
-                if attempt.returncode == 0:
-                    cancelled = True
-                    break
+                try:
+                    urllib.request.urlopen(request, timeout=5.0)
+                except OSError:
+                    continue
+                cancelled = True
+                break
         if not cancelled:
             time.sleep(1.0)
     assert cancelled, "no in-flight pair arm was observed to cancel"
