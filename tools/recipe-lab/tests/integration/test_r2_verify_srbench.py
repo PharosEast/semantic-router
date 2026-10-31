@@ -39,7 +39,7 @@ pytestmark = [
 ]
 
 _BASELINE_MANIFEST_NAME = "recipe-lab-r2-baseline"
-_PRICES = {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0}
+_BUCKETS = {"input": 0, "cached_input": 0, "cache_write": 0, "output": 0}
 
 
 # ---- asset builders ----
@@ -106,7 +106,7 @@ def _mom_target(target_id: str, router: dict) -> dict:
         "base_url": router["listener_url"] + "/v1",
         "config_hash": router["config_hash"],
         "max_inference_calls": 1,
-        "prices": _PRICES,
+        "prices": {"vllm-sr/auto": _BUCKETS},
         "preview_url": router["mgmt_url"] + "/api/v1/routing/preview",
     }
 
@@ -118,7 +118,7 @@ def _write_registry(path: Path, router_a: dict, router_b: dict, mock_backend: di
             "kind": "single",
             "model": "local/private-qwen",
             "base_url": mock_backend["endpoint"] + "/v1",
-            "prices": _PRICES,
+            "prices": {"local/private-qwen": _BUCKETS},
         },
         _mom_target("rl-mom-baseline", router_a),
         _mom_target("rl-mom-candidate", router_b),
