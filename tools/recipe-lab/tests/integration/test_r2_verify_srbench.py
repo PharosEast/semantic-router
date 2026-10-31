@@ -329,16 +329,16 @@ def test_verify_fault_injection_is_inconclusive(
     deadline = time.monotonic() + 600.0
     while time.monotonic() < deadline and thread.is_alive() and not cancelled:
         try:
-            executing = [
+            in_flight = [
                 str(doc.get("id"))
                 for doc in cli.runs()
-                if doc.get("status") == "executing"
+                if doc.get("status") in ("queued", "running")
             ]
         except (OSError, RuntimeError, json.JSONDecodeError):
             # transient CLI/service hiccups; keep polling
             time.sleep(1.0)
             continue
-        for run_id in executing:
+        for run_id in in_flight:
             doc = cli.show(run_id)
             manifest = doc.get("manifest") or {}
             if manifest.get("name") != _BASELINE_MANIFEST_NAME:
