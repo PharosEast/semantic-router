@@ -217,12 +217,14 @@ def _register_targets(srbench_bin: str, srbench_store: str, registry: Path) -> N
 
 
 def _mom_only_manifest(
-    path: Path, dataset: Path, router_a: dict, limits: dict
+    path: Path, dataset: Path, router_a: dict, limits: dict,
+    sampling: dict | None = None,
 ) -> Path:
     """A plain MoM-router baseline manifest: no single target (the S arm
     must be auto-constructed from the registry by verify). Limits come
     from the workload mode: the real-lane runs need wider timeouts and
-    some concurrency (X7)."""
+    some concurrency (X7); sampling carries the workload's generation
+    budget (the real-lane MMLU-Pro runs need an explicit max_tokens)."""
     binding = {
         "path": str(dataset),
         "sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
@@ -235,6 +237,8 @@ def _mom_only_manifest(
         "dataset": binding,
         "limits": dict(limits),
     }
+    if sampling:
+        manifest["sampling"] = dict(sampling)
     # A store-prepared dataset requires the run to request its profile and
     # seed (sr-bench resolve_dataset checks both against the prepared
     # manifest; mock-mode renderings have no sibling manifest and keep the
@@ -389,6 +393,7 @@ def test_verify_srbench_end_to_end(
         _bound_dataset(workload, dataset),
         router_a,
         workload["limits"],
+        workload["sampling"],
     )
     candidate_path = _candidate_json(tmp_path / "candidate.json")
     work = tmp_path / "verify-work"
@@ -517,6 +522,7 @@ def test_verify_fault_injection_is_inconclusive(
         _bound_dataset(workload, dataset),
         router_a,
         workload["limits"],
+        workload["sampling"],
     )
     candidate_path = _candidate_json(tmp_path / "candidate.json")
     work = tmp_path / "verify-work"
@@ -608,6 +614,7 @@ def test_verify_dataset_mismatch_rejected_before_submission(
         _bound_dataset(workload, dataset),
         router_a,
         workload["limits"],
+        workload["sampling"],
     )
     # bind the manifest to a dataset identity the contract does not declare
     raw = json.loads(manifest_path.read_text("utf-8"))

@@ -439,6 +439,7 @@ def workload(vllm_lanes: dict | None, smoke_cases: Path, request) -> dict:
             "dataset": None,  # each test writes its own rendering file
             "min_cases": 3,
             "declare_rendering": True,
+            "sampling": None,  # sr-bench defaults; the mock answers are short
             "limits": {
                 "total_timeout_s": 1200,
                 "idle_timeout_s": 300,
@@ -452,6 +453,10 @@ def workload(vllm_lanes: dict | None, smoke_cases: Path, request) -> dict:
         "dataset": mmlu["path"],
         "min_cases": mmlu["case_count"],
         "declare_rendering": False,
+        # MMLU-Pro completions are long-form; the sr-bench default cap
+        # truncated ~50% of the 14-case set on the first real-lane run,
+        # so the runs request an explicit generous budget (X7).
+        "sampling": {"max_tokens": 8192},
         "limits": {
             "concurrency": 4,
             "total_timeout_s": 7200,
