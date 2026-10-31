@@ -492,3 +492,177 @@ def test_cost_model_validation_rejects(bad, message):
     raw = {**copy.deepcopy(VALID_SPEC), "cost_model": bad}
     with pytest.raises(ContractError, match=message):
         ExperimentSpec.from_dict(raw)
+
+
+# ---- M4: reference arms and cost basis ----
+
+
+def _ref_spec() -> dict:
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["references"] = {"strong": "model-a", "weak": "model-b"}
+    raw["cost_basis"] = {
+        "source": "provider_pricing",
+        "assumed_pricing": {
+            "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0}
+        },
+    }
+    return raw
+
+
+def test_references_and_cost_basis_roundtrip():
+    spec = ExperimentSpec.from_dict(_ref_spec())
+    assert spec.references is not None
+    assert spec.references.strong == "model-a"
+    assert spec.references.weak == "model-b"
+    assert spec.cost_basis is not None
+    assert spec.cost_basis.source == "provider_pricing"
+    assert spec.cost_basis.assumed_pricing == {
+        "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0}
+    }
+    out = spec.to_dict()
+    assert out["references"] == {"strong": "model-a", "weak": "model-b"}
+    assert "assumed_pricing" in out["cost_basis"]
+    spec2 = ExperimentSpec.from_dict(out)
+    assert spec2.to_dict() == out
+
+
+def test_references_absent_by_default():
+    spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC))
+    assert spec.references is None
+    assert spec.cost_basis is None
+    assert "references" not in spec.to_dict()
+    assert "cost_basis" not in spec.to_dict()
+
+
+def test_references_rejects_empty_or_unknown():
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["references"] = {}
+    with pytest.raises(ContractError, match="references"):
+        ExperimentSpec.from_dict(raw)
+    raw["references"] = {"strong": "model-a", "weak": "model-b", "middle": "x"}
+    with pytest.raises(ContractError, match="middle"):
+        ExperimentSpec.from_dict(raw)
+    raw["references"] = {"strong": " ", "weak": "model-b"}
+    with pytest.raises(ContractError, match="strong"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_cost_basis_rejects_bad_source_or_rates():
+    raw = _ref_spec()
+    raw["cost_basis"]["source"] = "magic"
+    with pytest.raises(ContractError, match="source"):
+        ExperimentSpec.from_dict(raw)
+    raw = _ref_spec()
+    raw["cost_basis"]["assumed_pricing"] = {
+        "model-a": {"prompt_per_1m": -1, "completion_per_1m": 2.0}
+    }
+    with pytest.raises(ContractError, match="rates must be >= 0"):
+        ExperimentSpec.from_dict(raw)
+    raw = _ref_spec()
+    raw["cost_basis"]["assumed_pricing"] = {"model-a": {"nope": 1.0}}
+    with pytest.raises(ContractError, match="nope"):
+        ExperimentSpec.from_dict(raw)
+
+
+@pytest.mark.parametrize("ref_bound", ["ref:strong", "ref:weak"])
+def test_ref_bound_requires_references_section(ref_bound):
+    # ref-bound constraint without a references section is a contract error
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["objective"]["constraints"] = [
+        {
+            "name": "beat-strong",
+            "metric": "capability.score",
+            "op": "gte",
+            "bound": ref_bound,
+        }
+    ]
+    with pytest.raises(ContractError, match=ref_bound):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_cost_ref_bound_requires_cost_basis():
+    # a benefit constraint against a reference arm needs a declared basis
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["references"] = {"strong": "model-a", "weak": "model-b"}
+    raw["objective"]["constraints"] = [
+        {
+            "name": "spend-not-above-strong",
+            "metric": "total_spend_usd",
+            "op": "lte",
+            "bound": "ref:strong",
+        }
+    ]
+    with pytest.raises(ContractError, match="cost_basis"):
+        ExperimentSpec.from_dict(raw)
+    raw["cost_basis"] = {"source": "provider_pricing"}
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.objective.constraints[0].bound == "ref:strong"
+
+
+def test_non_cost_ref_bound_needs_no_cost_basis():
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["references"] = {"strong": "model-a", "weak": "model-b"}
+    raw["objective"]["constraints"] = [
+        {
+            "name": "accuracy-vs-strong",
+            "metric": "capability.score",
+            "op": "gte",
+            "bound": "ref:strong",
+        }
+    ]
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.cost_basis is None
+
+
+def test_constraint_ref_factor_and_tolerance_pp_parse():
+    raw = _ref_spec()
+    raw["objective"]["constraints"] = [
+        {
+            "name": "accuracy-vs-weak",
+            "metric": "capability.score",
+            "op": "gte",
+            "bound": "ref:weak",
+            "factor": 0.95,
+        },
+        {
+            "name": "cost-not-worse",
+            "metric": "total_spend_usd",
+            "op": "lte",
+            "bound": "baseline",
+            "tolerance_pp": 2.0,
+        },
+    ]
+    spec = ExperimentSpec.from_dict(raw)
+    first, second = spec.objective.constraints
+    assert first.factor == 0.95 and first.tolerance_pp == 0.0
+    assert second.tolerance_pp == 2.0 and second.factor is None
+    spec2 = ExperimentSpec.from_dict(spec.to_dict())
+    assert spec2.to_dict() == spec.to_dict()
+
+
+def test_constraint_rejects_bad_factor_and_tolerance_pp():
+    raw = _ref_spec()
+    raw["objective"]["constraints"] = [
+        {
+            "name": "x",
+            "metric": "capability.score",
+            "op": "gte",
+            "bound": 0.9,
+            "factor": 1.5,
+        }
+    ]
+    with pytest.raises(ContractError, match="factor"):
+        ExperimentSpec.from_dict(raw)  # factor only with ref bounds
+    raw["objective"]["constraints"][0]["bound"] = "ref:strong"
+    raw["objective"]["constraints"][0]["factor"] = 0
+    with pytest.raises(ContractError, match="factor"):
+        ExperimentSpec.from_dict(raw)
+    raw["objective"]["constraints"][0]["factor"] = 1.1
+    raw["objective"]["constraints"][0]["tolerance_pp"] = -1
+    with pytest.raises(ContractError, match="tolerance_pp"):
+        ExperimentSpec.from_dict(raw)
+    # tolerance_pct and tolerance_pp are mutually exclusive
+    raw["objective"]["constraints"][0]["tolerance_pp"] = 2.0
+    raw["objective"]["constraints"][0]["tolerance_pct"] = 5.0
+    with pytest.raises(ContractError, match="tolerance"):
+        ExperimentSpec.from_dict(raw)

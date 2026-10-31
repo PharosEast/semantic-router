@@ -43,6 +43,20 @@ evidence and turn the verdict INCONCLUSIVE; unknown rates (no
 diagnostics) are reported as null, never guessed as zero. Across
 repeated pairs each rate merges conservatively (worst pair).
 
+Reference arms and cost basis (M4): a spec may pin `references.strong`
+/ `references.weak` to single-model sr-bench target ids; constraints
+bound with `ref:strong` / `ref:weak` resolve against those arms'
+measured metric values (an unknown reference value is not evaluable,
+never zero). `factor` scales a reference bound multiplicatively;
+`tolerance_pp` relaxes any bound by absolute percentage points. The
+verify driver runs one single-model live run per declared alias on the
+frozen protocol, cached by (dataset hash, manifest hash, alias) in a
+JSON run-id cache, and reports each arm's cost: measured spend when
+sr-bench exposes it, otherwise an estimate flagged "assumed" from
+`cost_basis.assumed_pricing` per-million token rates. Pareto rows
+(accuracy, cost, latency per arm) are recorded for the promotion
+review.
+
 Live `verify` orchestration (I): `verify_live` drives sr-bench end to end
 for one candidate - a preview run (routing distribution into the ledger
 notes) plus `repetitions` AB/BA pairs, where each pair re-runs the
@@ -54,14 +68,24 @@ any incomplete pair makes the whole verdict INCONCLUSIVE.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import math
 import statistics
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
 from . import abba
-from .contract import Constraint, ContractError, EvidenceQuality, ExperimentSpec, Gate
+from .contract import (
+    Constraint,
+    ContractError,
+    CostBasis,
+    EvidenceQuality,
+    ExperimentSpec,
+    Gate,
+    References,
+)
 from .srbench import SrbenchCli, extract_metric_values
 from .verdict import (
     GuardResult,
@@ -251,6 +275,8 @@ def _constraint_evidence(
                 "op": constraint.op,
                 "bound": constraint.bound,
                 "tolerance_pct": constraint.tolerance_pct,
+                "tolerance_pp": constraint.tolerance_pp,
+                "factor": constraint.factor,
                 "baseline": baseline_value,
                 "candidate": candidate_value,
             }
@@ -438,6 +464,156 @@ def _worst_rates(
     )
 
 
+def reference_metric_values(
+    targets: Any,
+    references: References | None,
+    metric_key: str,
+) -> dict[str, float | None]:
+    """M4: the declared reference arms' metric values from a target list.
+
+    `references.strong` / `references.weak` name single-model target ids;
+    the first matching target in the baseline section carries the value.
+    Unknown arms stay None - a ref-bound constraint is then unevaluated
+    (INCONCLUSIVE), never counted as zero.
+    """
+    values: dict[str, float | None] = {"strong": None, "weak": None}
+    if references is None or not isinstance(targets, list):
+        return values
+    for role in ("strong", "weak"):
+        alias = getattr(references, role)
+        for entry in targets:
+            if isinstance(entry, dict) and entry.get("id") == alias:
+                found = extract_metric_values(entry, metric_key)
+                if found:
+                    values[role] = found[0]
+                break
+    return values
+
+
+def arm_cost(
+    target: Any, cost_basis: CostBasis | None
+) -> tuple[float | None, str | None]:
+    """M4: one target's (cost_usd, basis_note) for the Pareto table.
+
+    Measured spend (`total_spend_usd`, then `cost_usd`) wins and is noted
+    "measured". Only when the target carries exactly one model's token
+    usage and the spec declares assumed pricing for that model is the
+    spend estimated from rates - noted "assumed" so no estimate can pass
+    as billing. Anything else stays unknown (None), never zero.
+    """
+    if not isinstance(target, dict):
+        return None, None
+    for key in ("total_spend_usd", "cost_usd"):
+        value = target.get(key)
+        if (
+            isinstance(value, (int, float))
+            and not isinstance(value, bool)
+            and math.isfinite(value)
+            and value >= 0
+        ):
+            return float(value), "measured"
+    tokens = target.get("tokens")
+    if not isinstance(tokens, dict) or cost_basis is None:
+        return None, None
+    assumed = cost_basis.assumed_pricing
+    if not assumed:
+        return None, None
+    models = target.get("selected_models")
+    if not isinstance(models, dict) or len(models) != 1:
+        return None, None
+    rates = assumed.get(str(next(iter(models))))
+    if not rates:
+        return None, None
+
+    def _tokens(key: str) -> float:
+        value = tokens.get(key)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            return 0.0
+        return float(value)
+
+    prompt = (
+        _tokens("input_tokens")
+        + _tokens("cached_input_tokens")
+        + _tokens("cache_write_tokens")
+    )
+    completion = _tokens("output_tokens")
+    cost = (
+        prompt / 1e6 * rates["prompt_per_1m"]
+        + completion / 1e6 * rates["completion_per_1m"]
+    )
+    return cost, "assumed"
+
+
+def pareto_rows(
+    baseline_targets: Any,
+    candidate_targets: Any,
+    references: References | None,
+    cost_basis: CostBasis | None,
+) -> list[dict[str, Any]]:
+    """M4: per-arm accuracy/cost/latency rows for the Pareto table.
+
+    Every compared target contributes one row: accuracy with its Wilson
+    interval, spend (measured or assumed, see `arm_cost`), and subject
+    latency percentiles. Reference arms are tagged with their role so the
+    report can anchor S/W comparisons.
+    """
+    rows: list[dict[str, Any]] = []
+    for arm, targets in (
+        ("baseline", baseline_targets),
+        ("candidate", candidate_targets),
+    ):
+        if not isinstance(targets, list):
+            continue
+        for entry in targets:
+            if not isinstance(entry, dict):
+                continue
+            role = None
+            if references is not None:
+                if entry.get("id") == references.strong:
+                    role = "strong"
+                elif entry.get("id") == references.weak:
+                    role = "weak"
+            cost, note = arm_cost(entry, cost_basis)
+            rows.append(
+                {
+                    "arm": arm,
+                    "id": entry.get("id"),
+                    "role": role,
+                    "accuracy": entry.get("accuracy"),
+                    "accuracy_ci95": entry.get("accuracy_ci95"),
+                    "cost_usd": cost,
+                    "cost_note": note,
+                    "latency_p50_s": entry.get("latency_p50_s"),
+                    "latency_p95_s": entry.get("latency_p95_s"),
+                }
+            )
+    return rows
+
+
+def _load_run_cache(path: str | Path | None) -> dict[str, str]:
+    """M4: run-id cache (key -> sr-bench run id); unreadable means empty."""
+    if path is None:
+        return {}
+    path = Path(path)
+    if not path.is_file():
+        return {}
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    if not isinstance(raw, dict):
+        return {}
+    return {str(key): str(value) for key, value in raw.items()}
+
+
+def _save_run_cache(path: str | Path | None, cache: dict[str, str]) -> None:
+    if path is None:
+        return
+    Path(path).write_text(
+        json.dumps(cache, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+    )
+
+
 def _dataset_identity(raw: Any) -> str | None:
     """Normalize an sr-bench dataset sha256 (bare hexdigest) to the A4 form."""
     if not isinstance(raw, str) or not raw.strip():
@@ -570,6 +746,12 @@ def live_verdict_from_runs(
             incomplete,
         ),
     }
+    # M4: reference arms ride in the baseline run's target sections; their
+    # values anchor ref-bound constraints and the Pareto table.
+    reference_values = reference_metric_values(
+        base_targets, spec.references, spec.objective.metric_key
+    )
+    pareto = pareto_rows(base_targets, cand_targets, spec.references, spec.cost_basis)
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
     constraint_evidence = _constraint_evidence(
@@ -586,6 +768,7 @@ def live_verdict_from_runs(
         stats=stats,
         min_cases=spec.objective.min_cases,
         min_improvement_pp=spec.objective.min_improvement_pp,
+        references=reference_values,
     )
     reasons = list(verdict.reasons)
     if undeclared:
@@ -612,6 +795,8 @@ def live_verdict_from_runs(
         "bench_refs": [baseline_run_id, candidate_run_id],
         "paired": stats.to_dict() if stats else None,
         "evidence_quality": evidence,
+        "references": reference_values,
+        "pareto": pareto,
     }
     if not spec.gates:
         result["gates_note"] = "no guard declared"
@@ -659,6 +844,7 @@ def verify_live(
     incomplete_reasons: list[str] | None = None,
     work_dir: str | Path,
     workload_split: str = "dev",
+    run_cache: str | Path | None = None,
 ) -> dict[str, Any]:
     """Drive sr-bench for one candidate and decide the live verdict (I).
 
@@ -678,6 +864,14 @@ def verify_live(
     M3: the pairs' output-quality rates merge conservatively (worst pair)
     against the spec's `evidence_quality` ceilings and are returned in
     `evidence_quality` for the ledger.
+
+    M4: when the spec declares `references`, each reference arm runs once
+    as a single-model candidate-plan on the frozen protocol; run ids are
+    cached by (dataset hash, protocol hash, alias) in `run_cache` so
+    several candidates reuse the same reference runs. The arms' values
+    anchor ref-bound constraints, and a Pareto table (accuracy with its
+    interval, measured-or-assumed cost, latency percentiles) lands in
+    `pareto` for the report.
 
     `targets` are the registered sr-bench MoM target ids the router is
     serving the candidate config on. The preview run is diagnostic only:
@@ -763,6 +957,8 @@ def verify_live(
     pair_evidence: list[
         tuple[tuple[float | None, float | None], tuple[float | None, float | None]]
     ] = []
+    # M4: the last completed pair's target sections feed the Pareto table.
+    last_sections: tuple[Any, Any] | None = None
     constraint_values: dict[str, list[tuple[float | None, float | None]]] = {
         constraint.name: [] for constraint in spec.objective.constraints
     }
@@ -805,6 +1001,7 @@ def verify_live(
                 arm_evidence_quality(cand_sec, routing_arm=True),
             )
         )
+        last_sections = (base_sec, cand_sec)
         baseline_value, candidate_value = _pair_metrics(
             comparison, metric_key, incomplete
         )
@@ -849,10 +1046,96 @@ def verify_live(
                 "op": constraint.op,
                 "bound": constraint.bound,
                 "tolerance_pct": constraint.tolerance_pct,
+                "tolerance_pp": constraint.tolerance_pp,
+                "factor": constraint.factor,
                 "baseline": baseline_c,
                 "candidate": candidate_c,
             }
         )
+
+    # M4: reference arms - one single-model run per declared alias on the
+    # frozen protocol, cached by (dataset hash, protocol hash, alias) so
+    # several candidates reuse the same reference runs. A failed reference
+    # run is incomplete evidence, never a zero.
+    references_evidence: dict[str, Any] = {}
+    reference_values: dict[str, float | None] = {}
+    ref_rows: list[dict[str, Any]] = []
+    if spec.references is not None:
+        cache = _load_run_cache(run_cache)
+        manifest_hash = (
+            "sha256:" + hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        )
+        cache_dirty = False
+        for role in ("strong", "weak"):
+            alias = getattr(spec.references, role)
+            key = f"{actual}:{manifest_hash}:{alias}"
+            run_id = cache.get(key)
+            cached = run_id is not None
+            completed = cached
+            if not cached:
+                ref_run = cli.candidate_plan(
+                    baseline_run_id, targets=[alias], mode="live"
+                )
+                run_id = ref_run.get("id")
+                completed = ref_run.get("status") == "completed"
+                if completed:
+                    cache[key] = run_id
+                    cache_dirty = True
+                else:
+                    incomplete.append(
+                        f"reference arm {role!r} run {run_id} ended "
+                        f"{ref_run.get('status')!r}"
+                    )
+            references_evidence[role] = {
+                "alias": alias,
+                "run_id": run_id,
+                "cached": cached,
+            }
+            if run_id:
+                bench_refs.append(run_id)
+            if run_id and completed:
+                ref_report = cli.report(
+                    run_id, work_dir / f"reference-{role}-report.json"
+                )
+                ref_targets = (
+                    ref_report.get("summary", {}).get("targets")
+                    if isinstance(ref_report, dict)
+                    else None
+                )
+                entry = next(
+                    (
+                        t
+                        for t in ref_targets or []
+                        if isinstance(t, dict) and t.get("id") == alias
+                    ),
+                    None,
+                )
+                values = extract_metric_values(entry, metric_key) if entry else []
+                reference_values[role] = values[0] if values else None
+                cost, note = arm_cost(entry, spec.cost_basis) if entry else (None, None)
+                references_evidence[role].update(
+                    {
+                        "metric": reference_values[role],
+                        "cost_usd": cost,
+                        "cost_note": note,
+                    }
+                )
+                if entry:
+                    ref_rows.append(
+                        {
+                            "arm": "reference",
+                            "id": alias,
+                            "role": role,
+                            "accuracy": entry.get("accuracy"),
+                            "accuracy_ci95": entry.get("accuracy_ci95"),
+                            "cost_usd": cost,
+                            "cost_note": note,
+                            "latency_p50_s": entry.get("latency_p50_s"),
+                            "latency_p95_s": entry.get("latency_p95_s"),
+                        }
+                    )
+        if cache_dirty:
+            _save_run_cache(run_cache, cache)
 
     # M3: conservative merge - each rate takes the worst observed pair; a
     # pair without diagnostics never masks a breach seen in another pair.
@@ -870,6 +1153,15 @@ def verify_live(
             incomplete,
         ),
     }
+    # M4: Pareto rows - the last completed pair's arms plus the references.
+    pareto: list[dict[str, Any]] = []
+    if last_sections is not None:
+        pareto.extend(
+            pareto_rows(
+                last_sections[0], last_sections[1], spec.references, spec.cost_basis
+            )
+        )
+    pareto.extend(ref_rows)
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
     # M2: the pairs' statistics merge conservatively and drive the paired
@@ -886,6 +1178,7 @@ def verify_live(
         stats=stats,
         min_cases=spec.objective.min_cases,
         min_improvement_pp=spec.objective.min_improvement_pp,
+        references=reference_values,
     )
     reasons = list(verdict.reasons)
     reasons.extend(diagnostics)
@@ -916,6 +1209,8 @@ def verify_live(
         "preview": preview_info,
         "paired": stats.to_dict() if stats else None,
         "evidence_quality": evidence,
+        "references": references_evidence,
+        "pareto": pareto,
     }
     if not spec.gates:
         result["gates_note"] = "no guard declared"

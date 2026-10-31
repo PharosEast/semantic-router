@@ -11,6 +11,7 @@ from recipe_lab.verdict import (
     compute_paired_stats,
     evaluate_verdict,
     evidence_quality_reasons,
+    resolve_constraint,
 )
 
 
@@ -436,3 +437,133 @@ def test_evidence_quality_ceiling_breach_is_incomplete_evidence():
     )
     assert result.verdict == "INCONCLUSIVE"
     assert "baseline truncation rate 10.00% exceeds max 2.00%" in result.reasons
+
+
+# --- M4: reference-arm constraint bounds (ref:strong / ref:weak) ---
+
+
+def m4_constraint(**overrides: object) -> dict:
+    base: dict = {
+        "name": "beat-strong",
+        "metric": "capability.score",
+        "op": "gte",
+        "bound": "ref:strong",
+        "tolerance_pct": 0.0,
+        "tolerance_pp": 0.0,
+        "factor": None,
+        "baseline": None,
+        "candidate": 0.9,
+    }
+    base.update(overrides)
+    return base
+
+
+def test_resolve_constraint_ref_bound_passes_and_violates():
+    references = {"strong": 0.85, "weak": 0.70}
+    resolved = resolve_constraint(m4_constraint(), references)
+    assert resolved["status"] == "pass"
+    assert resolved["bound_value"] == pytest.approx(0.85)
+    assert resolved["ref_value"] == pytest.approx(0.85)
+    resolved = resolve_constraint(m4_constraint(candidate=0.80), references)
+    assert resolved["status"] == "violated"
+    assert "beat-strong violated" in resolved["reason"]
+
+
+def test_resolve_constraint_factor_scales_reference_bound():
+    references = {"strong": 0.90, "weak": 0.80}
+    resolved = resolve_constraint(
+        m4_constraint(bound="ref:weak", factor=0.5, candidate=0.5), references
+    )
+    assert resolved["status"] == "pass"
+    assert resolved["bound_value"] == pytest.approx(0.40)
+    resolved = resolve_constraint(
+        m4_constraint(bound="ref:weak", factor=0.5, candidate=0.39), references
+    )
+    assert resolved["status"] == "violated"
+
+
+def test_resolve_constraint_tolerance_pp_relaxes_by_absolute_points():
+    # lte: the candidate may spend up to bound + 2pp
+    resolved = resolve_constraint(
+        m4_constraint(
+            name="cost-cap",
+            metric="total_spend_usd",
+            op="lte",
+            bound=0.50,
+            tolerance_pp=2.0,
+            candidate=0.51,
+        )
+    )
+    assert resolved["status"] == "pass"
+    assert resolved["bound_value"] == pytest.approx(0.52)
+    # gte: the candidate may score down to bound - 2pp
+    resolved = resolve_constraint(
+        m4_constraint(
+            name="quality-floor",
+            metric="capability.score",
+            op="gte",
+            bound=0.50,
+            tolerance_pp=2.0,
+            candidate=0.49,
+        )
+    )
+    assert resolved["status"] == "pass"
+    assert resolved["bound_value"] == pytest.approx(0.48)
+
+
+def test_resolve_constraint_missing_reference_is_not_evaluated():
+    # a reference value the evidence does not carry is unevaluated
+    # (INCONCLUSIVE), never counted as zero.
+    for references in (None, {"strong": None, "weak": None}):
+        resolved = resolve_constraint(m4_constraint(candidate=0.0), references)
+        assert resolved["status"] == "not_evaluated"
+        assert resolved["bound_value"] is None
+        reason = resolved["not_evaluated_reason"]
+        assert "reference arm 'strong'" in reason
+        assert "never counted as zero" in reason
+
+
+def test_evaluate_verdict_ref_constraint_pass_and_fail():
+    # the constraint's measured pair value rides in the dict ("candidate");
+    # candidate_metric only feeds the improvement calculation
+    result = evaluate_verdict(
+        baseline_metric=0.80,
+        candidate_metric=0.90,
+        direction="maximize",
+        min_improvement_pct=1.0,
+        guards=[],
+        incomplete_reasons=[],
+        constraints=[m4_constraint(candidate=0.90)],
+        references={"strong": 0.85, "weak": 0.70},
+    )
+    assert result.verdict == "PASS"
+    assert result.constraints[0]["status"] == "pass"
+    result = evaluate_verdict(
+        baseline_metric=0.80,
+        candidate_metric=0.84,
+        direction="maximize",
+        min_improvement_pct=1.0,
+        guards=[],
+        incomplete_reasons=[],
+        constraints=[m4_constraint(candidate=0.84)],
+        references={"strong": 0.85, "weak": 0.70},
+    )
+    assert result.verdict == "FAIL"
+    assert "beat-strong violated" in result.reasons[0]
+
+
+def test_evaluate_verdict_unknown_reference_is_inconclusive():
+    # the improvement cleared the bar, but an unknown reference arm keeps
+    # the whole verdict INCONCLUSIVE
+    result = evaluate_verdict(
+        baseline_metric=0.80,
+        candidate_metric=0.90,
+        direction="maximize",
+        min_improvement_pct=1.0,
+        guards=[],
+        incomplete_reasons=[],
+        constraints=[m4_constraint()],
+        references={"strong": None, "weak": None},
+    )
+    assert result.verdict == "INCONCLUSIVE"
+    assert any("reference arm 'strong'" in r for r in result.reasons)

@@ -10,16 +10,19 @@ from pathlib import Path
 import pytest
 import yaml
 from recipe_lab.cli import main
-from recipe_lab.contract import ContractError, ExperimentSpec
+from recipe_lab.contract import ContractError, CostBasis, ExperimentSpec, References
 from recipe_lab.ledger import Ledger, LedgerRecord
 from recipe_lab.live import (
     _merge_paired_stats,
     _pair_metrics,
     _worst_rates,
+    arm_cost,
     arm_evidence_quality,
     live_verdict_from_runs,
     measurements_from_rows,
     paired_stats_from_comparison,
+    pareto_rows,
+    reference_metric_values,
     resolve_gates,
     verify_live,
 )
@@ -385,6 +388,7 @@ class VerifyStub:
         baseline_statuses: list[str] | None = None,
         compare_values: dict | None = None,
         baseline_doc: dict | None = None,
+        ref_statuses: dict[str, str] | None = None,
     ):
         self.baseline_doc = baseline_doc or {
             "id": "run-base",
@@ -402,6 +406,10 @@ class VerifyStub:
                 ]
             }
         }
+        # M4: single-target reference-arm runs, keyed by target alias
+        self.ref_statuses = dict(ref_statuses or {})
+        self.ref_reports: dict[str, dict] = {}
+        self.ref_plans = 0
         self.events: list[tuple] = []
         self.manifest_runs = 0
         self.compares: list[tuple] = []
@@ -414,6 +422,16 @@ class VerifyStub:
     def candidate_plan(
         self, baseline_run_id, *, targets, mode="live", name=None, hypothesis=""
     ):
+        if (
+            mode != "preview"
+            and self.ref_statuses
+            and len(targets) == 1
+            and targets[0] in self.ref_statuses
+        ):
+            alias = targets[0]
+            self.ref_plans += 1
+            self.events.append(("plan-ref", alias))
+            return {"id": f"run-ref-{alias}", "status": self.ref_statuses[alias]}
         self.events.append(("plan", mode))
         if mode == "preview":
             return {"id": "run-preview", "status": self.preview_status}
@@ -425,6 +443,11 @@ class VerifyStub:
 
     def report(self, run_id, out_path):
         self.events.append(("report", run_id))
+        if run_id.startswith("run-ref-"):
+            alias = run_id[len("run-ref-") :]
+            return self.ref_reports.get(alias) or {
+                "summary": {"targets": [{"id": alias}]}
+            }
         return self.preview_report_payload
 
     def run_manifest(self, manifest_path):
@@ -1526,3 +1549,359 @@ def test_worst_rates_takes_max_and_keeps_unknown():
     assert _worst_rates([(0.01, 0.02), (0.05, None), (None, 0.03)]) == (0.05, 0.03)
     assert _worst_rates([(None, None)]) == (None, None)
     assert _worst_rates([]) == (None, None)
+
+
+# ---- M4: reference arms and cost basis ----
+
+
+def _scored_target(target_id: str, score: float, **extra: object) -> dict:
+    """A sectioned-payload target carrying the objective metric value."""
+    entry = _target(target_id)
+    entry["capability.score"] = score
+    entry.update(extra)
+    return entry
+
+
+def _ref_bound_spec(**objective_overrides: object) -> ExperimentSpec:
+    spec_dict = copy.deepcopy(VALID_SPEC)
+    spec_dict["references"] = {"strong": "ref-strong", "weak": "ref-weak"}
+    spec_dict["objective"]["constraints"] = [
+        {
+            "name": "accuracy-vs-strong",
+            "metric": "capability.score",
+            "op": "gte",
+            "bound": "ref:strong",
+        }
+    ]
+    spec_dict["objective"].update(objective_overrides)
+    return ExperimentSpec.from_dict(spec_dict)
+
+
+def test_live_verdict_ref_bound_resolves_against_sections():
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _sectioned_payload(
+                baseline_targets=[
+                    _scored_target("ref-weak", 0.70),
+                    _scored_target("ref-strong", 0.85),
+                    _scored_target("single-a", 0.80),
+                ],
+                candidate_targets=[_scored_target("mom-x", 0.90, kind="mom")],
+            )
+
+    result = live_verdict_from_runs(
+        spec=_ref_bound_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "PASS"
+    assert result["references"] == {"strong": 0.85, "weak": 0.70}
+    [constraint] = result["constraints"]
+    assert constraint["status"] == "pass"
+    assert constraint["bound_value"] == pytest.approx(0.85)
+    assert constraint["ref_value"] == pytest.approx(0.85)
+    rows = result["pareto"]
+    assert [(r["arm"], r["id"], r["role"]) for r in rows] == [
+        ("baseline", "ref-weak", "weak"),
+        ("baseline", "ref-strong", "strong"),
+        ("baseline", "single-a", None),
+        ("candidate", "mom-x", None),
+    ]
+
+
+def test_live_verdict_missing_reference_arm_is_inconclusive():
+    # the ref:strong bound resolves against an arm the payload does not
+    # carry: unevaluated (INCONCLUSIVE), never zero.
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _sectioned_payload(
+                baseline_targets=[_scored_target("single-a", 0.80)],
+                candidate_targets=[_scored_target("mom-x", 0.90, kind="mom")],
+            )
+
+    result = live_verdict_from_runs(
+        spec=_ref_bound_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert result["references"] == {"strong": None, "weak": None}
+    assert "reference arm 'strong'" in result["reasons"][0]
+    assert "never counted as zero" in result["reasons"][0]
+
+
+def test_reference_metric_values_match_by_id():
+    refs = References.from_dict({"strong": "ref-strong", "weak": "ref-weak"})
+    targets = [
+        {"id": "single-a", "capability.score": 0.80},
+        {"id": "ref-weak", "capability.score": 0.70},
+        {"id": "ref-strong", "capability.score": 0.85},
+    ]
+    assert reference_metric_values(targets, refs, "capability.score") == {
+        "strong": 0.85,
+        "weak": 0.70,
+    }
+    assert reference_metric_values(None, refs, "capability.score") == {
+        "strong": None,
+        "weak": None,
+    }
+    assert reference_metric_values(targets, None, "capability.score") == {
+        "strong": None,
+        "weak": None,
+    }
+
+
+def test_arm_cost_measured_wins_and_unknown_stays_none():
+    assert arm_cost({"total_spend_usd": 1.25}, None) == (1.25, "measured")
+    assert arm_cost({"cost_usd": 0.5}, None) == (0.5, "measured")
+    # measured wins even when pricing is declared
+    basis = CostBasis.from_dict(
+        {
+            "source": "provider_pricing",
+            "assumed_pricing": {
+                "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0}
+            },
+        }
+    )
+    assert arm_cost({"total_spend_usd": 1.25}, basis) == (1.25, "measured")
+    assert arm_cost({"accuracy": 0.9}, basis) == (None, None)
+    assert arm_cost(None, basis) == (None, None)
+
+
+def test_arm_cost_assumed_from_declared_pricing():
+    basis = CostBasis.from_dict(
+        {
+            "source": "provider_pricing",
+            "assumed_pricing": {
+                "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0}
+            },
+        }
+    )
+    target = {
+        "tokens": {"input_tokens": 1_000_000, "output_tokens": 500_000},
+        "selected_models": {"model-a": 12},
+    }
+    assert arm_cost(target, basis) == (pytest.approx(2.0), "assumed")
+    # cached input counts toward the prompt side
+    target["tokens"] = {
+        "input_tokens": 900_000,
+        "cached_input_tokens": 100_000,
+        "output_tokens": 500_000,
+    }
+    assert arm_cost(target, basis)[0] == pytest.approx(2.0)
+    # unknown usage parts contribute zero, never block the estimate
+    target["tokens"] = {"input_tokens": 1_000_000}
+    assert arm_cost(target, basis) == (pytest.approx(1.0), "assumed")
+
+
+def test_arm_cost_assumed_requires_single_model_with_rates():
+    basis = CostBasis.from_dict(
+        {
+            "source": "provider_pricing",
+            "assumed_pricing": {
+                "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0}
+            },
+        }
+    )
+    tokens = {"input_tokens": 1_000_000, "output_tokens": 0}
+    # a routed arm touching two models is not estimable
+    two_models = {"tokens": tokens, "selected_models": {"model-a": 3, "model-b": 4}}
+    assert arm_cost(two_models, basis) == (None, None)
+    # no declared rate for the model
+    assert arm_cost({"tokens": tokens, "selected_models": {"model-z": 3}}, basis) == (
+        None,
+        None,
+    )
+    # no pricing section at all
+    assert arm_cost({"tokens": tokens, "selected_models": {"model-a": 3}}, None) == (
+        None,
+        None,
+    )
+    # no token usage
+    assert arm_cost({"selected_models": {"model-a": 3}}, basis) == (None, None)
+
+
+def test_pareto_rows_shape_and_reference_roles():
+    basis = CostBasis.from_dict(
+        {
+            "source": "provider_pricing",
+            "assumed_pricing": {
+                "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0}
+            },
+        }
+    )
+    refs = References.from_dict({"strong": "ref-strong", "weak": "ref-weak"})
+    baseline_targets = [
+        {
+            "id": "ref-strong",
+            "accuracy": 0.85,
+            "accuracy_ci95": [0.80, 0.90],
+            "total_spend_usd": 2.0,
+            "latency_p50_s": 0.4,
+            "latency_p95_s": 0.9,
+        },
+        {"id": "ref-weak", "accuracy": 0.70},
+        {"id": "single-a", "accuracy": 0.80},
+    ]
+    candidate_targets = [
+        {
+            "id": "mom-x",
+            "accuracy": 0.90,
+            "tokens": {"input_tokens": 1_000_000, "output_tokens": 0},
+            "selected_models": {"model-a": 5},
+        }
+    ]
+    rows = pareto_rows(baseline_targets, candidate_targets, refs, basis)
+    assert [(r["arm"], r["id"], r["role"]) for r in rows] == [
+        ("baseline", "ref-strong", "strong"),
+        ("baseline", "ref-weak", "weak"),
+        ("baseline", "single-a", None),
+        ("candidate", "mom-x", None),
+    ]
+    strong = rows[0]
+    assert strong["accuracy"] == 0.85
+    assert strong["accuracy_ci95"] == [0.80, 0.90]
+    assert strong["cost_usd"] == 2.0 and strong["cost_note"] == "measured"
+    assert strong["latency_p50_s"] == 0.4 and strong["latency_p95_s"] == 0.9
+    assert rows[1]["cost_usd"] is None and rows[1]["cost_note"] is None
+    assert rows[3]["cost_note"] == "assumed"
+    # without declared references no role is tagged
+    plain = pareto_rows(baseline_targets, candidate_targets, None, basis)
+    assert all(r["role"] is None for r in plain)
+
+
+def _ref_verify_spec() -> ExperimentSpec:
+    spec_dict = copy.deepcopy(VALID_SPEC)
+    spec_dict["references"] = {"strong": "ref-strong", "weak": "ref-weak"}
+    spec_dict["objective"]["constraints"] = [
+        {
+            "name": "accuracy-vs-strong",
+            "metric": "capability.score",
+            "op": "gte",
+            "bound": "ref:strong",
+        }
+    ]
+    return ExperimentSpec.from_dict(spec_dict)
+
+
+def _ref_compare_payload() -> dict:
+    return _sectioned_payload(
+        baseline_targets=[
+            _scored_target("ref-weak", 0.70),
+            _scored_target("ref-strong", 0.85),
+            _scored_target("single-a", 0.80),
+        ],
+        candidate_targets=[_scored_target("mom-x", 0.90, kind="mom")],
+    )
+
+
+def _ref_report(alias: str, score: float) -> dict:
+    return {
+        "summary": {
+            "targets": [{"id": alias, "capability.score": score, "accuracy": score}]
+        }
+    }
+
+
+def test_verify_reference_arms_bind_and_cache(tmp_path):
+    cache_path = tmp_path / "run-id-cache.json"
+    spec = _ref_verify_spec()
+    kwargs = {
+        "spec": spec,
+        "baseline_run_id": "run-base",
+        "targets": ["mom-router"],
+        "repetitions": 1,
+        "measurements": [
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        "work_dir": tmp_path,
+        "run_cache": cache_path,
+    }
+    reports = {
+        "ref-strong": _ref_report("ref-strong", 0.85),
+        "ref-weak": _ref_report("ref-weak", 0.70),
+    }
+
+    stub = VerifyStub(
+        compare_values=_ref_compare_payload(),
+        ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
+    )
+    stub.ref_reports = reports
+    result = verify_live(cli=stub, **kwargs)
+    assert result["verdict"] == "PASS"
+    assert stub.ref_plans == 2
+    assert result["references"]["strong"] == {
+        "alias": "ref-strong",
+        "run_id": "run-ref-ref-strong",
+        "cached": False,
+        "metric": 0.85,
+        "cost_usd": None,
+        "cost_note": None,
+    }
+    assert result["references"]["weak"]["metric"] == 0.70
+    assert "run-ref-ref-strong" in result["bench_refs"]
+    assert any(
+        row["arm"] == "reference"
+        and row["role"] == "strong"
+        and row["id"] == "ref-strong"
+        for row in result["pareto"]
+    )
+    # the completed run ids land in the cache keyed by dataset+manifest+alias
+    assert cache_path.is_file()
+    cached = json.loads(cache_path.read_text(encoding="utf-8"))
+    assert sorted(value for value in cached.values()) == [
+        "run-ref-ref-strong",
+        "run-ref-ref-weak",
+    ]
+
+    # second invocation: cache hit - no new reference runs, same evidence
+    stub2 = VerifyStub(
+        compare_values=_ref_compare_payload(),
+        ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
+    )
+    stub2.ref_reports = reports
+    result2 = verify_live(cli=stub2, **kwargs)
+    assert stub2.ref_plans == 0
+    assert result2["verdict"] == "PASS"
+    assert result2["references"]["strong"]["cached"] is True
+    assert result2["references"]["strong"]["metric"] == 0.85
+
+
+def test_verify_failed_reference_arm_is_inconclusive(tmp_path):
+    stub = VerifyStub(
+        compare_values=_ref_compare_payload(),
+        ref_statuses={"ref-strong": "failed", "ref-weak": "completed"},
+    )
+    stub.ref_reports = {"ref-weak": _ref_report("ref-weak", 0.70)}
+    result = verify_live(
+        spec=_ref_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert "reference arm 'strong' run run-ref-ref-strong ended 'failed'" in (
+        result["reasons"]
+    )
+    # a failed reference run carries no metric evidence at all
+    assert result["references"]["strong"].get("metric") is None
+    assert result["references"]["weak"]["metric"] == 0.70

@@ -195,7 +195,10 @@ def compute_paired_stats(
     )
 
 
-def resolve_constraint(constraint: dict[str, Any]) -> dict[str, Any]:
+def resolve_constraint(
+    constraint: dict[str, Any],
+    references: dict[str, float | None] | None = None,
+) -> dict[str, Any]:
     """Status and resolved bound for one constraint evidence entry (E).
 
     Shared by the live verdict and the replay cost proxy (E2): the replay
@@ -203,12 +206,15 @@ def resolve_constraint(constraint: dict[str, Any]) -> dict[str, Any]:
     substituted for the live sr-bench measurement.
 
     `constraint` carries the declared fields (name/metric/op/bound/
-    tolerance_pct) plus the measured `baseline` and `candidate` values
-    (None = unknown, e.g. sr-bench serializes unknown spend as null -
-    unknown usage must never count as zero). A "baseline" bound resolves
-    against the measured baseline value; tolerance_pct relaxes the bound
-    in the permissive direction. Not-measurable constraints are
-    unevaluated, never failed.
+    tolerance_pct plus M4's tolerance_pp/factor) and the measured
+    `baseline` and `candidate` values (None = unknown, e.g. sr-bench
+    serializes unknown spend as null - unknown usage must never count as
+    zero). A "baseline" bound resolves against the measured baseline
+    value; a "ref:strong"/"ref:weak" bound (M4) resolves against the
+    named reference arm's value via `references`, multiplied by `factor`
+    when declared. tolerance_pct relaxes the bound multiplicatively and
+    tolerance_pp (M4) additively in the permissive direction. A missing
+    reference value is unevaluated (INCONCLUSIVE), never zero.
     """
     name = constraint["name"]
     op = constraint["op"]
@@ -219,15 +225,42 @@ def resolve_constraint(constraint: dict[str, Any]) -> dict[str, Any]:
     out = dict(constraint)
     out["bound_value"] = None
     out["status"] = "not_evaluated"
-    if candidate is None or (bound == "baseline" and baseline is None):
+    if candidate is None:
         return out
-    bound_value = float(baseline) if bound == "baseline" else float(bound)
-    # lte allows a worst case above the bound, gte below it
+    ref_role = None
+    if bound == "ref:strong":
+        ref_role = "strong"
+    elif bound == "ref:weak":
+        ref_role = "weak"
+    if ref_role is not None:
+        ref_value = (references or {}).get(ref_role)
+        if ref_value is None:
+            out["not_evaluated_reason"] = (
+                f"constraint {name} not evaluable: reference arm {ref_role!r} "
+                f"for {constraint['metric']!r} is unknown (missing evidence, "
+                "never counted as zero)"
+            )
+            return out
+        factor = constraint.get("factor")
+        bound_value = float(ref_value) * (float(factor) if factor is not None else 1.0)
+        out["ref_value"] = float(ref_value)
+    elif bound == "baseline":
+        if baseline is None:
+            return out
+        bound_value = float(baseline)
+    else:
+        bound_value = float(bound)
+    # lte allows a worst case above the bound, gte below it: tolerance_pct
+    # relaxes multiplicatively, tolerance_pp (M4) by absolute percentage
+    # points (the contract refuses declaring both).
     bound_value = (
         bound_value * (1 + tolerance / 100.0)
         if op == "lte"
         else bound_value * (1 - tolerance / 100.0)
     )
+    tolerance_pp = float(constraint.get("tolerance_pp", 0.0) or 0.0)
+    if tolerance_pp:
+        bound_value += tolerance_pp / 100.0 if op == "lte" else -(tolerance_pp / 100.0)
     out["bound_value"] = bound_value
     violated = candidate > bound_value if op == "lte" else candidate < bound_value
     out["status"] = "violated" if violated else "pass"
@@ -279,6 +312,7 @@ def evaluate_verdict(
     stats: PairedStats | None = None,
     min_cases: int = 1,
     min_improvement_pp: float | None = None,
+    references: dict[str, float | None] | None = None,
 ) -> VerdictResult:
     """Decide PASS / FAIL / INCONCLUSIVE from live-tier evidence.
 
@@ -298,18 +332,27 @@ def evaluate_verdict(
     paired evidence with a relative bar stays undecided. Without paired
     statistics a declared pp bar has nothing to apply to (INCONCLUSIVE) and
     the point-estimate path applies `min_improvement_pct` unchanged.
+
+    M4: constraint bounds may pin a reference arm (`ref:strong`/`ref:weak`);
+    `references` carries those arms' measured values, and a missing
+    reference value keeps the constraint unevaluated (INCONCLUSIVE).
     """
     reasons = list(incomplete_reasons)
     unevaluated = [g.name for g in guards if not g.evaluated]
     if unevaluated:
         reasons.append("guard evaluation incomplete: " + ", ".join(unevaluated))
-    resolved_constraints = [resolve_constraint(c) for c in (constraints or [])]
+    resolved_constraints = [
+        resolve_constraint(c, references) for c in (constraints or [])
+    ]
     for constraint in resolved_constraints:
         if constraint["status"] == "not_evaluated":
             reasons.append(
-                f"constraint {constraint['name']} not evaluable: "
-                f"{'candidate' if constraint.get('candidate') is None else 'baseline'} "
-                f"{constraint['metric']!r} is unknown (missing evidence, never counted as zero)"
+                constraint.get("not_evaluated_reason")
+                or (
+                    f"constraint {constraint['name']} not evaluable: "
+                    f"{'candidate' if constraint.get('candidate') is None else 'baseline'} "
+                    f"{constraint['metric']!r} is unknown (missing evidence, never counted as zero)"
+                )
             )
     if reasons:
         return VerdictResult(

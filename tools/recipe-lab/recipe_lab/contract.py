@@ -154,6 +154,11 @@ def _check_split_disjointness(base: Path, workload: Workload) -> None:
 
 
 CONSTRAINT_OPS = ("gte", "lte")
+# M4: constraint bounds may pin a reference arm instead of the baseline;
+# the roles name the single-model targets declared in `references`.
+REF_BOUNDS = ("ref:strong", "ref:weak")
+# M4: where the verdict's cost numbers come from (cost_basis.source).
+COST_BASIS_SOURCES = {"provider_pricing", "cost_model"}
 
 
 @dataclass(frozen=True)
@@ -162,16 +167,25 @@ class Constraint:
 
     Constraints are distinct from gates: a gate is a safety veto, a
     constraint is an economic condition (e.g. cost must not regress).
-    `bound` is either a number or the literal "baseline" (the baseline
-    arm's measured value of the same metric); `tolerance_pct` relaxes the
-    bound by that percentage in the permissive direction.
+    `bound` is a number, the literal "baseline" (the baseline arm's
+    measured value of the same metric), or a reference pin "ref:strong" /
+    "ref:weak" (M4: the named single-model arm's measured value).
+    `tolerance_pct` relaxes the bound by that percentage in the permissive
+    direction; `tolerance_pp` (M4) relaxes it by absolute percentage
+    points instead (for 0-1 fraction metrics, e.g. accuracy floors);
+    declare at most one. `factor` (M4) multiplies a reference bound (e.g.
+    cost <= 0.7 x the strong arm) and is only valid with a ref bound.
     """
 
     name: str
     metric: str
     op: str
-    bound: str | float  # "baseline" or a numeric bound
+    bound: str | float  # "baseline", "ref:strong"/"ref:weak", or a number
     tolerance_pct: float = 0.0
+    # M4: absolute pp relaxation / reference multiplier (0 and None stay
+    # out of the serialized form for round-trip stability).
+    tolerance_pp: float = 0.0
+    factor: float | None = None
 
     @classmethod
     def from_dict(cls, raw: dict, index: int) -> Constraint:
@@ -191,24 +205,52 @@ class Constraint:
             f"constraints[{index}].op must be one of {sorted(CONSTRAINT_OPS)}",
         )
         bound = raw.get("bound")
-        if bound != "baseline":
+        if bound != "baseline" and bound not in REF_BOUNDS:
             bound = _require_number(bound, f"constraints[{index}].bound")
         tolerance = _require_number(
             raw.get("tolerance_pct", 0.0), f"constraints[{index}].tolerance_pct"
         )
         _require(tolerance >= 0, f"constraints[{index}].tolerance_pct must be >= 0")
+        tolerance_pp = _require_number(
+            raw.get("tolerance_pp", 0.0), f"constraints[{index}].tolerance_pp"
+        )
+        _require(tolerance_pp >= 0, f"constraints[{index}].tolerance_pp must be >= 0")
+        _require(
+            tolerance == 0.0 or tolerance_pp == 0.0,
+            f"constraints[{index}]: declare tolerance_pct or tolerance_pp, not both",
+        )
+        factor_raw = raw.get("factor")
+        factor: float | None = None
+        if factor_raw is not None:
+            factor = _require_number(factor_raw, f"constraints[{index}].factor")
+            _require(factor > 0, f"constraints[{index}].factor must be > 0")
+            _require(
+                bound in REF_BOUNDS,
+                f"constraints[{index}].factor is only valid with a ref:strong/ref:weak bound",
+            )
         return cls(
-            name=name, metric=metric, op=op, bound=bound, tolerance_pct=tolerance
+            name=name,
+            metric=metric,
+            op=op,
+            bound=bound,
+            tolerance_pct=tolerance,
+            tolerance_pp=tolerance_pp,
+            factor=factor,
         )
 
     def to_dict(self) -> dict:
-        return {
+        out = {
             "name": self.name,
             "metric": self.metric,
             "op": self.op,
             "bound": self.bound,
             "tolerance_pct": self.tolerance_pct,
         }
+        if self.tolerance_pp:
+            out["tolerance_pp"] = self.tolerance_pp
+        if self.factor is not None:
+            out["factor"] = self.factor
+        return out
 
 
 @dataclass(frozen=True)
@@ -690,6 +732,12 @@ class Budget:
         }
 
 
+def _is_cost_metric(metric: str) -> bool:
+    """M4: a cost/spend metric (benefit constraints price against a basis)."""
+    lowered = metric.lower()
+    return "cost" in lowered or "spend" in lowered
+
+
 def _check_cost_model(raw: Any) -> dict[str, float] | None:
     """E2: optional top-level `cost_model` - model name -> relative cost.
 
@@ -794,6 +842,110 @@ class EvidenceQuality:
 
 
 @dataclass(frozen=True)
+class References:
+    """M4: the two single-model reference arms (模型别名 = sr-bench target id).
+
+    `strong` is the quality reference (the best candidate model),
+    `weak` the cheapest one; constraint bounds may pin either via
+    `bound: ref:strong` / `ref:weak`. Both must be registered single-model
+    target ids present in the compared runs.
+    """
+
+    strong: str
+    weak: str
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> References:
+        unknown = sorted(set(raw) - {"strong", "weak"})
+        _require(not unknown, f"references has unknown keys: {', '.join(unknown)}")
+        strong = raw.get("strong")
+        _require(
+            isinstance(strong, str) and strong.strip(),
+            "references.strong must be a non-empty string (the strong single-model target id)",
+        )
+        weak = raw.get("weak")
+        _require(
+            isinstance(weak, str) and weak.strip(),
+            "references.weak must be a non-empty string (the weak single-model target id)",
+        )
+        return cls(strong=strong, weak=weak)
+
+    def to_dict(self) -> dict:
+        return {"strong": self.strong, "weak": self.weak}
+
+
+@dataclass(frozen=True)
+class CostBasis:
+    """M4: where the verdict's cost numbers come from.
+
+    `source` is "provider_pricing" (billed/token rates from the provider)
+    or "cost_model" (the replay cost proxy). `assumed_pricing` carries
+    per-model rates ONLY for models the stack cannot price; any cost
+    estimated from it is annotated "assumed" in the evidence and report,
+    never presented as measured spend.
+    """
+
+    source: str
+    assumed_pricing: dict[str, dict[str, float]] | None = None
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> CostBasis:
+        unknown = sorted(set(raw) - {"source", "assumed_pricing"})
+        _require(not unknown, f"cost_basis has unknown keys: {', '.join(unknown)}")
+        source = raw.get("source")
+        _require(
+            source in COST_BASIS_SOURCES,
+            f"cost_basis.source must be one of {sorted(COST_BASIS_SOURCES)} (got {source!r})",
+        )
+        assumed_raw = raw.get("assumed_pricing")
+        assumed: dict[str, dict[str, float]] | None = None
+        if assumed_raw is not None:
+            _require(
+                isinstance(assumed_raw, dict) and bool(assumed_raw),
+                "cost_basis.assumed_pricing must be a non-empty mapping of model -> rates",
+            )
+            assumed = {}
+            for model, rates in assumed_raw.items():
+                _require(
+                    isinstance(rates, dict),
+                    f"cost_basis.assumed_pricing.{model} must be a mapping",
+                )
+                unknown_rate = sorted(
+                    set(rates) - {"prompt_per_1m", "completion_per_1m"}
+                )
+                _require(
+                    not unknown_rate,
+                    f"cost_basis.assumed_pricing.{model} has unknown keys: "
+                    + ", ".join(unknown_rate),
+                )
+                prompt = _require_number(
+                    rates.get("prompt_per_1m"),
+                    f"cost_basis.assumed_pricing.{model}.prompt_per_1m",
+                )
+                completion = _require_number(
+                    rates.get("completion_per_1m"),
+                    f"cost_basis.assumed_pricing.{model}.completion_per_1m",
+                )
+                _require(
+                    prompt >= 0 and completion >= 0,
+                    f"cost_basis.assumed_pricing.{model} rates must be >= 0",
+                )
+                assumed[model] = {
+                    "prompt_per_1m": prompt,
+                    "completion_per_1m": completion,
+                }
+        return cls(source=source, assumed_pricing=assumed)
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {"source": self.source}
+        if self.assumed_pricing is not None:
+            out["assumed_pricing"] = {
+                model: dict(rates) for model, rates in self.assumed_pricing.items()
+            }
+        return out
+
+
+@dataclass(frozen=True)
 class ExperimentSpec:
     api_version: str
     objective: Objective
@@ -808,6 +960,10 @@ class ExperimentSpec:
     cost_model: dict[str, float] | None = None
     # M3: output-quality ceilings; rates beyond them are unreliable evidence.
     evidence_quality: EvidenceQuality = field(default_factory=EvidenceQuality)
+    # M4: the two single-model reference arms (target ids) constraint bounds
+    # may pin, and where the verdict's cost numbers come from.
+    references: References | None = None
+    cost_basis: CostBasis | None = None
     # directory of the YAML file this spec was loaded from (from_yaml only);
     # workload.manifest resolves against it. Not part of the contract.
     spec_dir: str | None = None
@@ -846,6 +1002,35 @@ class ExperimentSpec:
             if evidence_raw is not None
             else EvidenceQuality()
         )
+        # M4: optional reference arms and cost basis.
+        references_raw = raw.get("references")
+        references = (
+            References.from_dict(_require_mapping(references_raw, "references"))
+            if references_raw is not None
+            else None
+        )
+        cost_basis_raw = raw.get("cost_basis")
+        cost_basis = (
+            CostBasis.from_dict(_require_mapping(cost_basis_raw, "cost_basis"))
+            if cost_basis_raw is not None
+            else None
+        )
+        # M4: a benefit constraint (cost bounded against a reference arm)
+        # is meaningless without a declared cost basis - refuse it; a ref
+        # bound also needs the references section to resolve against.
+        for i, objective_constraint in enumerate(objective.constraints):
+            if objective_constraint.bound in REF_BOUNDS:
+                _require(
+                    references is not None,
+                    f"constraints[{i}] pins {objective_constraint.bound} but the spec "
+                    "declares no references section",
+                )
+                if _is_cost_metric(objective_constraint.metric):
+                    _require(
+                        cost_basis is not None,
+                        f"benefit constraint {objective_constraint.name!r} (cost bound "
+                        "against a reference arm) requires a cost_basis section",
+                    )
         # A5: `evaluation` is retired - replay and live are separate commands,
         # tiers are fixed by the CLI, not contracted per experiment.
         _require(
@@ -862,6 +1047,8 @@ class ExperimentSpec:
             stack=stack,
             cost_model=cost_model,
             evidence_quality=evidence_quality,
+            references=references,
+            cost_basis=cost_basis,
         )
 
     @classmethod
@@ -957,6 +1144,10 @@ class ExperimentSpec:
             out["cost_model"] = dict(self.cost_model)
         if self.evidence_quality != EvidenceQuality():
             out["evidence_quality"] = self.evidence_quality.to_dict()
+        if self.references is not None:
+            out["references"] = self.references.to_dict()
+        if self.cost_basis is not None:
+            out["cost_basis"] = self.cost_basis.to_dict()
         return out
 
 

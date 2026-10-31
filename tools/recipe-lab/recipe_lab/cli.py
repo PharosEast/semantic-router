@@ -1245,6 +1245,12 @@ def cmd_verify(args: argparse.Namespace) -> int:
         timeout_s=args.timeout,
     )
     try:
+        # M4: reference-arm run IDs are cached so repeated verify invocations
+        # do not re-run the (expensive) reference arms; default location
+        # follows the ledger when present, else the work dir.
+        run_cache = args.run_cache or (
+            Path(args.ledger).parent / "run-id-cache.json" if args.ledger else None
+        )
         result = verify_live(
             spec=spec,
             cli=cli,
@@ -1254,6 +1260,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             measurements=measurements,
             work_dir=work_dir,
             workload_split=args.split,
+            run_cache=run_cache,
         )
     except (ContractError, RuntimeError) as exc:
         raise SystemExit(f"verify error: {exc}") from exc
@@ -1904,6 +1911,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_verify.add_argument(
         "--ledger", default=None, help="ledger JSONL to append the live record to"
+    )
+    p_verify.add_argument(
+        "--run-cache",
+        default=None,
+        help=(
+            "JSON file caching completed reference-arm run IDs (M4); default: "
+            "next to the ledger when --ledger is given, else no cache"
+        ),
     )
     p_verify.add_argument("--srbench-bin", default="vllm-sr")
     p_verify.add_argument("--srbench-url", default=None)
