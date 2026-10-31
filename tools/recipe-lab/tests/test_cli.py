@@ -685,6 +685,74 @@ def test_split_command_outputs_spec_ready_block(tmp_path, capsys):
     assert total == EXPECTED_TOTAL_CASES
 
 
+# ---- X3: cases to-srbench (deterministic sr-bench rendering) ----
+
+
+def test_cases_to_srbench_command_is_deterministic(tmp_path, capsys):
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        '{"case_id":"c1","prompt":"p1","truth":"math"}\n'
+        '{"case_id":"c2","prompt":"p2","truth":"code"}\n',
+        encoding="utf-8",
+    )
+
+    def argv(out):
+        return ["cases", "to-srbench", "--cases", str(cases), "--output", str(out)]
+
+    assert main(argv(tmp_path / "a.jsonl")) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["cases_count"] == 2
+    assert first["srbench_sha256"].startswith("sha256:")
+    # same cases => byte-identical output (the hash is freezable in a contract)
+    assert main(argv(tmp_path / "b.jsonl")) == 0
+    capsys.readouterr()
+    assert (tmp_path / "a.jsonl").read_bytes() == (tmp_path / "b.jsonl").read_bytes()
+    assert first["srbench_sha256"] == "sha256:" + hashlib.sha256(
+        (tmp_path / "a.jsonl").read_bytes()
+    ).hexdigest()
+    rows = [
+        json.loads(line)
+        for line in (tmp_path / "a.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert rows == [
+        {
+            "answer": "math",
+            "benchmark": "recipe-lab",
+            "id": "c1",
+            "messages": [{"content": "p1", "role": "user"}],
+        },
+        {
+            "answer": "code",
+            "benchmark": "recipe-lab",
+            "id": "c2",
+            "messages": [{"content": "p2", "role": "user"}],
+        },
+    ]
+
+
+def test_cases_to_srbench_rejects_signal_fact_truth(tmp_path):
+    # signal-fact truths have no sr-bench answer to grade against
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        '{"case_id":"c1","prompt":"p1","truth":{"signals":{"domain":"code"}}}\n',
+        encoding="utf-8",
+    )
+    assert (
+        main(
+            [
+                "cases",
+                "to-srbench",
+                "--cases",
+                str(cases),
+                "--output",
+                str(tmp_path / "d.jsonl"),
+            ]
+        )
+        == 2
+    )
+
+
 # ---- Sub-issue 5 CLI audit: exit-code contract and structured stdout ----
 
 

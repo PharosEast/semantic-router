@@ -243,6 +243,109 @@ def test_verify_workload_split_selects_one_slice(tmp_path):
         spec.verify_workload(split="train")
 
 
+# ---- X3: dual-format splits (cases + srbench_dataset) ----
+
+
+def _write_srbench_splits_dataset(base, mutate_srbench="none"):
+    """Splits dataset (written into the existing dir `base`) whose dev split
+    also declares an sr-bench rendering of the same cases.
+
+    mutate_srbench: 'hash' drifts the declared srbench hash, 'ids' swaps a
+    row id so the rendering no longer pairs with the cases manifest.
+    """
+    spec_path = _write_splits_dataset(base)
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    srbench_rows = [
+        {
+            "id": "c3" if mutate_srbench != "ids" else "other-id",
+            "benchmark": "recipe-lab",
+            "messages": [{"role": "user", "content": "p3"}],
+            "answer": "math",
+        }
+    ]
+    dataset = base / "dev.srbench.jsonl"
+    dataset.write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in srbench_rows),
+        encoding="utf-8",
+    )
+    digest = dataset_content_hash(dataset)
+    if mutate_srbench == "hash":
+        digest = "sha256:" + "f" * 64
+    spec["workload"]["splits"]["dev"]["srbench_dataset"] = "dev.srbench.jsonl"
+    spec["workload"]["splits"]["dev"]["srbench_sha256"] = digest
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return spec_path
+
+
+def test_srbench_split_fields_roundtrip_and_default_absent():
+    raw = copy.deepcopy(VALID_SPLITS_SPEC)
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.workload.split_srbench_dataset("dev") is None
+    assert spec.workload.split_srbench_hash("dev") is None
+    # a split without srbench fields round-trips without the new keys
+    assert "srbench_dataset" not in spec.to_dict()["workload"]["splits"]["dev"]
+    # live binds the cases hash when no rendering is declared (legacy form)
+    assert spec.workload.live_dataset_hash("dev") == spec.workload.split_hash("dev")
+
+    declared = copy.deepcopy(VALID_SPLITS_SPEC)
+    declared["workload"]["splits"]["dev"]["srbench_dataset"] = "dev.srbench.jsonl"
+    declared["workload"]["splits"]["dev"]["srbench_sha256"] = "sha256:" + "b" * 64
+    spec2 = ExperimentSpec.from_dict(declared)
+    assert spec2.workload.split_srbench_dataset("dev") == "dev.srbench.jsonl"
+    assert spec2.workload.split_srbench_hash("dev") == "sha256:" + "b" * 64
+    out = spec2.to_dict()["workload"]["splits"]["dev"]
+    assert out["srbench_dataset"] == "dev.srbench.jsonl"
+    assert out["srbench_sha256"] == "sha256:" + "b" * 64
+    # the other splits stay clean and keep the legacy cases binding
+    assert "srbench_dataset" not in spec2.to_dict()["workload"]["splits"]["calib"]
+    assert spec2.workload.live_dataset_hash("dev") == "sha256:" + "b" * 64
+    assert spec2.workload.live_dataset_hash("calib") == (
+        spec2.workload.split_hash("calib")
+    )
+
+
+def test_srbench_split_fields_require_both():
+    raw = copy.deepcopy(VALID_SPLITS_SPEC)
+    raw["workload"]["splits"]["dev"]["srbench_dataset"] = "dev.srbench.jsonl"
+    with pytest.raises(ContractError, match="srbench_dataset and srbench_sha256"):
+        ExperimentSpec.from_dict(raw)
+    raw2 = copy.deepcopy(VALID_SPLITS_SPEC)
+    raw2["workload"]["splits"]["dev"]["srbench_sha256"] = "sha256:" + "b" * 64
+    with pytest.raises(ContractError, match="srbench_dataset and srbench_sha256"):
+        ExperimentSpec.from_dict(raw2)
+
+
+def test_verify_workload_checks_srbench_hash_and_pairing(tmp_path):
+    # the happy path: the rendering re-hashes to its declared hash and pairs
+    spec_path = _write_srbench_splits_dataset(tmp_path)
+    spec = ExperimentSpec.from_yaml(spec_path)
+    assert spec.verify_workload(split="dev") == spec.workload.split_hash("dev")
+
+    # a drifted rendering is rejected like any other frozen dataset
+    drift = tmp_path / "drift"
+    drift.mkdir()
+    with pytest.raises(ContractError, match="srbench dataset hash mismatch"):
+        ExperimentSpec.from_yaml(
+            _write_srbench_splits_dataset(drift, mutate_srbench="hash")
+        ).verify_workload(split="dev")
+
+    # a rendering of a different case set is rejected even when it hashes fine
+    ids = tmp_path / "ids"
+    ids.mkdir()
+    with pytest.raises(ContractError, match="does not pair 1:1"):
+        ExperimentSpec.from_yaml(
+            _write_srbench_splits_dataset(ids, mutate_srbench="ids")
+        ).verify_workload(split="dev")
+
+
+def test_verify_workload_missing_srbench_dataset_is_actionable(tmp_path):
+    spec_path = _write_srbench_splits_dataset(tmp_path)
+    (tmp_path / "dev.srbench.jsonl").unlink()
+    spec = ExperimentSpec.from_yaml(spec_path)
+    with pytest.raises(ContractError, match="srbench dataset not found"):
+        spec.verify_workload(split="dev")
+
+
 def test_empty_oracle_policy_rejected():
     raw = copy.deepcopy(VALID_SPEC)
     raw["attribution"]["oracle_policy"] = {}

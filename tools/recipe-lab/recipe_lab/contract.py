@@ -26,6 +26,13 @@ bytes>)` and `manifest` is the path of that JSONL relative to the spec file.
 `ExperimentSpec.verify_workload()` re-hashes the manifest file and rejects a
 mismatch before any experiment command touches the data, so a drifted dataset
 can never silently join two rounds of results.
+
+X3: a split may additionally declare `srbench_dataset` + `srbench_sha256` -
+the sr-bench format (id/messages/answer) rendering of the same cases that
+live evidence binds to. Replay keeps reading `manifest`; live compares the
+run documents' dataset sha256 against `srbench_sha256`. verify_workload
+re-hashes that file too and checks its ids pair 1:1 with the cases manifest;
+`cases to-srbench` generates it deterministically from the cases file.
 """
 
 from __future__ import annotations
@@ -130,6 +137,26 @@ def _read_split_ids(manifest: Path, split: str) -> tuple[set[str], set[str]]:
             case_ids.add(case_id)
             prompt_hashes.add(hashlib.sha256(prompt.encode("utf-8")).hexdigest())
     return case_ids, prompt_hashes
+
+
+def _read_srbench_case_ids(path: Path) -> set[str]:
+    """The `id` set of one sr-bench dataset JSONL (X3 pairing-check input)."""
+    ids: set[str] = set()
+    with path.open("r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ContractError(
+                    f"{path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
+            case_id = row.get("id") if isinstance(row, dict) else None
+            if not isinstance(case_id, str) or not case_id:
+                raise ContractError(f"{path}:{line_no} is missing a non-empty id")
+            ids.add(case_id)
+    return ids
 
 
 def _check_split_disjointness(base: Path, workload: Workload) -> None:
@@ -393,10 +420,22 @@ class Objective:
 
 @dataclass(frozen=True)
 class SplitSpec:
-    """One named slice of the frozen dataset (B)."""
+    """One named slice of the frozen dataset (B).
+
+    X3: one slice carries two files of the same cases. `manifest` is the
+    recipe-lab cases JSONL (case_id/prompt/truth) that replay reads;
+    `srbench_dataset`/`srbench_sha256` optionally declare the sr-bench
+    format (id/messages/answer) rendering of the same cases that the live
+    tier binds its evidence to. The two srbench fields are declared
+    together or not at all; `cases to-srbench` generates the dataset
+    deterministically and verify_workload re-hashes it and checks its ids
+    pair 1:1 with the cases manifest.
+    """
 
     manifest: str
     content_hash: str
+    srbench_dataset: str | None = None
+    srbench_sha256: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict, name: str, prefix: str = "workload") -> SplitSpec:
@@ -410,10 +449,35 @@ class SplitSpec:
             isinstance(content_hash, str) and content_hash.strip(),
             f"{prefix}.splits.{name}.content_hash is required (frozen dataset hash)",
         )
-        return cls(manifest=manifest, content_hash=content_hash)
+        srbench_dataset = raw.get("srbench_dataset")
+        srbench_sha256 = raw.get("srbench_sha256")
+        _require(
+            (srbench_dataset is None) == (srbench_sha256 is None),
+            f"{prefix}.splits.{name} must declare srbench_dataset and "
+            "srbench_sha256 together (the sr-bench rendering of the same cases)",
+        )
+        if srbench_dataset is not None:
+            _require(
+                isinstance(srbench_dataset, str) and srbench_dataset.strip(),
+                f"{prefix}.splits.{name}.srbench_dataset must be a non-empty string",
+            )
+            _require(
+                isinstance(srbench_sha256, str) and srbench_sha256.strip(),
+                f"{prefix}.splits.{name}.srbench_sha256 must be a non-empty string",
+            )
+        return cls(
+            manifest=manifest,
+            content_hash=content_hash,
+            srbench_dataset=srbench_dataset,
+            srbench_sha256=srbench_sha256,
+        )
 
     def to_dict(self) -> dict:
-        return {"manifest": self.manifest, "content_hash": self.content_hash}
+        out = {"manifest": self.manifest, "content_hash": self.content_hash}
+        if self.srbench_dataset is not None:
+            out["srbench_dataset"] = self.srbench_dataset
+            out["srbench_sha256"] = self.srbench_sha256
+        return out
 
 
 @dataclass(frozen=True)
@@ -575,6 +639,34 @@ class Workload:
                 f"unknown workload split {name!r}; declared: {sorted(self.splits)}"
             )
         return self.splits[name].manifest
+
+    def split_srbench_dataset(self, name: str) -> str | None:
+        """The split's sr-bench dataset path, or None when not declared (X3)."""
+        if name not in self.splits:
+            raise ContractError(
+                f"unknown workload split {name!r}; declared: {sorted(self.splits)}"
+            )
+        return self.splits[name].srbench_dataset
+
+    def split_srbench_hash(self, name: str) -> str | None:
+        """The split's sr-bench dataset hash, or None when not declared (X3)."""
+        if name not in self.splits:
+            raise ContractError(
+                f"unknown workload split {name!r}; declared: {sorted(self.splits)}"
+            )
+        return self.splits[name].srbench_sha256
+
+    def live_dataset_hash(self, name: str) -> str:
+        """X3: the dataset identity live evidence must bind to.
+
+        sr-bench run documents project `manifest.dataset.sha256` - the
+        identity of the dataset they actually scored. When the split
+        declares `srbench_dataset`, that is its declared `srbench_sha256`;
+        otherwise the legacy cases `content_hash` (the historical form
+        where the cases file is fed to sr-bench directly).
+        """
+        srbench = self.split_srbench_hash(name)
+        return srbench if srbench is not None else self.split_hash(name)
 
     def to_dict(self) -> dict:
         # M5 fields serialize only when they differ from the defaults, so a
@@ -1344,6 +1436,35 @@ class ExperimentSpec:
                     f"dataset hash mismatch for split {name!r}: spec={selected.split_hash(name)} file={actual}"
                 )
             verified[name] = actual
+            # X3: the declared sr-bench rendering is verified against its own
+            # hash and paired 1:1 with the cases manifest, so live evidence
+            # can never bind to a rendering of a different case set than the
+            # one replay ranked on.
+            srbench_path = selected.split_srbench_dataset(name)
+            if srbench_path is not None:
+                srbench_file = base / srbench_path
+                if not srbench_file.is_file():
+                    raise ContractError(
+                        f"srbench dataset not found: {srbench_file} (workload "
+                        f"{selected.name!r} split {name!r} srbench_dataset is "
+                        "relative to the spec file)"
+                    )
+                srbench_actual = dataset_content_hash(srbench_file)
+                srbench_expected = selected.split_srbench_hash(name)
+                if srbench_actual != srbench_expected:
+                    raise ContractError(
+                        f"srbench dataset hash mismatch for split {name!r}: "
+                        f"spec={srbench_expected} file={srbench_actual}"
+                    )
+                case_ids, _ = _read_split_ids(manifest, name)
+                srbench_ids = _read_srbench_case_ids(srbench_file)
+                if case_ids != srbench_ids:
+                    missing = sorted(case_ids - srbench_ids)
+                    extra = sorted(srbench_ids - case_ids)
+                    raise ContractError(
+                        f"srbench dataset for split {name!r} does not pair 1:1 "
+                        f"with the cases manifest (missing: {missing}, extra: {extra})"
+                    )
         if split is None:
             if not selected.legacy:
                 _check_split_disjointness(base, selected)
