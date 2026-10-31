@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from unittest import mock
 
 import pytest
@@ -98,8 +99,30 @@ def test_preview_run_candidate_plan_arg_shapes(tmp_path):
             str(manifest),
             "--detach",
         ]
-    # candidate-plan: required repeatable --target, --mode, name/hypothesis
-    with _sequence([submitted, doc]) as run_mock:
+    # candidate-plan: required repeatable --target, --mode, name/hypothesis;
+    # the review never dispatches, so the reviewed manifest is then submitted
+    # verbatim through `run --manifest --detach` (reviewed_plan_changed).
+    reviewed = json.dumps(
+        {
+            "manifest": {"name": "reviewed", "targets": [{"id": "mom-a"}]},
+            "plan_sha256": "p" * 64,
+            "status": "validated",
+            "model_requests": 0,
+        }
+    )
+    dispatched: list[dict] = []
+
+    def scripted_run(cmd, *args, **kwargs):
+        command = list(cmd)
+        if command[2:4] == ["run", "--manifest"]:
+            # capture the dispatched manifest before the wrapper deletes it
+            dispatched.append(json.loads(Path(command[4]).read_text(encoding="utf-8")))
+            return _completed(submitted)
+        if command[2] == "candidate-plan":
+            return _completed(reviewed)
+        return _completed(doc)
+
+    with mock.patch("subprocess.run", side_effect=scripted_run) as run_mock:
         SrbenchCli().candidate_plan(
             "run-base",
             targets=["mom-a", "mom-b"],
@@ -121,6 +144,10 @@ def test_preview_run_candidate_plan_arg_shapes(tmp_path):
             "--hypothesis",
             "h",
         ]
+        second = run_mock.call_args_list[1][0][0][2:]
+        assert second[:2] == ["run", "--manifest"] and second[-1] == "--detach"
+        assert dispatched == [{"name": "reviewed", "targets": [{"id": "mom-a"}]}]
+        assert run_mock.call_args_list[2][0][0][2:] == ["show", "run-x"]
     with fake_run(stdout="{}") as run_mock:
         SrbenchCli().experiment(["attach", "exp-1", "--run", "run-a"])
         assert run_mock.call_args[0][0][2:] == [
