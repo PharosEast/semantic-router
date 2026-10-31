@@ -403,9 +403,8 @@ def mmlu_smoke_dataset(srbench_store: str) -> dict:
         except (OSError, json.JSONDecodeError):
             continue
         benchmarks = {
-            entry.get("id")
+            entry.get("id") if isinstance(entry, dict) else entry
             for entry in manifest.get("benchmarks") or []
-            if isinstance(entry, dict)
         }
         if manifest.get("profile") == "smoke" and "mmlu-pro" in benchmarks:
             matches.append((manifest_path.stat().st_mtime, manifest_path.parent))
