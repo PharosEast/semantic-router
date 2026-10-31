@@ -86,6 +86,12 @@ class PairedStats:
     payload. `compute_paired_stats` exists for the drivers whose evidence
     carries per-case diffs instead of a compare payload (model_eval C7,
     SWE-bench AG2) and produces the same fields so results are comparable.
+
+    `repetitions` counts the merged pairs (AB/BA orderings or repeated runs
+    of the same case set) and `paired_observations` their total case count;
+    a single unmerged comparison keeps the defaults (1 / None, where None
+    means "equals paired_cases"). `paired_cases` stays the distinct-case
+    count the min_cases bar is applied to.
     """
 
     paired_cases: int
@@ -95,6 +101,8 @@ class PairedStats:
     wins: int
     losses: int
     ties: int
+    repetitions: int = 1
+    paired_observations: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -111,6 +119,8 @@ class PairedStats:
             "wins": self.wins,
             "losses": self.losses,
             "ties": self.ties,
+            "repetitions": self.repetitions,
+            "paired_observations": self.paired_observations,
         }
 
 

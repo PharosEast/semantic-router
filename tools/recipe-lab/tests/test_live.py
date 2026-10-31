@@ -26,7 +26,7 @@ from recipe_lab.live import (
     resolve_gates,
     verify_live,
 )
-from recipe_lab.verdict import PairedStats
+from recipe_lab.verdict import PairedStats, evaluate_verdict
 
 from tests.fixtures import VALID_SPEC
 from tests.test_contract import _write_splits_dataset
@@ -1380,7 +1380,9 @@ def test_merge_paired_stats_takes_widest_span():
         )
 
     merged = _merge_paired_stats([one(60, (0.01, 0.03)), one(60, (0.02, 0.06))])
-    assert merged.paired_cases == 120
+    assert merged.paired_cases == 60
+    assert merged.repetitions == 2
+    assert merged.paired_observations == 120
     assert merged.quality_delta == pytest.approx(0.05)
     assert merged.quality_delta_ci95 == (0.01, 0.06)
     assert merged.quality_delta_bootstrap_ci95 == (0.01, 0.06)
@@ -1388,6 +1390,43 @@ def test_merge_paired_stats_takes_widest_span():
     assert (
         _merge_paired_stats([one(60, (0.01, 0.03)), one(60, None)]).quality_delta_ci95
         is None
+    )
+
+
+def test_merge_paired_stats_repeated_runs_do_not_dilute_min_cases():
+    # Regression (M2): 70 cases x 3 repeated runs of the same case set.
+    # Summing paired_cases would read 210 and clear a min_cases 200 bar;
+    # the merge keeps the distinct-case count so the verdict stays
+    # INCONCLUSIVE on an insufficient sample.
+    def run() -> PairedStats:
+        return PairedStats(
+            paired_cases=70,
+            quality_delta=0.05,
+            quality_delta_ci95=(0.03, 0.07),
+            quality_delta_bootstrap_ci95=(0.03, 0.07),
+            wins=40,
+            losses=20,
+            ties=10,
+        )
+
+    merged = _merge_paired_stats([run(), run(), run()])
+    assert merged.paired_cases == 70
+    assert merged.repetitions == 3
+    assert merged.paired_observations == 210
+    result = evaluate_verdict(
+        baseline_metric=0.80,
+        candidate_metric=0.85,
+        direction="maximize",
+        min_improvement_pct=0.0,
+        guards=[],
+        incomplete_reasons=[],
+        stats=merged,
+        min_cases=200,
+        min_improvement_pp=2.0,
+    )
+    assert result.verdict == "INCONCLUSIVE"
+    assert "insufficient paired sample: 70 paired cases < min_cases 200" in (
+        result.reasons[0]
     )
 
 
