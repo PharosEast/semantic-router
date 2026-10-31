@@ -6,6 +6,12 @@ baseline arm from a MoM-only baseline manifest. Criterion (V2-3): a fault
 injection (cancelling an in-flight pair arm) yields INCONCLUSIVE, never a
 guessed verdict. Criterion (V2-4): a dataset sha256 mismatch is rejected
 before any run is spent on it.
+
+X7: the suite runs in one of two modes. Without ``RECIPE_LAB_VLLM_URL``
+everything is mocked (6-case answer-bank set). With it, the single-model
+reference target points at the real strong lane and the workload becomes
+the store's prepared MMLU-Pro smoke dataset, so the same assertions run
+against real models (the "re-run V2 per its original definition" step).
 """
 
 from __future__ import annotations
@@ -84,19 +90,30 @@ def _long_dataset(path: Path, smoke_cases: Path, repeat: int) -> Path:
     return _write_dataset(path, rows)
 
 
-def _render_spec(smoke_dir: Path, cases: Path, dataset: Path, work: Path) -> Path:
-    """The smoke spec bound to the dual-format contract (X3) + R2 knobs.
+def _render_spec(
+    smoke_dir: Path, workload: dict, dataset: Path | None, work: Path
+) -> Path:
+    """The smoke spec bound to the active workload mode + R2 knobs.
 
-    The contract declares the recipe-lab cases file (``manifest`` +
-    ``content_hash``) and the sr-bench rendering of the same cases
-    (``srbench_dataset`` + ``srbench_sha256``): replay ranks on the cases
-    file while live evidence binds to the rendering's hash. The
-    references section names the registry's single target (the auto-built
-    S arm); min_cases=3 matches the 6-case dataset (the shared template
-    keeps its default of 200 for the e2e profile and must not change).
+    Mock mode keeps the dual-format contract (X3): the recipe-lab cases
+    file (``manifest`` + ``content_hash``) and its sr-bench rendering
+    (``srbench_dataset`` + ``srbench_sha256``) declared 1:1; min_cases=3
+    matches the 6-case dataset (the shared template keeps its default of
+    200 for the e2e profile and must not change). Real-lane mode (X7)
+    binds legacy-style: the store's prepared MMLU-Pro smoke file is both
+    the cases file and the sr-bench dataset, so ``live_dataset_hash``
+    falls back to the cases content hash and no rendering is declared;
+    min_cases matches the dataset's case count.
+
+    ``dataset=None`` means "the workload's own dataset" (the mock tests
+    pass their per-test rendering file explicitly).
     """
+    cases = workload["cases"]
+    if dataset is None:
+        dataset = workload["dataset"]
+        if dataset is None:  # pragma: no cover - guarded by the fixtures
+            raise RuntimeError("no dataset bound for the active workload mode")
     cases_hash = "sha256:" + hashlib.sha256(cases.read_bytes()).hexdigest()
-    digest = "sha256:" + hashlib.sha256(dataset.read_bytes()).hexdigest()
     text = (
         (smoke_dir / "smoke-spec.yaml.tmpl")
         .read_text(encoding="utf-8")
@@ -104,10 +121,13 @@ def _render_spec(smoke_dir: Path, cases: Path, dataset: Path, work: Path) -> Pat
         .replace("${CASES_HASH}", cases_hash)
     )
     spec = yaml.safe_load(text)
-    spec["objective"]["min_cases"] = 3
-    spec["workload"]["srbench_dataset"] = str(dataset)
-    spec["workload"]["srbench_sha256"] = digest
+    spec["objective"]["min_cases"] = workload["min_cases"]
     spec["references"] = {"strong": "rl-single", "weak": "rl-single"}
+    if workload["declare_rendering"]:
+        spec["workload"]["srbench_dataset"] = str(dataset)
+        spec["workload"]["srbench_sha256"] = (
+            "sha256:" + hashlib.sha256(dataset.read_bytes()).hexdigest()
+        )
     spec_path = work / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
     return spec_path
@@ -126,15 +146,11 @@ def _mom_target(target_id: str, router: dict) -> dict:
     }
 
 
-def _write_registry(path: Path, router_a: dict, router_b: dict, mock_backend: dict) -> Path:
+def _write_registry(path: Path, router_a: dict, router_b: dict, single: dict) -> Path:
+    """Register the mode-selected single target (the auto-built S arm)
+    and both routers."""
     targets = [
-        {
-            "id": "rl-single",
-            "kind": "single",
-            "model": "local/private-qwen",
-            "base_url": mock_backend["endpoint"] + "/v1",
-            "prices": {"local/private-qwen": _BUCKETS},
-        },
+        single,
         _mom_target("rl-mom-baseline", router_a),
         _mom_target("rl-mom-candidate", router_b),
     ]
@@ -161,9 +177,13 @@ def _register_targets(srbench_bin: str, srbench_store: str, registry: Path) -> N
     assert completed.returncode == 0, completed.stderr or completed.stdout
 
 
-def _mom_only_manifest(path: Path, dataset: Path, router_a: dict) -> Path:
+def _mom_only_manifest(
+    path: Path, dataset: Path, router_a: dict, limits: dict
+) -> Path:
     """A plain MoM-router baseline manifest: no single target (the S arm
-    must be auto-constructed from the registry by verify)."""
+    must be auto-constructed from the registry by verify). Limits come
+    from the workload mode: the real-lane runs need wider timeouts and
+    some concurrency (X7)."""
     manifest = {
         "version": "sr-bench-1.0",
         "name": _BASELINE_MANIFEST_NAME,
@@ -173,11 +193,7 @@ def _mom_only_manifest(path: Path, dataset: Path, router_a: dict) -> Path:
             "path": str(dataset),
             "sha256": hashlib.sha256(dataset.read_bytes()).hexdigest(),
         },
-        "limits": {
-            "total_timeout_s": 1200,
-            "idle_timeout_s": 300,
-            "max_run_seconds": 3600,
-        },
+        "limits": dict(limits),
     }
     path.write_text(json.dumps(manifest, indent=1) + "\n", encoding="utf-8")
     return path
@@ -249,31 +265,66 @@ def registered_targets(
     router_a: dict,
     router_b: dict,
     mock_backend: dict,
+    vllm_lanes: dict | None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> None:
-    """Register the R2 targets once: the S arm (mock) and both routers."""
+    """Register the R2 targets once: the S arm and both routers.
+
+    The S arm is the strong reference: the mock backend in mock mode,
+    the strong lane serving the frontier model in real-lane mode (X7).
+    """
+    if vllm_lanes is None:
+        single = {
+            "id": "rl-single",
+            "kind": "single",
+            "model": "local/private-qwen",
+            "base_url": mock_backend["endpoint"] + "/v1",
+            "prices": {"local/private-qwen": _BUCKETS},
+        }
+    else:
+        single = {
+            "id": "rl-single",
+            "kind": "single",
+            "model": "cloud/frontier-reasoning",
+            "base_url": vllm_lanes["strong"] + "/v1",
+            "prices": {"cloud/frontier-reasoning": _BUCKETS},
+        }
     registry = tmp_path_factory.mktemp("r2-registry") / "targets.json"
-    _register_targets(
-        srbench_bin, srbench_store, _write_registry(registry, router_a, router_b, mock_backend)
-    )
+    _register_targets(srbench_bin, srbench_store, _write_registry(registry, router_a, router_b, single))
 
 
 # ---- V2-2: verify completes 3 AB/BA pairs and builds the S arm ----
 
 
+def _bound_dataset(workload: dict, dataset: Path | None) -> Path:
+    """The dataset file the manifest binds: the test's own rendering in
+    mock mode, the workload's prepared MMLU-Pro file in real-lane mode."""
+    bound = dataset if dataset is not None else workload["dataset"]
+    if bound is None:  # pragma: no cover - guarded by the fixtures
+        raise RuntimeError("no dataset bound for the active workload mode")
+    return bound
+
+
 def test_verify_srbench_end_to_end(
     smoke_dir: Path,
-    smoke_cases: Path,
+    workload: dict,
     srbench_url: str,
     router_a: dict,
     registered_targets: None,
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    dataset = _write_dataset(tmp_path / "dataset.jsonl", _manifest_cases(smoke_cases))
-    spec_path = _render_spec(smoke_dir, smoke_cases, dataset, tmp_path)
+    dataset = (
+        _write_dataset(tmp_path / "dataset.jsonl", _manifest_cases(workload["cases"]))
+        if workload["mode"] == "mock"
+        else None
+    )
+    spec_path = _render_spec(smoke_dir, workload, dataset, tmp_path)
     manifest_path = _mom_only_manifest(
-        tmp_path / "baseline-manifest-src.json", dataset, router_a
+        tmp_path / "baseline-manifest-src.json",
+        _bound_dataset(workload, dataset),
+        router_a,
+        workload["limits"],
     )
     candidate_path = _candidate_json(tmp_path / "candidate.json")
     work = tmp_path / "verify-work"
@@ -306,16 +357,25 @@ def test_verify_srbench_end_to_end(
 
 def test_verify_fault_injection_is_inconclusive(
     smoke_dir: Path,
-    smoke_cases: Path,
+    workload: dict,
     srbench_url: str,
     router_a: dict,
     registered_targets: None,
     tmp_path: Path,
 ) -> None:
-    dataset = _long_dataset(tmp_path / "dataset.jsonl", smoke_cases, 16)
-    spec_path = _render_spec(smoke_dir, smoke_cases, dataset, tmp_path)
+    if workload["mode"] == "mock":
+        dataset = _long_dataset(tmp_path / "dataset.jsonl", workload["cases"], 16)
+    else:
+        # the real smoke set at real model latency keeps every arm in
+        # flight for seconds - no case duplication needed (X7)
+        dataset = None
+    poll_deadline = 1800.0 if workload["mode"] == "vllm" else 600.0
+    spec_path = _render_spec(smoke_dir, workload, dataset, tmp_path)
     manifest_path = _mom_only_manifest(
-        tmp_path / "baseline-manifest-src.json", dataset, router_a
+        tmp_path / "baseline-manifest-src.json",
+        _bound_dataset(workload, dataset),
+        router_a,
+        workload["limits"],
     )
     candidate_path = _candidate_json(tmp_path / "candidate.json")
     work = tmp_path / "verify-work"
@@ -345,7 +405,7 @@ def test_verify_fault_injection_is_inconclusive(
     runs_url = api + "/runs"
     baseline_id = None
     cancelled = False
-    deadline = time.monotonic() + 600.0
+    deadline = time.monotonic() + poll_deadline
     while time.monotonic() < deadline and thread.is_alive() and not cancelled:
         try:
             with urllib.request.urlopen(runs_url, timeout=5.0) as resp:
@@ -379,7 +439,7 @@ def test_verify_fault_injection_is_inconclusive(
         if not cancelled:
             time.sleep(1.0)
     assert cancelled, "no in-flight pair arm was observed to cancel"
-    thread.join(timeout=600.0)
+    thread.join(timeout=poll_deadline)
     assert not thread.is_alive(), "verify did not finish after the injection"
     assert "error" not in outcome, outcome.get("error")
     assert outcome.get("rc") == 2, "an incomplete pair must be INCONCLUSIVE (exit 2)"
@@ -390,16 +450,23 @@ def test_verify_fault_injection_is_inconclusive(
 
 def test_verify_dataset_mismatch_rejected_before_submission(
     smoke_dir: Path,
-    smoke_cases: Path,
+    workload: dict,
     srbench_url: str,
     router_a: dict,
     registered_targets: None,
     tmp_path: Path,
 ) -> None:
-    dataset = _write_dataset(tmp_path / "dataset.jsonl", _manifest_cases(smoke_cases))
-    spec_path = _render_spec(smoke_dir, smoke_cases, dataset, tmp_path)
+    dataset = (
+        _write_dataset(tmp_path / "dataset.jsonl", _manifest_cases(workload["cases"]))
+        if workload["mode"] == "mock"
+        else None
+    )
+    spec_path = _render_spec(smoke_dir, workload, dataset, tmp_path)
     manifest_path = _mom_only_manifest(
-        tmp_path / "baseline-manifest-src.json", dataset, router_a
+        tmp_path / "baseline-manifest-src.json",
+        _bound_dataset(workload, dataset),
+        router_a,
+        workload["limits"],
     )
     # bind the manifest to a dataset identity the contract does not declare
     raw = json.loads(manifest_path.read_text("utf-8"))

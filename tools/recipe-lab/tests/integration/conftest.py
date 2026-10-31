@@ -9,6 +9,12 @@ environment is present:
 - ``RECIPE_LAB_SRBENCH_STORE``: sr-bench store directory (R2, target registry)
 - ``RECIPE_LAB_SRBENCH_BIN``: vllm-sr CLI for target registration (R2)
 - ``RECIPE_LAB_HF_HOME``: optional HF_HOME forwarded to router processes
+- ``RECIPE_LAB_VLLM_URL``: optional real vLLM weak lane, OpenAI base URL
+  without the /v1 suffix (X7); when set, the R2 single-model reference
+  target points at the strong lane and the workload becomes the store's
+  prepared MMLU-Pro smoke dataset instead of the 6-case mock set
+- ``RECIPE_LAB_VLLM_STRONG_URL``: optional strong lane base URL (X7),
+  defaulting to ``RECIPE_LAB_VLLM_URL``
 """
 
 from __future__ import annotations
@@ -21,10 +27,12 @@ import subprocess
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
 import pytest
+import yaml
 
 RECIPE_LAB_ROOT = Path(__file__).resolve().parents[2]
 SMOKE_DIR = RECIPE_LAB_ROOT / "examples" / "smoke"
@@ -128,6 +136,59 @@ def backend_port() -> int:
     return free_port()
 
 
+# ---- X7: optional real vLLM lanes for the R2 verify ----
+
+
+@pytest.fixture(scope="session")
+def vllm_lanes() -> dict | None:
+    """The real vLLM lanes, or None when the suite runs mock-only (X7).
+
+    ``RECIPE_LAB_VLLM_URL`` is the weak lane's OpenAI base URL (no /v1
+    suffix) serving the smoke config's local model names;
+    ``RECIPE_LAB_VLLM_STRONG_URL`` is the strong lane serving the frontier
+    model name and defaults to the weak lane. Both lanes are optional:
+    unset env keeps the fully-mocked default mode.
+    """
+    weak = os.environ.get("RECIPE_LAB_VLLM_URL", "").strip().rstrip("/")
+    if not weak:
+        return None
+    strong = (os.environ.get("RECIPE_LAB_VLLM_STRONG_URL") or weak).strip().rstrip("/")
+    return {"weak": weak, "strong": strong}
+
+
+def _hostport(base_url: str) -> str:
+    """host:port form of a lane base URL for the router's backend endpoints."""
+    parsed = urllib.parse.urlparse(base_url)
+    if not parsed.hostname:
+        raise RuntimeError(f"not a usable lane base URL: {base_url!r}")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    return f"{parsed.hostname}:{port}"
+
+
+@pytest.fixture(scope="session")
+def backends(
+    smoke_dir: Path, vllm_lanes: dict | None, mock_backend: dict
+) -> dict[str, str]:
+    """Model name -> host:port each smoke-config backend points at.
+
+    Mock mode points every model at the shared mock backend. Real-lane
+    mode (X7) sends the local models to the weak lane and the frontier
+    model to the strong lane, so the routers under test dispatch to real
+    inference and the depth gate moves real accuracy.
+    """
+    if vllm_lanes is None:
+        return {
+            "local/private-qwen": f"127.0.0.1:{mock_backend['port']}",
+            "local/omni": f"127.0.0.1:{mock_backend['port']}",
+            "cloud/frontier-reasoning": f"127.0.0.1:{mock_backend['port']}",
+        }
+    return {
+        "local/private-qwen": _hostport(vllm_lanes["weak"]),
+        "local/omni": _hostport(vllm_lanes["weak"]),
+        "cloud/frontier-reasoning": _hostport(vllm_lanes["strong"]),
+    }
+
+
 # ---- R2: sr-bench registry and real standalone routers ----
 
 
@@ -167,24 +228,52 @@ def _router_config_hash(mgmt_url: str) -> str:
     return document_hash
 
 
+def _render_router_config(
+    smoke_dir: Path,
+    backends: dict[str, str],
+    listener_port: int,
+    depth_threshold: str | None,
+) -> str:
+    """The smoke config rendered for one router instance (YAML-level).
+
+    Backend endpoints are rewritten per model name (mock mode: everything
+    on the mock backend; real-lane mode X7: local models on the weak
+    lane, the frontier model on the strong lane), the listener moves to
+    an ephemeral port, and the depth gate may be lowered for the
+    candidate router.
+    """
+    config = yaml.safe_load(
+        (smoke_dir / "smoke-config.yaml").read_text(encoding="utf-8")
+    )
+    for model in config["providers"]["models"]:
+        endpoint = backends.get(model["name"])
+        if endpoint is None:
+            raise RuntimeError(
+                f"smoke config model {model['name']!r} has no backend endpoint"
+            )
+        for ref in model["backend_refs"]:
+            ref["endpoint"] = endpoint
+    config["listeners"][0]["port"] = listener_port
+    if depth_threshold is not None:
+        config["routing"]["signals"]["decision"][0]["predicate"]["gte"] = float(
+            depth_threshold
+        )
+    return yaml.safe_dump(config, sort_keys=False)
+
+
 def _start_router(
     router_bin: str,
     smoke_dir: Path,
-    mock_backend: dict,
+    backends: dict[str, str],
     hf_home: str | None,
     work_dir: Path,
     depth_threshold: str | None = None,
 ) -> dict:
     """Start one standalone router on the rendered smoke config."""
     listener_port = free_port()
-    config_text = (
-        (smoke_dir / "smoke-config.yaml")
-        .read_text(encoding="utf-8")
-        .replace("127.0.0.1:8000", f"127.0.0.1:{mock_backend['port']}")
-        .replace("port: 8899", f"port: {listener_port}")
+    config_text = _render_router_config(
+        smoke_dir, backends, listener_port, depth_threshold
     )
-    if depth_threshold is not None:
-        config_text = config_text.replace("gte: 0.6", f"gte: {depth_threshold}")
     config_path = work_dir / "config.yaml"
     config_path.write_text(config_text, encoding="utf-8")
 
@@ -252,12 +341,12 @@ def srbench_bin() -> str:
 
 @pytest.fixture(scope="session")
 def router_a(
-    router_bin: str, smoke_dir: Path, mock_backend: dict, hf_home: str | None,
+    router_bin: str, smoke_dir: Path, backends: dict[str, str], hf_home: str | None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> dict:
     """Baseline router: the smoke config's own behavior (depth >= 0.6)."""
     stack = _start_router(
-        router_bin, smoke_dir, mock_backend, hf_home, tmp_path_factory.mktemp("router-a")
+        router_bin, smoke_dir, backends, hf_home, tmp_path_factory.mktemp("router-a")
     )
     yield stack
     _stop_router(stack)
@@ -265,14 +354,92 @@ def router_a(
 
 @pytest.fixture(scope="session")
 def router_b(
-    router_bin: str, smoke_dir: Path, mock_backend: dict, hf_home: str | None,
+    router_bin: str, smoke_dir: Path, backends: dict[str, str], hf_home: str | None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> dict:
     """Candidate router: the depth gate lowered to 0.15 routes far more
     traffic to the frontier lane, so the AB comparison has real movement."""
     stack = _start_router(
-        router_bin, smoke_dir, mock_backend, hf_home,
+        router_bin, smoke_dir, backends, hf_home,
         tmp_path_factory.mktemp("router-b"), depth_threshold="0.15",
     )
     yield stack
     _stop_router(stack)
+
+
+# ---- X7: the R2 workload per mode ----
+
+
+@pytest.fixture(scope="session")
+def mmlu_smoke_dataset(srbench_store: str) -> dict:
+    """The store's prepared MMLU-Pro smoke dataset (real-lane V2, X7).
+
+    Scans the store's datasets for the newest smoke-profile dataset
+    covering mmlu-pro. Returns its cases file, case count, and content
+    hash so the spec and manifest can bind the real question set.
+    """
+    matches: list[tuple[float, Path]] = []
+    for manifest_path in (Path(srbench_store) / "datasets").glob("*/manifest.json"):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        benchmarks = {
+            entry.get("id")
+            for entry in manifest.get("benchmarks") or []
+            if isinstance(entry, dict)
+        }
+        if manifest.get("profile") == "smoke" and "mmlu-pro" in benchmarks:
+            matches.append((manifest_path.stat().st_mtime, manifest_path.parent))
+    if not matches:
+        pytest.skip(
+            "no prepared mmlu-pro smoke dataset in the sr-bench store "
+            "(prepare one with: vllm-sr benchmark --store <store> dataset prepare)"
+        )
+    folder = max(matches)[1]
+    manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+    return {
+        "path": folder / "cases.jsonl",
+        "case_count": int(manifest["case_count"]),
+        "sha256": str(manifest["sha256"]),
+    }
+
+
+@pytest.fixture(scope="session")
+def r2_workload(vllm_lanes: dict | None, smoke_cases: Path, request) -> dict:
+    """The R2 verify workload for the active mode (X7).
+
+    Mock mode keeps the 6-case answer-bank set with the dual-format
+    contract binding. Real-lane mode swaps in the store's prepared
+    MMLU-Pro smoke file as both the cases file and the sr-bench dataset
+    (legacy binding: live_dataset_hash falls back to the cases content
+    hash), so sr-bench scores real questions on real models.
+    """
+    if vllm_lanes is None:
+        return {
+            "mode": "mock",
+            "cases": smoke_cases,
+            "dataset": None,  # each test writes its own rendering file
+            "min_cases": 3,
+            "declare_rendering": True,
+            "limits": {
+                "total_timeout_s": 1200,
+                "idle_timeout_s": 300,
+                "max_run_seconds": 3600,
+            },
+        }
+    mmlu = request.getfixturevalue("mmlu_smoke_dataset")
+    return {
+        "mode": "vllm",
+        "cases": mmlu["path"],
+        "dataset": mmlu["path"],
+        "min_cases": mmlu["case_count"],
+        "declare_rendering": False,
+        "limits": {
+            "concurrency": 4,
+            "total_timeout_s": 7200,
+            "idle_timeout_s": 600,
+            "max_run_seconds": 14400,
+            "case_timeout_s": 900,
+        },
+    }
