@@ -71,6 +71,7 @@ from .diagnose import (
 from .insights import merge_insight_refs, parse_insight_refs, resolve_insight_refs
 from .ledger import Ledger, LedgerRecord
 from .live import live_verdict_from_runs, measurements_from_rows, verify_live
+from .model_eval_tasks import load_source_rows, rows_to_model_eval_tasks, write_tasks
 from .next import write_next_context
 from .proposers import distribution_calibration, rule_threshold, threshold_search
 from .provenance import write_run_manifest
@@ -193,6 +194,29 @@ def cmd_cases_to_srbench(args: argparse.Namespace) -> int:
             "output": str(output),
             "cases_count": len(rows),
             "srbench_sha256": dataset_content_hash(output),
+        }
+    )
+    return 0
+
+
+def cmd_cases_to_model_eval(args: argparse.Namespace) -> int:
+    """C1: convert an MCQ source into model_eval's tasks format.
+
+    Deterministic (same source => byte-identical output), so the printed
+    tasks_sha256 can be frozen into the contract like the sr-bench hash.
+    """
+    try:
+        rows = load_source_rows(args.source)
+    except OSError as exc:
+        raise ContractError(f"cannot read source: {exc}") from exc
+    tasks = rows_to_model_eval_tasks(rows, default_dataset=args.dataset)
+    output = write_tasks(tasks, args.out)
+    _print_json(
+        {
+            "source": str(args.source),
+            "output": str(output),
+            "tasks_count": len(tasks),
+            "tasks_sha256": dataset_content_hash(output),
         }
     )
     return 0
@@ -1449,6 +1473,29 @@ def build_parser() -> argparse.ArgumentParser:
         help="benchmark label recorded on every row (default: recipe-lab)",
     )
     p_tosr.set_defaults(func=cmd_cases_to_srbench)
+
+    p_toeval = cases_sub.add_parser(
+        "to-model-eval",
+        help="convert an MCQ source into model_eval tasks format (C1: "
+        "task_id/prompt_user/category + answer letter, options rendered "
+        "into the prompt; cases mirrors included so split works on it)",
+    )
+    p_toeval.add_argument(
+        "--source",
+        required=True,
+        help="source JSONL: sr-bench normalized dataset rows "
+        "(id/benchmark/messages/answer/metadata.stratum) or raw MCQ rows "
+        "(id/source/category/question/options/answer)",
+    )
+    p_toeval.add_argument(
+        "--out", required=True, help="output tasks JSONL path (model_eval format)"
+    )
+    p_toeval.add_argument(
+        "--dataset",
+        default=None,
+        help="dataset label for raw rows without a source field",
+    )
+    p_toeval.set_defaults(func=cmd_cases_to_model_eval)
 
     p_attr = sub.add_parser(
         "attribute", help="run E1/E2/E3 misroute attribution over labeled records"
