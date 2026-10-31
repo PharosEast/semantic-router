@@ -211,18 +211,20 @@ def _verify_argv(
 
 
 def _run_verify(capsys: pytest.CaptureFixture[str], argv: list[str]) -> tuple[int, dict]:
-    """Run verify in-process; any of the three verdict exit codes is valid."""
+    """Run verify in-process; any of the three verdict exit codes is valid.
+
+    The result document is pretty-printed (``indent=2``), so stdout must be
+    parsed as a whole document, not line by line.
+    """
     rc = main(argv)
     assert rc in (0, 1, 2), f"verify exited {rc} (a crash is not a verdict)"
     out = capsys.readouterr().out
-    for line in reversed(out.strip().splitlines()):
-        try:
-            document = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(document, dict) and "verdict" in document:
-            return rc, document
-    raise AssertionError("verify printed no verdict document")
+    try:
+        document = json.loads(out)
+    except json.JSONDecodeError as exc:
+        raise AssertionError("verify printed no verdict document") from exc
+    assert isinstance(document, dict) and "verdict" in document, document
+    return rc, document
 
 
 @pytest.fixture(scope="session")
