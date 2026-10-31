@@ -11,9 +11,10 @@ Verified against the actual CLI (I, src/vllm-sr/cli/commands/benchmark.py):
   then polls `show <run_id>` until the status is terminal, so the caller -
   not a black-box CLI wait - owns the loop and can record per-trial state.
 - `candidate-plan <baseline_run_id> --target <id> (--target ...)* [--mode
-  live|preview] [--name] [--hypothesis]` reuses a terminal baseline's frozen
-  protocol; `--target` is required and repeatable, and the service response
-  is the new run document (submitted, executing asynchronously).
+  live|preview] [--name] [--hypothesis]` reviews a terminal baseline's frozen
+  protocol; `--target` is required and repeatable. The review never dispatches
+  (status "validated") - the returned frozen manifest must then be submitted
+  through `run --manifest` to create the run.
 - terminal run states: completed / failed / cancelled / interrupted
   (cli/sr_bench/store.py TERMINAL).
 
@@ -27,6 +28,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import tempfile
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -202,9 +204,14 @@ class SrbenchCli:
     ) -> dict[str, Any]:
         """Reuse a terminal baseline's frozen protocol for a new run (I).
 
-        `targets` are registered MoM target ids (the CLI requires at least
-        one `--target`); the response is the submitted run document, waited
-        to a terminal state here.
+        Two service steps, both verified against the service (I,
+        cli/sr_bench/service.py): `candidate-plan` only reviews the protocol
+        (response status "validated", model_requests 0 - the engine refuses
+        to dispatch from the plan route), so the returned frozen manifest is
+        then dispatched verbatim through `run --manifest --detach`. The
+        engine enforces reviewed_plan_changed, which keeps this honest: any
+        divergence between the reviewed plan and the dispatched manifest is
+        a service-side 400. The run is waited to a terminal state here.
         """
         target_list = list(targets)
         if not target_list:
@@ -217,7 +224,23 @@ class SrbenchCli:
             args += ["--name", name]
         if hypothesis:
             args += ["--hypothesis", hypothesis]
-        payload = self.run_command(args)
+        reviewed = self.run_command(args)
+        manifest = reviewed.get("manifest") if isinstance(reviewed, dict) else None
+        plan_sha = reviewed.get("plan_sha256") if isinstance(reviewed, dict) else None
+        if not isinstance(manifest, dict) or not isinstance(plan_sha, str) or not plan_sha:
+            raise SrbenchError(
+                f"sr-bench candidate-plan did not return a reviewed plan for "
+                f"{baseline_run_id}: {reviewed!r}"
+            )
+        with tempfile.NamedTemporaryFile(
+            "w", suffix=".json", encoding="utf-8", delete=False
+        ) as handle:
+            json.dump(manifest, handle)
+            plan_path = Path(handle.name)
+        try:
+            payload = self.run_command(["run", "--manifest", str(plan_path), "--detach"])
+        finally:
+            plan_path.unlink(missing_ok=True)
         return self._submit_and_wait(payload, f"candidate-plan {baseline_run_id}")
 
     def experiment(self, args: list[str]) -> dict[str, Any] | str:
