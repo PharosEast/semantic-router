@@ -424,7 +424,7 @@ def mmlu_smoke_dataset(srbench_store: str) -> dict:
 
 
 @pytest.fixture(scope="session")
-def r2_workload(vllm_lanes: dict | None, smoke_cases: Path, request) -> dict:
+def workload(vllm_lanes: dict | None, smoke_cases: Path, request) -> dict:
     """The R2 verify workload for the active mode (X7).
 
     Mock mode keeps the 6-case answer-bank set with the dual-format
