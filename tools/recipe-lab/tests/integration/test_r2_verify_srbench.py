@@ -16,12 +16,12 @@ import os
 import subprocess
 import threading
 import time
+import urllib.request
 from pathlib import Path
 
 import pytest
 import yaml
 from recipe_lab.cli import main
-from recipe_lab.srbench import SrbenchCli
 
 pytestmark = [
     pytest.mark.integration,
@@ -321,39 +321,45 @@ def test_verify_fault_injection_is_inconclusive(
     thread = threading.Thread(target=driver, daemon=True)
     thread.start()
 
-    # poll the service until a pair arm re-runs the baseline manifest (the
-    # same frozen manifest submitted again after the preview) and cancel it
-    cli = SrbenchCli(bin=srbench_bin, url=srbench_url)
+    # Poll the service until a pair arm re-runs the baseline manifest (the
+    # same frozen manifest submitted again after the preview) and cancel it.
+    # Direct HTTP instead of the SrbenchCli subprocess: the smoke pair arms
+    # live only a few seconds - less than one CLI startup - so the
+    # observation has to be cheap; the run summaries already carry the
+    # manifest name.
+    runs_url = srbench_url.rstrip("/") + "/runs"
     baseline_id = None
     cancelled = False
     deadline = time.monotonic() + 600.0
     while time.monotonic() < deadline and thread.is_alive() and not cancelled:
         try:
-            in_flight = [
-                str(doc.get("id"))
-                for doc in cli.runs()
-                if doc.get("status") in ("queued", "running")
-            ]
-        except (OSError, RuntimeError, json.JSONDecodeError):
-            # transient CLI/service hiccups; keep polling
+            with urllib.request.urlopen(runs_url, timeout=5.0) as resp:
+                rows = json.loads(resp.read().decode("utf-8")).get("runs") or []
+        except (OSError, json.JSONDecodeError):
+            # transient service hiccups; keep polling
             time.sleep(1.0)
             continue
-        for run_id in in_flight:
-            doc = cli.show(run_id)
+        for doc in rows:
+            if doc.get("status") not in ("queued", "running"):
+                continue
             manifest = doc.get("manifest") or {}
             if manifest.get("name") != _BASELINE_MANIFEST_NAME:
                 continue
+            run_id = str(doc.get("id"))
             if baseline_id is None:
                 baseline_id = run_id
             elif run_id != baseline_id:
-                # a re-run of the same frozen manifest is a pair's base arm
-                subprocess.run(
+                # a re-run of the same frozen manifest is a pair's base arm;
+                # it may complete between the poll and the cancel, so a
+                # failed cancel falls through to the next observation
+                attempt = subprocess.run(
                     [srbench_bin, "benchmark", "--url", srbench_url, "cancel", run_id],
-                    check=True,
                     capture_output=True,
+                    check=False,
                 )
-                cancelled = True
-                break
+                if attempt.returncode == 0:
+                    cancelled = True
+                    break
         if not cancelled:
             time.sleep(1.0)
     assert cancelled, "no in-flight pair arm was observed to cancel"
