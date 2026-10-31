@@ -717,11 +717,12 @@ def require_run_datasets(
 
     `runs` carries (role, run_id) pairs. Raises ContractError - before any
     ledger write, so callers map it to exit 2 - when a run's recorded dataset
-    identity differs from the workload split's content hash, or when the run
-    document exposes no dataset identity at all: a verdict citing evidence it
-    cannot bind to the contract is never written down.
+    identity differs from the workload split's live dataset identity (X3:
+    the declared `srbench_dataset` sha256, else the legacy cases hash), or
+    when the run document exposes no dataset identity at all: a verdict
+    citing evidence it cannot bind to the contract is never written down.
     """
-    expected = spec.workload.split_hash(workload_split)
+    expected = spec.workload.live_dataset_hash(workload_split)
     for role, run_id in runs:
         actual = run_dataset_hash(cli, run_id)
         if actual is None:
@@ -964,9 +965,11 @@ def verify_live(
     manifest_path.write_text(
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    # M1: the frozen baseline protocol must be the contract's own split.
+    # M1: the frozen baseline protocol must be the contract's own split (X3:
+    # bound via the split's srbench_dataset hash when declared, else the
+    # legacy cases hash).
     actual = _doc_dataset_identity(baseline_doc, "baseline", baseline_run_id)
-    expected = spec.workload.split_hash(workload_split)
+    expected = spec.workload.live_dataset_hash(workload_split)
     if actual is None:
         raise ContractError(
             f"baseline run {baseline_run_id} exposes no dataset sha256; "

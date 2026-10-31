@@ -44,6 +44,37 @@ class SrbenchError(RuntimeError):
 TERMINAL_RUN_STATES = frozenset({"completed", "failed", "cancelled", "interrupted"})
 
 
+def cases_to_srbench_rows(
+    cases: list[dict[str, Any]], benchmark: str = "recipe-lab"
+) -> list[dict[str, Any]]:
+    """Render recipe-lab cases as sr-bench dataset rows (X3).
+
+    `case_id` becomes `id`, `prompt` becomes a single user message, and a
+    string `truth` becomes `answer` (the row shape the real service accepts,
+    verified against the R2 integration harness). Deterministic: same cases
+    in the same order => byte-identical JSONL once serialized with fixed
+    keys. Non-string (signal-fact) truths cannot be judged by sr-bench's
+    answer matching and are rejected here, never silently dropped.
+    """
+    rows: list[dict[str, Any]] = []
+    for index, case in enumerate(cases, 1):
+        truth = case.get("truth")
+        if not isinstance(truth, str) or not truth:
+            raise ContractError(
+                f"case {index} ({case.get('case_id')!r}) has no string truth; "
+                "an sr-bench dataset needs an answer to grade against"
+            )
+        rows.append(
+            {
+                "id": str(case["case_id"]),
+                "benchmark": benchmark,
+                "messages": [{"role": "user", "content": str(case["prompt"])}],
+                "answer": truth,
+            }
+        )
+    return rows
+
+
 @dataclass
 class SrbenchCli:
     bin: str = "vllm-sr"

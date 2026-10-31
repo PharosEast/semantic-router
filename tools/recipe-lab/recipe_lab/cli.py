@@ -95,7 +95,7 @@ from .splitting import (
     split_cases,
     write_splits,
 )
-from .srbench import SrbenchCli
+from .srbench import SrbenchCli, cases_to_srbench_rows
 
 
 def _print_json(value: object) -> None:
@@ -167,6 +167,34 @@ def cmd_split(args: argparse.Namespace) -> int:
         args.group_key, args.seed, ratios
     )
     _print_json({"split_rule": split_rule, "splits": splits})
+    return 0
+
+
+def cmd_cases_to_srbench(args: argparse.Namespace) -> int:
+    """X3: render the recipe-lab cases as the split's sr-bench dataset.
+
+    Deterministic (same cases => byte-identical output), so the printed
+    srbench_sha256 can be frozen into the contract's split declaration and
+    the same file re-hashes to it for as long as the campaign runs.
+    """
+    try:
+        cases = load_cases(args.cases)
+    except OSError as exc:
+        raise ContractError(f"cannot read cases: {exc}") from exc
+    rows = cases_to_srbench_rows(cases, benchmark=args.benchmark)
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n")
+    _print_json(
+        {
+            "cases": str(args.cases),
+            "output": str(output),
+            "cases_count": len(rows),
+            "srbench_sha256": dataset_content_hash(output),
+        }
+    )
     return 0
 
 
@@ -1396,6 +1424,28 @@ def build_parser() -> argparse.ArgumentParser:
         help="directory for calib.jsonl / dev.jsonl / frozen_test.jsonl",
     )
     p_split.set_defaults(func=cmd_split)
+
+    p_cases = sub.add_parser(
+        "cases", help="case-file utilities (X3: one contract, two dataset formats)"
+    )
+    cases_sub = p_cases.add_subparsers(dest="cases_command", required=True)
+    p_tosr = cases_sub.add_parser(
+        "to-srbench",
+        help="deterministically render a cases JSONL as an sr-bench dataset "
+        "(case_id->id, prompt->messages, truth->answer)",
+    )
+    p_tosr.add_argument(
+        "--cases", required=True, help="cases JSONL (case_id/prompt/truth)"
+    )
+    p_tosr.add_argument(
+        "--output", required=True, help="output sr-bench dataset JSONL path"
+    )
+    p_tosr.add_argument(
+        "--benchmark",
+        default="recipe-lab",
+        help="benchmark label recorded on every row (default: recipe-lab)",
+    )
+    p_tosr.set_defaults(func=cmd_cases_to_srbench)
 
     p_attr = sub.add_parser(
         "attribute", help="run E1/E2/E3 misroute attribution over labeled records"

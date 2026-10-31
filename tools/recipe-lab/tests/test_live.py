@@ -28,7 +28,7 @@ from recipe_lab.live import (
 )
 from recipe_lab.verdict import PairedStats, evaluate_verdict
 
-from tests.fixtures import VALID_SPEC
+from tests.fixtures import VALID_SPEC, VALID_SPLITS_SPEC
 from tests.test_contract import _write_splits_dataset
 
 # ---- A3: the contract is the only source of guard floors ----
@@ -1208,6 +1208,77 @@ def test_live_verdict_accepts_bare_hexdigest_dataset_hash():
     )
     assert result["verdict"] == "PASS"
     assert result["bench_refs"] == ["run-a", "run-b"]
+
+
+# ---- X3: live binds the declared srbench_dataset hash when present ----
+
+
+def _srbench_bound_spec():
+    """The dev split declares the sr-bench rendering of the same cases."""
+    from recipe_lab.contract import ExperimentSpec
+
+    raw = copy.deepcopy(VALID_SPLITS_SPEC)
+    raw["workload"]["splits"]["dev"]["srbench_dataset"] = "dev.srbench.jsonl"
+    raw["workload"]["splits"]["dev"]["srbench_sha256"] = "sha256:" + "b" * 64
+    return ExperimentSpec.from_dict(raw)
+
+
+def test_live_verdict_binds_srbench_dataset_hash_when_declared():
+    # X3: with srbench_dataset declared, the run documents must carry the
+    # rendering's sha256 - the cases hash is replay's binding, not live's.
+    srbench_hex = "b" * 64
+
+    class FakeCli:
+        def show(self, run_id):
+            return {
+                "id": run_id,
+                "status": "completed",
+                "manifest": {"dataset": {"sha256": srbench_hex}},
+            }
+
+        def compare(self, base, cand):
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
+
+    result = live_verdict_from_runs(
+        spec=_srbench_bound_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "PASS"
+
+
+def test_live_verdict_rejects_cases_hash_when_srbench_dataset_declared():
+    # X3: a run that scored the cases file itself (the dev split's
+    # content_hash, "sha256:" + "2"*64) cannot bind - the legacy fallback
+    # must not mask the declared rendering hash.
+    class FakeCli:
+        def show(self, run_id):
+            return {
+                "id": run_id,
+                "status": "completed",
+                "manifest": {"dataset": {"sha256": "2" * 64}},
+            }
+
+        def compare(self, base, cand):
+            raise AssertionError("compare must not run on a dataset mismatch")
+
+    with pytest.raises(ContractError) as excinfo:
+        live_verdict_from_runs(
+            spec=_srbench_bound_spec(),
+            cli=FakeCli(),
+            baseline_run_id="run-a",
+            candidate_run_id="run-b",
+            measurements=[],
+        )
+    assert "scored dataset" in str(excinfo.value)
+    assert "sha256:" + "b" * 64 in str(excinfo.value)
 
 
 def test_verify_live_rejects_baseline_from_other_dataset(tmp_path):
