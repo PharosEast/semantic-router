@@ -74,6 +74,11 @@ class LedgerRecord:
     # violates a declared constraint. best_replay / top_replay exclude warned
     # candidates from the ranking hand-off.
     constraint_warning: bool = False
+    # M2: paired comparison statistics in the sr-bench compare
+    # `comparisons[]` shape (paired_cases / quality_delta / quality_delta_ci95
+    # / quality_delta_bootstrap_ci95 / wins / losses / ties), recorded
+    # verbatim for report replay; None when the payload carried none.
+    paired: dict | None = None
 
     def to_dict(self) -> dict:
         out: dict[str, Any] = {
@@ -109,6 +114,8 @@ class LedgerRecord:
             out["constraints"] = dict(self.constraints)
         if self.constraint_warning:
             out["constraint_warning"] = True
+        if self.paired is not None:
+            out["paired"] = dict(self.paired)
         return out
 
     @classmethod
@@ -141,6 +148,7 @@ class LedgerRecord:
                 dict(raw["constraints"]) if raw.get("constraints") is not None else None
             ),
             constraint_warning=bool(raw.get("constraint_warning", False)),
+            paired=dict(raw["paired"]) if raw.get("paired") is not None else None,
         )
 
 
@@ -206,6 +214,8 @@ def validate_record(raw: dict) -> None:
             )
     if "constraint_warning" in raw and not isinstance(raw["constraint_warning"], bool):
         raise ContractError("constraint_warning must be a boolean")
+    if raw.get("paired") is not None and not isinstance(raw["paired"], dict):
+        raise ContractError("paired must be a mapping")
 
 
 def _require_present(raw: dict, name: str) -> None:

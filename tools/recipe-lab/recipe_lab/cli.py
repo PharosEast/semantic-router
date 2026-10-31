@@ -1116,6 +1116,8 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             # E: the declared constraints' measured evidence, for report replay.
             constraints={c["name"]: c for c in result["constraints"]},
             bench_refs=result["bench_refs"],
+            # M2: paired statistics from the compare payload, verbatim.
+            paired=result.get("paired"),
             attribution_delta=None,
             attribution_ref=args.attribution_ref,
             coverage_warning=False,
@@ -1287,6 +1289,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             # E: the declared constraints' measured evidence, for report replay.
             constraints={c["name"]: c for c in result["constraints"]},
             bench_refs=result["bench_refs"],
+            # M2: the pairs' merged paired statistics, verbatim.
+            paired=result.get("paired"),
             attribution_delta=None,
             attribution_ref=args.attribution_ref,
             coverage_warning=False,

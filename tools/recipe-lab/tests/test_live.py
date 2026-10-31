@@ -13,12 +13,15 @@ from recipe_lab.cli import main
 from recipe_lab.contract import ContractError, ExperimentSpec
 from recipe_lab.ledger import Ledger, LedgerRecord
 from recipe_lab.live import (
+    _merge_paired_stats,
     _pair_metrics,
     live_verdict_from_runs,
     measurements_from_rows,
+    paired_stats_from_comparison,
     resolve_gates,
     verify_live,
 )
+from recipe_lab.verdict import PairedStats
 
 from tests.fixtures import VALID_SPEC
 from tests.test_contract import _write_splits_dataset
@@ -1232,3 +1235,132 @@ def test_legacy_verdict_record_uses_null_split(tmp_path):
     assert rows[0]["legacy_workload"] is True
     roundtrip = LedgerRecord.from_dict(rows[0])
     assert roundtrip.legacy_workload is True and roundtrip.split is None
+
+
+# ---- M2: paired statistics decide the verdict from the CI ----
+
+
+def _pp_spec(pp: float, min_cases: int = 200) -> ExperimentSpec:
+    """VALID_SPEC with the objective switched to the absolute pp bar (M2)."""
+    objective = {
+        k: v for k, v in VALID_SPEC["objective"].items() if k != "min_improvement_pct"
+    }
+    objective["min_improvement_pp"] = pp
+    objective["min_cases"] = min_cases
+    return ExperimentSpec.from_dict({**VALID_SPEC, "objective": objective})
+
+
+def _paired_payload(
+    *,
+    paired_cases: int = 60,
+    delta: float = 1 / 60,
+    ci: tuple[float, float] = (-0.13, 0.16),
+) -> dict:
+    """J3-shaped compare payload: point estimates + one comparisons[] entry."""
+    return {
+        "baseline": {"capability.score": 17 / 60},
+        "candidate": {"capability.score": 18 / 60},
+        "comparisons": [
+            {
+                "paired_cases": paired_cases,
+                "quality_delta": delta,
+                "quality_delta_ci95": list(ci),
+                "quality_delta_bootstrap_ci95": [-0.11, 0.14],
+                "wins": 2,
+                "losses": 1,
+                "ties": paired_cases - 3,
+            }
+        ],
+    }
+
+
+def test_live_verdict_j3_regression_inconclusive():
+    # J3 scored 17/60 -> 18/60 and PASSED on point estimates (+5.88%); under
+    # the M2 minimum sample (default 200) the same evidence cannot conclude.
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _paired_payload()
+
+    result = live_verdict_from_runs(
+        spec=_spec(),  # relative bar, default min_cases = 200
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert (
+        "insufficient paired sample: 60 paired cases < min_cases 200"
+        in result["reasons"][0]
+    )
+    assert result["paired"]["paired_cases"] == 60
+
+
+def test_live_verdict_paired_pass_with_pp_bar():
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _paired_payload(paired_cases=400, delta=0.05, ci=(0.03, 0.07))
+
+    result = live_verdict_from_runs(
+        spec=_pp_spec(2.0),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "PASS"
+    assert "lower bound 3.00pp" in result["reasons"][0]
+    assert result["paired"]["quality_delta"] == pytest.approx(0.05)
+
+
+def test_paired_stats_from_comparison_shapes():
+    assert paired_stats_from_comparison(None) is None
+    assert paired_stats_from_comparison({"comparisons": []}) is None
+    two = _paired_payload()
+    two["comparisons"].append(dict(two["comparisons"][0]))
+    assert paired_stats_from_comparison(two) is None  # ambiguous, not guessed
+    bad = _paired_payload()
+    bad["comparisons"][0]["quality_delta"] = "high"
+    assert paired_stats_from_comparison(bad) is None
+    incomplete = {"comparisons": [{"paired_cases": 60}]}
+    assert paired_stats_from_comparison(incomplete) is None
+    no_ci = _paired_payload()
+    del no_ci["comparisons"][0]["quality_delta_ci95"]
+    stats = paired_stats_from_comparison(no_ci)
+    assert stats is not None and stats.quality_delta_ci95 is None
+    assert stats.paired_cases == 60
+    assert stats.quality_delta == pytest.approx(1 / 60)
+
+
+def test_merge_paired_stats_takes_widest_span():
+    def one(cases: int, ci: tuple[float, float] | None) -> PairedStats:
+        return PairedStats(
+            paired_cases=cases,
+            quality_delta=0.05,
+            quality_delta_ci95=ci,
+            quality_delta_bootstrap_ci95=ci,
+            wins=1,
+            losses=0,
+            ties=cases - 1,
+        )
+
+    merged = _merge_paired_stats([one(60, (0.01, 0.03)), one(60, (0.02, 0.06))])
+    assert merged.paired_cases == 120
+    assert merged.quality_delta == pytest.approx(0.05)
+    assert merged.quality_delta_ci95 == (0.01, 0.06)
+    assert merged.quality_delta_bootstrap_ci95 == (0.01, 0.06)
+    assert _merge_paired_stats([]) is None
+    assert (
+        _merge_paired_stats([one(60, (0.01, 0.03)), one(60, None)]).quality_delta_ci95
+        is None
+    )

@@ -27,6 +27,14 @@ usage is serialized as `null` (with a `total_cost_comparison_reason`),
 so a constraint on an unknown cost must be unevaluated (INCONCLUSIVE),
 never zero.
 
+Paired statistics (M2): when a compare payload carries exactly one
+`comparisons[]` entry, its `paired_cases` / `quality_delta` /
+`quality_delta_ci95` / `quality_delta_bootstrap_ci95` / `wins` / `losses` /
+`ties` are read verbatim (never recomputed) and the verdict decides from
+the confidence interval against `objective.min_improvement_pp`, with
+`objective.min_cases` as the minimum paired sample. The stats are recorded
+in the ledger record's `paired` field.
+
 Live `verify` orchestration (I): `verify_live` drives sr-bench end to end
 for one candidate - a preview run (routing distribution into the ledger
 notes) plus `repetitions` AB/BA pairs, where each pair re-runs the
@@ -47,7 +55,7 @@ from typing import Any
 from . import abba
 from .contract import Constraint, ContractError, ExperimentSpec, Gate
 from .srbench import SrbenchCli, extract_metric_values
-from .verdict import GuardResult, evaluate_verdict
+from .verdict import GuardResult, PairedStats, evaluate_verdict
 
 _MEASUREMENT_KEYS = ("name", "candidate", "baseline")
 
@@ -237,6 +245,87 @@ def _constraint_evidence(
     return evidence
 
 
+def paired_stats_from_comparison(comparison: Any) -> PairedStats | None:
+    """M2: paired statistics from a compare payload's `comparisons[]`.
+
+    sr-bench compare emits one `comparisons[]` entry per candidate target.
+    A payload with exactly one entry is unambiguous; zero entries, several,
+    or a malformed entry (missing or non-numeric fields) yield None - the
+    verdict then explains why instead of guessing which comparison applies.
+    """
+    if not isinstance(comparison, dict):
+        return None
+    entries = comparison.get("comparisons")
+    if not isinstance(entries, list) or len(entries) != 1:
+        return None
+    entry = entries[0]
+    if not isinstance(entry, dict):
+        return None
+    paired_cases = entry.get("paired_cases")
+    delta = entry.get("quality_delta")
+    wins = entry.get("wins")
+    losses = entry.get("losses")
+    ties = entry.get("ties")
+    for value in (paired_cases, delta, wins, losses, ties):
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+    if paired_cases < 0:
+        return None
+
+    def _interval(raw: Any) -> tuple[float, float] | None:
+        if (
+            isinstance(raw, (list, tuple))
+            and len(raw) == 2
+            and all(
+                not isinstance(v, bool) and isinstance(v, (int, float)) for v in raw
+            )
+        ):
+            return (float(raw[0]), float(raw[1]))
+        return None
+
+    return PairedStats(
+        paired_cases=int(paired_cases),
+        quality_delta=float(delta),
+        quality_delta_ci95=_interval(entry.get("quality_delta_ci95")),
+        quality_delta_bootstrap_ci95=_interval(
+            entry.get("quality_delta_bootstrap_ci95")
+        ),
+        wins=int(wins),
+        losses=int(losses),
+        ties=int(ties),
+    )
+
+
+def _merge_paired_stats(stats: list[PairedStats]) -> PairedStats | None:
+    """M2: conservative merge of the per-pair statistics across AB/BA pairs.
+
+    Counts sum and the delta averages; each interval takes the widest span
+    (min low, max high). A recomputed merged interval would need the
+    per-case diffs, which a compare payload does not expose, so the merged
+    bounds are conservative, never optimistic. Any pair without an interval
+    drops the merged interval to None (the verdict then says why).
+    """
+    if not stats:
+        return None
+    intervals = [s.quality_delta_ci95 for s in stats]
+    boots = [s.quality_delta_bootstrap_ci95 for s in stats]
+
+    def _span(values: list[tuple[float, float] | None]) -> tuple[float, float] | None:
+        if any(v is None for v in values):
+            return None
+        return (min(lo for lo, _ in values), max(hi for _, hi in values))
+
+    return PairedStats(
+        paired_cases=sum(s.paired_cases for s in stats),
+        quality_delta=statistics.mean([s.quality_delta for s in stats]),
+        quality_delta_ci95=_span(intervals),
+        quality_delta_bootstrap_ci95=_span(boots),
+        wins=sum(s.wins for s in stats),
+        losses=sum(s.losses for s in stats),
+        ties=sum(s.ties for s in stats),
+    )
+
+
 def _dataset_identity(raw: Any) -> str | None:
     """Normalize an sr-bench dataset sha256 (bare hexdigest) to the A4 form."""
     if not isinstance(raw, str) or not raw.strip():
@@ -313,6 +402,11 @@ def live_verdict_from_runs(
     offline measured values. Undeclared measurement names are reported
     (in `undeclared_measurements` and the reasons) but never veto. An
     empty contract adds an explicit `gates_note`.
+
+    M2: when the compare payload carries exactly one `comparisons[]` entry
+    the verdict is decided from the paired confidence interval (see
+    `paired_stats_from_comparison`); the entry's stats are returned in
+    `paired` for the ledger.
     """
     # M1: both runs must have scored the contract's own frozen split, else
     # the verdict would cite evidence from a different question set.
@@ -327,6 +421,8 @@ def live_verdict_from_runs(
     baseline_metric, candidate_metric = _pair_metrics(
         comparison, spec.objective.metric_key, incomplete
     )
+    # M2: paired statistics ride along when the compare payload carries them.
+    stats = paired_stats_from_comparison(comparison)
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
     constraint_evidence = _constraint_evidence(
@@ -340,6 +436,9 @@ def live_verdict_from_runs(
         guards=guards,
         incomplete_reasons=incomplete,
         constraints=constraint_evidence,
+        stats=stats,
+        min_cases=spec.objective.min_cases,
+        min_improvement_pp=spec.objective.min_improvement_pp,
     )
     reasons = list(verdict.reasons)
     if undeclared:
@@ -364,6 +463,7 @@ def live_verdict_from_runs(
         "constraints": verdict.constraints,
         "undeclared_measurements": undeclared,
         "bench_refs": [baseline_run_id, candidate_run_id],
+        "paired": stats.to_dict() if stats else None,
     }
     if not spec.gates:
         result["gates_note"] = "no guard declared"
@@ -422,6 +522,10 @@ def verify_live(
     reuses `evaluate_verdict` with the per-label medians - any incomplete
     pair, missing metric, or unmeasurable constraint lands in
     `incomplete_reasons` and turns the verdict INCONCLUSIVE.
+
+    M2: the pairs' `comparisons[]` statistics merge conservatively (counts
+    sum, intervals take the widest span) and drive the paired decision, so
+    every repeated case counts toward `min_cases`.
 
     `targets` are the registered sr-bench MoM target ids the router is
     serving the candidate config on. The preview run is diagnostic only:
@@ -503,6 +607,7 @@ def verify_live(
     # per-pair compare + metric/constraint pairing
     metric_key = spec.objective.metric_key
     rows: list[dict[str, Any]] = []
+    pair_stats: list[PairedStats] = []
     constraint_values: dict[str, list[tuple[float | None, float | None]]] = {
         constraint.name: [] for constraint in spec.objective.constraints
     }
@@ -518,6 +623,9 @@ def verify_live(
             )
             continue
         comparison = cli.compare(base_run["run_id"], cand_run["run_id"])
+        stats = paired_stats_from_comparison(comparison)
+        if stats is not None:
+            pair_stats.append(stats)
         baseline_value, candidate_value = _pair_metrics(
             comparison, metric_key, incomplete
         )
@@ -568,6 +676,9 @@ def verify_live(
         )
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
+    # M2: the pairs' statistics merge conservatively and drive the paired
+    # decision (all repeated cases count toward min_cases).
+    stats = _merge_paired_stats(pair_stats)
     verdict = evaluate_verdict(
         baseline_metric=baseline_metric,
         candidate_metric=candidate_metric,
@@ -576,6 +687,9 @@ def verify_live(
         guards=guards,
         incomplete_reasons=incomplete,
         constraints=constraint_evidence,
+        stats=stats,
+        min_cases=spec.objective.min_cases,
+        min_improvement_pp=spec.objective.min_improvement_pp,
     )
     reasons = list(verdict.reasons)
     reasons.extend(diagnostics)
@@ -604,6 +718,7 @@ def verify_live(
         "trials": {str(rep): trials[rep] for rep in sorted(trials)},
         "abba_summary": summary,
         "preview": preview_info,
+        "paired": stats.to_dict() if stats else None,
     }
     if not spec.gates:
         result["gates_note"] = "no guard declared"
