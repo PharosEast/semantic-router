@@ -37,11 +37,14 @@ in the ledger record's `paired` field.
 
 Evidence quality (M3): each compare payload's `baseline_targets` /
 `candidate_targets` entries carry `output_diagnostics` (planned/result
-cases, finish reasons). Truncation and no-answer rates beyond the
-spec's `evidence_quality` ceilings mark the arm's score unreliable
-evidence and turn the verdict INCONCLUSIVE; unknown rates (no
-diagnostics) are reported as null, never guessed as zero. Across
-repeated pairs each rate merges conservatively (worst pair).
+cases, the per-case output-limit count, subject-call finish reasons).
+Truncation is the per-case count (`output_limit_cases / planned_cases`);
+the call-level finish-reason length share is reference only. Truncation,
+missing-result, and no-answer rates beyond the spec's `evidence_quality`
+ceilings mark the arm's score unreliable evidence and turn the verdict
+INCONCLUSIVE; unknown rates (no diagnostics, or no per-case no-answer
+marker) are reported as null, never guessed as zero. Across repeated
+pairs each rate merges conservatively (worst pair).
 
 Reference arms and cost basis (M4): a spec may pin `references.strong`
 / `references.weak` to single-model sr-bench target ids; constraints
@@ -365,28 +368,48 @@ def _merge_paired_stats(stats: list[PairedStats]) -> PairedStats | None:
     )
 
 
+_EVIDENCE_RATE_KEYS = (
+    "truncation_rate",
+    "missing_result_rate",
+    "no_answer_rate",
+    "finish_reason_length_rate",
+)
+
+
 def arm_evidence_quality(
     targets: Any,
     *,
     routing_arm: bool,
     selected_id: str | None = None,
-) -> tuple[float | None, float | None]:
-    """M3: one arm's (truncation_rate, no_answer_rate) from its targets.
+) -> dict[str, float | None] | None:
+    """M3: one arm's evidence-quality rates from its target summaries.
 
     sr-bench compares whole targets and each target summary carries
-    `output_diagnostics` (planned/result cases, finish reasons). The
-    baseline arm pins the target compare named
+    `output_diagnostics`. Truncation is the per-case count:
+    `output_limit_cases / planned_cases` - sr-bench flags a case
+    `quality_failure: "output_limit"` when the subject output hits the
+    token limit and the engine stops the task early (W3), and counts
+    those cases per target. The call-level share
+    (`subject_calls.finish_reasons.length / subject_calls.total`) rides
+    along as reference only: calls can outnumber cases under multi-call
+    tasks, so it is not the truncation rate. The missing-result rate is
+    `(planned_cases - result_cases) / planned_cases`. The no-answer rate
+    needs per-case judging details, which a compare payload does not
+    carry: until sr-bench publishes a per-case no-answer count
+    (`no_answer_cases`), it stays null - missing evidence is reported,
+    never guessed as zero (unanswered cases already count as incorrect
+    in sr-bench's planned-denominator accuracy).
+
+    The baseline arm pins the target compare named
     (`baseline_selected_target_id`); the candidate arm is the routing
     target (`mom` kind, else the last target), matching `_arm_accuracy`.
-    Rates are fractions of the target's planned cases. No diagnostics or
-    a non-positive planned count yield (None, None): missing evidence is
-    reported, never guessed as zero.
+    No diagnostics or a non-positive planned count yield None.
     """
     if not isinstance(targets, list):
-        return None, None
+        return None
     entries = [t for t in targets if isinstance(t, dict)]
 
-    def _rates(entry: dict) -> tuple[float, float] | None:
+    def _rates(entry: dict) -> dict[str, float | None] | None:
         diagnostics = entry.get("output_diagnostics")
         if not isinstance(diagnostics, dict):
             return None
@@ -396,13 +419,34 @@ def arm_evidence_quality(
         result_cases = diagnostics.get("result_cases")
         if isinstance(result_cases, bool) or not isinstance(result_cases, int):
             result_cases = 0
-        finish = diagnostics.get("finish_reasons")
-        truncated = 0
-        if isinstance(finish, dict):
-            length = finish.get("length")
-            if isinstance(length, int) and not isinstance(length, bool):
-                truncated = length
-        return truncated / planned, (planned - result_cases) / planned
+        output_limit = diagnostics.get("output_limit_cases")
+        if isinstance(output_limit, bool) or not isinstance(output_limit, int):
+            output_limit = 0
+        length_rate: float | None = None
+        calls = diagnostics.get("subject_calls")
+        if isinstance(calls, dict):
+            total = calls.get("total")
+            finish = calls.get("finish_reasons")
+            if (
+                isinstance(total, int)
+                and not isinstance(total, bool)
+                and total > 0
+                and isinstance(finish, dict)
+            ):
+                length = finish.get("length", 0)
+                if isinstance(length, int) and not isinstance(length, bool):
+                    length_rate = length / total
+        no_answer = diagnostics.get("no_answer_cases")
+        if isinstance(no_answer, bool) or not isinstance(no_answer, int):
+            no_answer = None
+        return {
+            "truncation_rate": output_limit / planned,
+            "missing_result_rate": (planned - result_cases) / planned,
+            "no_answer_rate": (
+                no_answer / planned if no_answer is not None else None
+            ),
+            "finish_reason_length_rate": length_rate,
+        }
 
     if isinstance(selected_id, str):
         for entry in entries:
@@ -420,11 +464,11 @@ def arm_evidence_quality(
         rates = _rates(entry)
         if rates is not None:
             return rates
-    return None, None
+    return None
 
 
 def _evidence_entry(
-    rates: tuple[float | None, float | None],
+    rates: dict[str, float | None] | None,
     arm: str,
     ceilings: EvidenceQuality,
     incomplete: list[str],
@@ -433,35 +477,44 @@ def _evidence_entry(
 
     Rates are fractions (0-1); reasons compare them against the spec's
     percentage ceilings and land in `incomplete_reasons` (INCONCLUSIVE).
+    `finish_reason_length_rate` is reference only and never gated.
     """
-    truncation_rate, no_answer_rate = rates
+    entry: dict[str, float | None] = {key: None for key in _EVIDENCE_RATE_KEYS}
+    if rates is not None:
+        entry.update({key: rates.get(key) for key in _EVIDENCE_RATE_KEYS})
     incomplete.extend(
         evidence_quality_reasons(
             arm,
-            truncation_rate=truncation_rate,
-            no_answer_rate=no_answer_rate,
+            truncation_rate=entry["truncation_rate"],
+            missing_result_rate=entry["missing_result_rate"],
+            no_answer_rate=entry["no_answer_rate"],
             max_truncation_pct=ceilings.max_truncation_pct,
             max_no_answer_pct=ceilings.max_no_answer_pct,
         )
     )
-    return {"truncation_rate": truncation_rate, "no_answer_rate": no_answer_rate}
+    return entry
 
 
 def _worst_rates(
-    rates: list[tuple[float | None, float | None]],
-) -> tuple[float | None, float | None]:
+    rates: list[dict[str, float | None] | None],
+) -> dict[str, float | None] | None:
     """M3: worst-case per-arm rates across repeated pairs (max each).
 
     A pair without diagnostics contributes nothing and never masks a
     breach seen in another pair; if no pair has diagnostics the rate
     stays unknown (None).
     """
-    truncations = [t for t, _ in rates if t is not None]
-    no_answers = [n for _, n in rates if n is not None]
-    return (
-        max(truncations) if truncations else None,
-        max(no_answers) if no_answers else None,
-    )
+    if not rates:
+        return None
+    merged: dict[str, float | None] = {}
+    for key in _EVIDENCE_RATE_KEYS:
+        values = [
+            entry[key]
+            for entry in rates
+            if isinstance(entry, dict) and entry.get(key) is not None
+        ]
+        merged[key] = max(values) if values else None
+    return merged
 
 
 def reference_metric_values(

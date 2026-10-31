@@ -376,6 +376,7 @@ def test_evidence_quality_truncation_over_ceiling_is_reported():
     reasons = evidence_quality_reasons(
         "baseline",
         truncation_rate=32 / 60,
+        missing_result_rate=0.0,
         no_answer_rate=None,
         max_truncation_pct=2.0,
         max_no_answer_pct=2.0,
@@ -383,10 +384,25 @@ def test_evidence_quality_truncation_over_ceiling_is_reported():
     assert reasons == ["baseline truncation rate 53.33% exceeds max 2.00%"]
 
 
+def test_evidence_quality_missing_results_over_ceiling_is_reported():
+    # Missing results and missing answers are distinct failures with the
+    # same consequence: the case contributes no judged answer.
+    reasons = evidence_quality_reasons(
+        "candidate",
+        truncation_rate=0.0,
+        missing_result_rate=8 / 60,
+        no_answer_rate=None,
+        max_truncation_pct=2.0,
+        max_no_answer_pct=2.0,
+    )
+    assert reasons == ["candidate missing-result rate 13.33% exceeds max 2.00%"]
+
+
 def test_evidence_quality_no_answer_over_ceiling_is_reported():
     reasons = evidence_quality_reasons(
         "candidate",
         truncation_rate=0.0,
+        missing_result_rate=0.0,
         no_answer_rate=5 / 60,
         max_truncation_pct=2.0,
         max_no_answer_pct=2.0,
@@ -399,6 +415,7 @@ def test_evidence_quality_within_ceilings_is_clean():
         evidence_quality_reasons(
             "baseline",
             truncation_rate=0.01,
+            missing_result_rate=0.01,
             no_answer_rate=0.02,
             max_truncation_pct=2.0,
             max_no_answer_pct=2.0,
@@ -412,6 +429,7 @@ def test_evidence_quality_unknown_rate_is_not_penalized():
         evidence_quality_reasons(
             "candidate",
             truncation_rate=None,
+            missing_result_rate=None,
             no_answer_rate=None,
             max_truncation_pct=2.0,
             max_no_answer_pct=2.0,
@@ -432,6 +450,7 @@ def test_evidence_quality_ceiling_breach_is_incomplete_evidence():
         incomplete_reasons=evidence_quality_reasons(
             "baseline",
             truncation_rate=0.10,
+            missing_result_rate=None,
             no_answer_rate=None,
             max_truncation_pct=2.0,
             max_no_answer_pct=2.0,

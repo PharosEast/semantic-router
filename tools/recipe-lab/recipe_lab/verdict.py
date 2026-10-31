@@ -352,22 +352,36 @@ def evidence_quality_reasons(
     arm: str,
     *,
     truncation_rate: float | None,
+    missing_result_rate: float | None,
     no_answer_rate: float | None,
     max_truncation_pct: float,
     max_no_answer_pct: float,
 ) -> list[str]:
     """M3: incomplete-evidence reasons when an arm's output quality degrades.
 
-    A truncated output or a missing answer is unreliable evidence, not a
-    quality loss: a rate beyond its ceiling turns the verdict INCONCLUSIVE.
-    Unknown rates (the payload carries no output diagnostics) are not
-    penalized - missing evidence is reported, never guessed as zero.
+    A truncated output, a case with no recorded result, or a missing
+    answer is unreliable evidence, not a quality loss: a rate beyond its
+    ceiling turns the verdict INCONCLUSIVE. Missing results and missing
+    answers are distinct failures and are reported separately; both share
+    the `max_no_answer_pct` ceiling because either way the case
+    contributes no judged answer. Unknown rates (the payload carries no
+    output diagnostics, or sr-bench publishes no per-case no-answer
+    marker) are not penalized - missing evidence is reported, never
+    guessed as zero.
     """
     reasons: list[str] = []
     if truncation_rate is not None and truncation_rate * 100.0 > max_truncation_pct:
         reasons.append(
             f"{arm} truncation rate {truncation_rate * 100.0:.2f}% exceeds max "
             f"{max_truncation_pct:.2f}%"
+        )
+    if (
+        missing_result_rate is not None
+        and missing_result_rate * 100.0 > max_no_answer_pct
+    ):
+        reasons.append(
+            f"{arm} missing-result rate {missing_result_rate * 100.0:.2f}% exceeds "
+            f"max {max_no_answer_pct:.2f}%"
         )
     if no_answer_rate is not None and no_answer_rate * 100.0 > max_no_answer_pct:
         reasons.append(
