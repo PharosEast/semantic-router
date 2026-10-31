@@ -1391,7 +1391,26 @@ def test_merge_paired_stats_takes_widest_span():
     )
 
 
-# ---- M3: evidence quality (truncation / no-answer ceilings) ----
+# ---- M3: evidence quality (truncation / missing-result / no-answer) ----
+
+# Captured verbatim from the real J3 sr-bench run
+# (run-1a415ad8b047446da884, sr-bench report.py `output_diagnostics`):
+# 32 of 60 planned cases were force-stopped by the output token limit.
+_J3_OUTPUT_DIAGNOSTICS = {
+    "planned_cases": 60,
+    "result_cases": 60,
+    "output_limit_cases": 32,
+    "strict_format": {
+        "checked_cases": 28,
+        "failed_cases": 28,
+        "unassessed_cases": 32,
+    },
+    "subject_calls": {
+        "total": 60,
+        "finish_reasons": {"length": 32, "stop": 28},
+        "unknown_finish_reason": 0,
+    },
+}
 
 
 def _target(
@@ -1400,17 +1419,41 @@ def _target(
     kind: str | None = None,
     planned: int = 60,
     results: int | None = None,
-    length: int = 0,
+    output_limit: int | None = None,
+    length: int | None = None,
+    no_answer: int | None = None,
 ) -> dict:
-    """One sr-bench target summary: id + output_diagnostics."""
-    entry: dict = {
-        "id": target_id,
-        "output_diagnostics": {
-            "planned_cases": planned,
-            "result_cases": planned if results is None else results,
-            "finish_reasons": {"length": length} if length else {"stop": planned},
+    """One sr-bench target summary with the real `output_diagnostics` shape.
+
+    Mirrors sr-bench `report.py`: `output_limit_cases` counts cases
+    force-stopped by the token limit, and the finish reasons live under
+    `subject_calls` (per call, not per case).
+    """
+    result_cases = planned if results is None else results
+    if length is None:
+        length = output_limit if output_limit else 0
+    finish: dict = {"length": length} if length else {}
+    stop = planned - length
+    if stop or not finish:
+        finish["stop"] = stop
+    diagnostics: dict = {
+        "planned_cases": planned,
+        "result_cases": result_cases,
+        "output_limit_cases": output_limit if output_limit is not None else length,
+        "strict_format": {
+            "checked_cases": stop,
+            "failed_cases": 0,
+            "unassessed_cases": length,
+        },
+        "subject_calls": {
+            "total": planned,
+            "finish_reasons": finish,
+            "unknown_finish_reason": 0,
         },
     }
+    if no_answer is not None:
+        diagnostics["no_answer_cases"] = no_answer
+    entry: dict = {"id": target_id, "output_diagnostics": diagnostics}
     if kind is not None:
         entry["kind"] = kind
     return entry
@@ -1436,15 +1479,18 @@ def _sectioned_payload(
 
 
 def test_live_verdict_truncated_baseline_is_inconclusive():
-    # J3's single reference arm lost 32/60 cases to truncation; under the M3
-    # ceiling that silent quality loss becomes unreliable evidence.
+    # J3's single reference arm lost 32/60 cases to output-limit force
+    # stops; under the M3 ceiling that silent quality loss becomes
+    # unreliable evidence. The fixture is the real run's diagnostics.
     class FakeCli:
         def show(self, run_id):
             return dict(_RUN_DOC)
 
         def compare(self, base, cand):
             return _sectioned_payload(
-                baseline_targets=[_target("single-a", length=32)],
+                baseline_targets=[
+                    {"id": "single-a", "output_diagnostics": _J3_OUTPUT_DIAGNOSTICS}
+                ],
             )
 
     result = live_verdict_from_runs(
@@ -1458,16 +1504,24 @@ def test_live_verdict_truncated_baseline_is_inconclusive():
     )
     assert result["verdict"] == "INCONCLUSIVE"
     assert "baseline truncation rate 53.33% exceeds max 2.00%" in result["reasons"][0]
-    assert result["evidence_quality"]["baseline"]["truncation_rate"] == pytest.approx(
-        32 / 60
-    )
+    assert result["evidence_quality"]["baseline"] == {
+        "truncation_rate": pytest.approx(32 / 60),
+        "missing_result_rate": 0.0,
+        "no_answer_rate": None,
+        "finish_reason_length_rate": pytest.approx(32 / 60),
+    }
     assert result["evidence_quality"]["candidate"] == {
         "truncation_rate": 0.0,
-        "no_answer_rate": 0.0,
+        "missing_result_rate": 0.0,
+        "no_answer_rate": None,
+        "finish_reason_length_rate": 0.0,
     }
 
 
-def test_live_verdict_no_answer_over_ceiling_is_inconclusive():
+def test_live_verdict_missing_results_over_ceiling_is_inconclusive():
+    # Cases with no recorded result contribute no judged answer - the
+    # missing-result rate gates INCONCLUSIVE, and is distinct from the
+    # per-case no-answer rate.
     class FakeCli:
         def show(self, run_id):
             return dict(_RUN_DOC)
@@ -1487,10 +1541,47 @@ def test_live_verdict_no_answer_over_ceiling_is_inconclusive():
         ],
     )
     assert result["verdict"] == "INCONCLUSIVE"
+    assert (
+        "candidate missing-result rate 13.33% exceeds max 2.00%"
+        in result["reasons"][0]
+    )
+    assert result["evidence_quality"]["candidate"] == {
+        "truncation_rate": 0.0,
+        "missing_result_rate": pytest.approx(8 / 60),
+        "no_answer_rate": None,
+        "finish_reason_length_rate": 0.0,
+    }
+
+
+def test_live_verdict_no_answer_over_ceiling_is_inconclusive():
+    # When sr-bench publishes a per-case no-answer count it gates too;
+    # without one the rate stays null (never guessed as zero).
+    class FakeCli:
+        def show(self, run_id):
+            return dict(_RUN_DOC)
+
+        def compare(self, base, cand):
+            return _sectioned_payload(
+                candidate_targets=[
+                    _target("mom-x", kind="mom", no_answer=8),
+                ],
+            )
+
+    result = live_verdict_from_runs(
+        spec=_spec(),
+        cli=FakeCli(),
+        baseline_run_id="run-a",
+        candidate_run_id="run-b",
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
     assert "candidate no-answer rate 13.33% exceeds max 2.00%" in result["reasons"][0]
     assert result["evidence_quality"]["candidate"]["no_answer_rate"] == pytest.approx(
         8 / 60
     )
+    assert result["evidence_quality"]["candidate"]["missing_result_rate"] == 0.0
 
 
 def test_live_verdict_missing_diagnostics_does_not_veto():
@@ -1515,40 +1606,89 @@ def test_live_verdict_missing_diagnostics_does_not_veto():
     assert result["verdict"] == "PASS"
     assert not any("rate" in reason for reason in result["reasons"])
     assert result["evidence_quality"] == {
-        "baseline": {"truncation_rate": None, "no_answer_rate": None},
-        "candidate": {"truncation_rate": None, "no_answer_rate": None},
+        "baseline": {
+            "truncation_rate": None,
+            "missing_result_rate": None,
+            "no_answer_rate": None,
+            "finish_reason_length_rate": None,
+        },
+        "candidate": {
+            "truncation_rate": None,
+            "missing_result_rate": None,
+            "no_answer_rate": None,
+            "finish_reason_length_rate": None,
+        },
     }
 
 
 def test_arm_evidence_quality_selection_rules():
-    reference = _target("single-a", length=6)
-    mom = _target("mom-x", kind="mom", planned=50, results=48, length=1)
+    reference = _target("single-a", output_limit=6)
+    mom = _target("mom-x", kind="mom", planned=50, results=48, output_limit=1)
 
     # baseline: the target compare pinned via baseline_selected_target_id wins
-    truncation, _ = arm_evidence_quality(
-        [reference, _target("single-b", length=40)],
+    evidence = arm_evidence_quality(
+        [reference, _target("single-b", output_limit=40)],
         routing_arm=False,
         selected_id="single-a",
     )
-    assert truncation == pytest.approx(6 / 60)
+    assert evidence["truncation_rate"] == pytest.approx(6 / 60)
 
     # candidate: the routing (mom) target wins over the reference lane
-    truncation, no_answer = arm_evidence_quality([reference, mom], routing_arm=True)
-    assert truncation == pytest.approx(1 / 50)
-    assert no_answer == pytest.approx(2 / 50)
+    evidence = arm_evidence_quality([reference, mom], routing_arm=True)
+    assert evidence["truncation_rate"] == pytest.approx(1 / 50)
+    assert evidence["missing_result_rate"] == pytest.approx(2 / 50)
+    assert evidence["no_answer_rate"] is None
+    assert evidence["finish_reason_length_rate"] == pytest.approx(1 / 50)
 
     # no diagnostics anywhere, or nonsense planned count -> unknown
-    assert arm_evidence_quality([{"id": "x"}], routing_arm=False) == (None, None)
-    assert arm_evidence_quality(None, routing_arm=True) == (None, None)
+    assert arm_evidence_quality([{"id": "x"}], routing_arm=False) is None
+    assert arm_evidence_quality(None, routing_arm=True) is None
     bad = _target("single-c")
     bad["output_diagnostics"]["planned_cases"] = 0
-    assert arm_evidence_quality([bad], routing_arm=False) == (None, None)
+    assert arm_evidence_quality([bad], routing_arm=False) is None
+
+
+def test_arm_evidence_quality_truncation_counts_cases_not_calls():
+    # output_limit_cases counts cases; subject_calls.finish_reasons.length
+    # counts calls - auxiliary retries can add length-finished calls without
+    # new cases, so the per-case count is the truncation rate and the call
+    # share is reference only.
+    entry = _target("single-a", output_limit=6, length=10)
+    evidence = arm_evidence_quality([entry], routing_arm=False)
+    assert evidence["truncation_rate"] == pytest.approx(6 / 60)
+    assert evidence["finish_reason_length_rate"] == pytest.approx(10 / 60)
 
 
 def test_worst_rates_takes_max_and_keeps_unknown():
-    assert _worst_rates([(0.01, 0.02), (0.05, None), (None, 0.03)]) == (0.05, 0.03)
-    assert _worst_rates([(None, None)]) == (None, None)
-    assert _worst_rates([]) == (None, None)
+    assert _worst_rates(
+        [
+            {
+                "truncation_rate": 0.01,
+                "missing_result_rate": 0.02,
+                "no_answer_rate": None,
+                "finish_reason_length_rate": 0.0,
+            },
+            {
+                "truncation_rate": 0.05,
+                "missing_result_rate": None,
+                "no_answer_rate": 0.03,
+                "finish_reason_length_rate": None,
+            },
+            None,
+        ]
+    ) == {
+        "truncation_rate": 0.05,
+        "missing_result_rate": 0.02,
+        "no_answer_rate": 0.03,
+        "finish_reason_length_rate": 0.0,
+    }
+    assert _worst_rates([None]) == {
+        "truncation_rate": None,
+        "missing_result_rate": None,
+        "no_answer_rate": None,
+        "finish_reason_length_rate": None,
+    }
+    assert _worst_rates([]) is None
 
 
 # ---- M4: reference arms and cost basis ----

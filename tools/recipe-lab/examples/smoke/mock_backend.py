@@ -55,7 +55,13 @@ def _answer_for(model: str, prompt: str) -> str:
     return "mock answer"
 
 
-def _completion(model: str, content: str) -> bytes:
+# A request that caps output below this many tokens finishes with "length":
+# the M3 integration truncation scenario drives sr-bench's output-limit
+# accounting (engine marks the case `quality_failure: "output_limit"`).
+TRUNCATION_MAX_TOKENS = 16
+
+
+def _completion(model: str, content: str, finish_reason: str = "stop") -> bytes:
     return json.dumps(
         {
             "id": "chatcmpl-mock",
@@ -65,7 +71,7 @@ def _completion(model: str, content: str) -> bytes:
                 {
                     "index": 0,
                     "message": {"role": "assistant", "content": content},
-                    "finish_reason": "stop",
+                    "finish_reason": finish_reason,
                 }
             ],
             "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
@@ -108,17 +114,23 @@ class Handler(BaseHTTPRequestHandler):
                 model = str(payload.get("model", "unknown"))
                 prompt = str(payload.get("messages", [{}])[-1].get("content", ""))
                 stream = bool(payload.get("stream"))
+                max_tokens = payload.get("max_tokens")
             except (json.JSONDecodeError, AttributeError):
-                model, prompt, stream = "unknown", "", False
+                model, prompt, stream, max_tokens = "unknown", "", False, None
+            finish_reason = (
+                "length"
+                if isinstance(max_tokens, int) and max_tokens < TRUNCATION_MAX_TOKENS
+                else "stop"
+            )
             content = _answer_for(model, prompt)
             if stream:
-                self._send_sse(model, content)
+                self._send_sse(model, content, finish_reason)
             else:
-                self._send(200, _completion(model, content))
+                self._send(200, _completion(model, content, finish_reason))
         else:
             self._send(404, b'{"error": "not found"}')
 
-    def _send_sse(self, model: str, content: str) -> None:
+    def _send_sse(self, model: str, content: str, finish_reason: str = "stop") -> None:
         chunk = {
             "id": "chatcmpl-mock",
             "object": "chat.completion.chunk",
@@ -131,7 +143,7 @@ class Handler(BaseHTTPRequestHandler):
             "id": "chatcmpl-mock",
             "object": "chat.completion.chunk",
             "model": model,
-            "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
             "usage": {
                 "prompt_tokens": 16,
                 "completion_tokens": 2,
