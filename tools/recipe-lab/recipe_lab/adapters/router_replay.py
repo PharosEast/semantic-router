@@ -94,6 +94,29 @@ def _get_json(url: str, timeout: float, api_key_env: str | None) -> Any:
         raise ReplayFetchError(f"management API returned non-JSON body: {url}") from exc
 
 
+def fetch_config_hash(
+    management_url: str,
+    *,
+    timeout: float = 30.0,
+    api_key_env: str | None = None,
+) -> dict[str, Any]:
+    """GET /api/v1/config/hash - the router's config activation document.
+
+    Returns the response verbatim (`source_config_hash` / `generated_runtime_hash`
+    / `active_runtime_hash` / `activation_status`); callers decide which fields
+    bind. `source_config_hash` is the sha256 of the config document's raw bytes,
+    so a local file can be compared against it byte-for-byte.
+    """
+    payload = _get_json(
+        management_url.rstrip("/") + "/api/v1/config/hash", timeout, api_key_env
+    )
+    if not isinstance(payload, dict):
+        raise ReplayFetchError(
+            f"config hash endpoint did not return a JSON object: {management_url}"
+        )
+    return payload
+
+
 def fetch_replays(
     management_url: str,
     *,

@@ -994,6 +994,7 @@ _FAKE_MODEL_EVAL_RESULT = {
     "distribution": {"STRONG": 0.6, "WEAK": 0.4},
     "driver": "model_eval",
     "tasks_hash": "sha256:ab",
+    "config_sha256": "sha256:cd",
     "planned_cases": 1,
 }
 
@@ -1009,6 +1010,8 @@ def _model_eval_verify_args(spec_path, tmp_path, candidate):
         str(tmp_path / "tasks.jsonl"),
         "--labels",
         str(tmp_path / "labels.jsonl"),
+        "--candidate-config",
+        str(tmp_path / "candidate-config.yaml"),
         "--baseline-router-endpoint",
         "http://127.0.0.1:9001/v1",
         "--candidate-router-endpoint",
@@ -1083,6 +1086,10 @@ def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
     assert record["verdict"] == "PASS"
     assert record["round"] == 2
     assert record["baseline_ref"] is None  # no sr-bench run behind this evidence
+    # Y4: the ledger's candidate names the config the verdict graded
+    assert record["candidate"]["config_sha256"] == "sha256:cd"
+    # without --final the record carries no promotion flag
+    assert "final" not in record
     assert "repetitions=1" in record["notes"]
     # the model_eval driver's distribution rides the result, not a preview
     assert "routing_distribution=" in record["notes"]

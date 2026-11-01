@@ -1,5 +1,6 @@
 """Tests for the model_eval verify driver (C7)."""
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -25,6 +26,27 @@ ROUTER_MODEL = "vllm-sr/auto"
 STRONG = "Qwen/Qwen3.5-4B"
 WEAK = "plainmodel"
 N_TASKS = 30  # radius sqrt(2*ln(40)/30) < 0.5, so a 0.5 delta passes a 0pp bar
+
+
+@pytest.fixture(autouse=True)
+def _candidate_config(tmp_path, monkeypatch):
+    """Y4: a candidate config the router's management API acknowledges.
+
+    Every verify call binds `candidate_config` to this file, and the
+    patched `fetch_config_hash` reports it active with the file's source
+    hash. Negative tests override the patch.
+    """
+    path = tmp_path / "candidate-config.yaml"
+    path.write_text("api_version: v1alpha1\n", encoding="utf-8")
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    monkeypatch.setattr(
+        "recipe_lab.model_eval_driver.fetch_config_hash",
+        lambda url, **kwargs: {
+            "activation_status": "active",
+            "source_config_hash": digest,
+        },
+    )
+    return path
 
 
 def _spec_dict(**overrides):
@@ -433,11 +455,14 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
     spec = ExperimentSpec.from_dict(_spec_dict())
     run_cache = tmp_path / "run-cache.json"
+    # an empty replay store: R stays unevaluable with the gap named
+    monkeypatch.setattr("recipe_lab.model_eval_driver.fetch_replays", lambda url: [])
 
     result = verify_live_model_eval(
         spec=spec,
         tasks_path=tasks_path,
         labels_path=labels_path,
+        candidate_config=tmp_path / "candidate-config.yaml",
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -445,6 +470,7 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
         measurements=[],
         model_eval_dir=tmp_path / "scripts",
         python_bin="python",
+        management_endpoint="http://127.0.0.1:8080",
         work_dir=tmp_path / "work",
         run_cache=run_cache,
     )
@@ -460,6 +486,10 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     assert result["metrics"] == {"baseline": 0.5, "candidate": 1.0}
     assert result["driver"] == "model_eval"
     assert result["planned_cases"] == N_TASKS
+    # Y4: the config the management API acknowledged is the fixture's file
+    assert result["config_sha256"] == "sha256:" + hashlib.sha256(
+        (tmp_path / "candidate-config.yaml").read_bytes()
+    ).hexdigest()
     assert result["tasks_hash"].startswith("sha256:")
     assert result["labels_sha256"].startswith("sha256:")
     assert result["labeled_tasks_sha256"].startswith("sha256:")
@@ -514,10 +544,13 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     cached_keys = json.loads(run_cache.read_text(encoding="utf-8"))
     assert len(cached_keys) == 2
     assert all(key.startswith(result["labeled_tasks_sha256"]) for key in cached_keys)
-    # no management endpoint: the routing distribution is unknown, so the
+    # an empty replay store: the routing distribution is unknown, so the
     # random mix is unevaluable with a reason - never guessed
     assert result["random_mix"]["evaluable"] is False
-    assert "no --candidate-management-endpoint" in result["random_mix"]["reason"]
+    assert (
+        "no replay record with a selected model matches"
+        in result["random_mix"]["reason"]
+    )
     assert result["random_mix"]["expected_accuracy"] is None
     assert result["distribution"] is None
 
@@ -527,6 +560,7 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
         spec=spec,
         tasks_path=tasks_path,
         labels_path=labels_path,
+        candidate_config=tmp_path / "candidate-config.yaml",
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -534,6 +568,7 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
         measurements=[],
         model_eval_dir=tmp_path / "scripts",
         python_bin="python",
+        management_endpoint="http://127.0.0.1:8080",
         work_dir=tmp_path / "work2",
         run_cache=run_cache,
     )
@@ -589,6 +624,7 @@ def test_verify_live_model_eval_random_mix(tmp_path, monkeypatch):
         spec=spec,
         tasks_path=tasks_path,
         labels_path=labels_path,
+        candidate_config=tmp_path / "candidate-config.yaml",
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         management_endpoint="http://127.0.0.1:8080",
@@ -669,6 +705,7 @@ def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
         spec=spec,
         tasks_path=tasks_path,
         labels_path=labels_path,
+        candidate_config=tmp_path / "candidate-config.yaml",
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         management_endpoint="http://127.0.0.1:8080",
@@ -691,10 +728,10 @@ def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
 
 
 def test_verify_live_model_eval_random_mix_replay_gaps(tmp_path, monkeypatch):
-    # the distribution evidence cannot be faked: no management endpoint, a
-    # failed fetch, or no matching replay each keep R unevaluable with the
-    # gap named, the ref:random_mix constraint unevaluated and the verdict
-    # INCONCLUSIVE
+    # the distribution evidence cannot be faked: a failed fetch or no
+    # matching replay each keep R unevaluable with the gap named, the
+    # ref:random_mix constraint unevaluated and the verdict INCONCLUSIVE
+    # (a missing management endpoint is a hard contract error - Y4)
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
     labels_path = tmp_path / "labels.jsonl"
@@ -716,6 +753,7 @@ def test_verify_live_model_eval_random_mix_replay_gaps(tmp_path, monkeypatch):
         "spec": spec,
         "tasks_path": tasks_path,
         "labels_path": labels_path,
+        "candidate_config": tmp_path / "candidate-config.yaml",
         "baseline_endpoint": BASE_ENDPOINT,
         "candidate_endpoint": CAND_ENDPOINT,
         "router_model": ROUTER_MODEL,
@@ -725,32 +763,29 @@ def test_verify_live_model_eval_random_mix_replay_gaps(tmp_path, monkeypatch):
         "python_bin": "python",
         "work_dir": tmp_path / "work",
     }
-    results = [verify_live_model_eval(**common)]
 
     def broken_fetch(url):
         raise ReplayFetchError("management API returned HTTP 500")
 
     monkeypatch.setattr("recipe_lab.model_eval_driver.fetch_replays", broken_fetch)
-    results.append(
-        verify_live_model_eval(**common, management_endpoint="http://127.0.0.1:8080")
+    fetch_failed = verify_live_model_eval(
+        **common, management_endpoint="http://127.0.0.1:8080"
     )
 
     monkeypatch.setattr(
         "recipe_lab.model_eval_driver.fetch_replays",
         lambda url: [{"prompt": "unrelated", "selected_model": "m-a"}],
     )
-    results.append(
-        verify_live_model_eval(**common, management_endpoint="http://127.0.0.1:8080")
+    no_match = verify_live_model_eval(
+        **common, management_endpoint="http://127.0.0.1:8080"
     )
 
-    no_endpoint, fetch_failed, no_match = results
-    assert "no --candidate-management-endpoint" in no_endpoint["random_mix"]["reason"]
     assert "replay fetch failed" in fetch_failed["random_mix"]["reason"]
     assert (
         "no replay record with a selected model matches"
         in no_match["random_mix"]["reason"]
     )
-    for result in results:
+    for result in (fetch_failed, no_match):
         assert result["random_mix"]["evaluable"] is False
         assert result["random_mix"]["expected_accuracy"] is None
         assert result["distribution"] is None
@@ -778,6 +813,7 @@ def test_verify_live_model_eval_input_guards(tmp_path):
             measurements=[],
             model_eval_dir=tmp_path,
             labels_path=labels_path,
+            candidate_config=tmp_path / "candidate-config.yaml",
             python_bin="python",
             work_dir=tmp_path / "w",
         )
@@ -792,6 +828,7 @@ def test_verify_live_model_eval_input_guards(tmp_path):
             measurements=[],
             model_eval_dir=tmp_path,
             labels_path=labels_path,
+            candidate_config=tmp_path / "candidate-config.yaml",
             python_bin="python",
             work_dir=tmp_path / "w",
         )
@@ -809,6 +846,7 @@ def test_verify_live_model_eval_input_guards(tmp_path):
             measurements=[],
             model_eval_dir=tmp_path,
             labels_path=labels_path,
+            candidate_config=tmp_path / "candidate-config.yaml",
             python_bin="python",
             work_dir=tmp_path / "w",
         )
@@ -856,6 +894,7 @@ def test_verify_live_model_eval_rewrites_categories_from_labels(tmp_path, monkey
         spec=spec,
         tasks_path=tasks_path,
         labels_path=labels_path,
+        candidate_config=tmp_path / "candidate-config.yaml",
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -863,6 +902,7 @@ def test_verify_live_model_eval_rewrites_categories_from_labels(tmp_path, monkey
         measurements=[],
         model_eval_dir=tmp_path / "scripts",
         python_bin="python",
+        management_endpoint="http://127.0.0.1:8080",
         work_dir=tmp_path / "work",
     )
     # every arm answered the same rewritten file, not the bound one
@@ -893,6 +933,7 @@ def test_verify_live_model_eval_missing_labels_is_actionable(tmp_path):
             spec=spec,
             tasks_path=tasks_path,
             labels_path=tmp_path / "absent-labels.jsonl",
+            candidate_config=tmp_path / "candidate-config.yaml",
             baseline_endpoint=BASE_ENDPOINT,
             candidate_endpoint=CAND_ENDPOINT,
             router_model=ROUTER_MODEL,
@@ -902,6 +943,71 @@ def test_verify_live_model_eval_missing_labels_is_actionable(tmp_path):
             python_bin="python",
             work_dir=tmp_path / "work",
         )
+
+
+def test_verify_live_model_eval_candidate_config_guards(tmp_path, monkeypatch):
+    # Y4: the candidate config is bound before any arm is dispatched - the
+    # file must exist, the management endpoint is mandatory, and the router
+    # must acknowledge an ACTIVE config whose source hash is the file's.
+    # Every guard fires before run_arm, so no arm ever answers an
+    # unverified router.
+    tasks_path = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    _write_labels(labels_path)
+    spec = ExperimentSpec.from_dict(_spec_dict())
+    config_path = tmp_path / "candidate-config.yaml"  # written by the fixture
+    common = {
+        "spec": spec,
+        "tasks_path": tasks_path,
+        "labels_path": labels_path,
+        "candidate_config": config_path,
+        "baseline_endpoint": BASE_ENDPOINT,
+        "candidate_endpoint": CAND_ENDPOINT,
+        "router_model": ROUTER_MODEL,
+        "repetitions": 1,
+        "measurements": [],
+        "model_eval_dir": tmp_path / "scripts",
+        "python_bin": "python",
+        "work_dir": tmp_path / "work",
+    }
+    with pytest.raises(ContractError, match="candidate config file not found"):
+        verify_live_model_eval(
+            **{**common, "candidate_config": tmp_path / "absent.yaml"}
+        )
+    with pytest.raises(
+        ContractError, match="--candidate-management-endpoint is required"
+    ):
+        verify_live_model_eval(**common)
+
+    def broken(url, **kwargs):
+        raise ReplayFetchError("management API returned HTTP 503")
+
+    monkeypatch.setattr("recipe_lab.model_eval_driver.fetch_config_hash", broken)
+    with pytest.raises(
+        ContractError, match="cannot check the candidate router's config"
+    ):
+        verify_live_model_eval(**common, management_endpoint="http://127.0.0.1:8080")
+    # the pending test uses the file's own hash: the failure is about the
+    # activation status, not a mismatch
+    monkeypatch.setattr(
+        "recipe_lab.model_eval_driver.fetch_config_hash",
+        lambda url, **kwargs: {
+            "activation_status": "pending",
+            "source_config_hash": hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        },
+    )
+    with pytest.raises(ContractError, match="not active"):
+        verify_live_model_eval(**common, management_endpoint="http://127.0.0.1:8080")
+    monkeypatch.setattr(
+        "recipe_lab.model_eval_driver.fetch_config_hash",
+        lambda url, **kwargs: {
+            "activation_status": "active",
+            "source_config_hash": "f" * 64,
+        },
+    )
+    with pytest.raises(ContractError, match="hashes to"):
+        verify_live_model_eval(**common, management_endpoint="http://127.0.0.1:8080")
 
 
 def test_verify_live_model_eval_empty_arm_is_inconclusive(tmp_path, monkeypatch):
@@ -937,6 +1043,7 @@ def test_verify_live_model_eval_empty_arm_is_inconclusive(tmp_path, monkeypatch)
         spec=spec,
         tasks_path=tasks_path,
         labels_path=labels_path,
+        candidate_config=tmp_path / "candidate-config.yaml",
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -944,6 +1051,7 @@ def test_verify_live_model_eval_empty_arm_is_inconclusive(tmp_path, monkeypatch)
         measurements=[],
         model_eval_dir=tmp_path / "scripts",
         python_bin="python",
+        management_endpoint="http://127.0.0.1:8080",
         work_dir=tmp_path / "work",
     )
     assert result["verdict"] == "INCONCLUSIVE"
@@ -969,6 +1077,7 @@ def test_verify_live_model_eval_constraint_not_measurable(tmp_path, monkeypatch)
         spec=spec,
         tasks_path=tasks_path,
         labels_path=labels_path,
+        candidate_config=tmp_path / "candidate-config.yaml",
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -976,6 +1085,7 @@ def test_verify_live_model_eval_constraint_not_measurable(tmp_path, monkeypatch)
         measurements=[],
         model_eval_dir=tmp_path / "scripts",
         python_bin="python",
+        management_endpoint="http://127.0.0.1:8080",
         work_dir=tmp_path / "work",
     )
     assert result["verdict"] == "INCONCLUSIVE"

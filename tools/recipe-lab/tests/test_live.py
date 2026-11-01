@@ -36,10 +36,23 @@ from tests.test_contract import _write_splits_dataset
 # VALID_SPEC's legacy workload hash (tests.fixtures); every FakeCli run doc
 # carries it so the M1 dataset binding passes unless a test overrides it.
 _LEGACY_HASH = "sha256:" + "0" * 64
+# Y4: the candidate run's manifest embeds the registered MoM target with its
+# frozen config_hash - live-verdict binds the candidate to that config.
+_MOM_CONFIG_HEX = "c" * 64
 _RUN_DOC = {
     "id": "run-x",
     "status": "completed",
-    "manifest": {"dataset": {"sha256": _LEGACY_HASH}},
+    "manifest": {
+        "dataset": {"sha256": _LEGACY_HASH},
+        "targets": [
+            {
+                "id": "mom-x",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+            }
+        ],
+    },
 }
 
 
@@ -198,6 +211,8 @@ def test_live_verdict_pass_flow():
     assert result["gates"] == {"pii-recall-floor": "pass"}
     assert result["undeclared_measurements"] == []
     assert result["bench_refs"] == ["run-a", "run-b"]
+    # Y4: the candidate's frozen config hash rides the result
+    assert result["config_sha256"] == "sha256:" + _MOM_CONFIG_HEX
 
 
 def test_live_verdict_baseline_floor_breach_fails():
@@ -415,8 +430,21 @@ class VerifyStub:
         self.ref_statuses = dict(ref_statuses or {})
         self.ref_reports: dict[str, dict] = {}
         self.ref_runs = 0
-        # R2: operator-registered targets, verbatim from the registry
-        self.registry = list(registry or [])
+        # R2: operator-registered targets, verbatim from the registry.
+        # Y4: the candidate MoM target must carry a frozen config_hash; a
+        # test that passes its own registry must include the mom target.
+        self.registry = (
+            list(registry)
+            if registry is not None
+            else [
+                {
+                    "id": "mom-router",
+                    "kind": "mom",
+                    "mode": "live",
+                    "config_hash": _MOM_CONFIG_HEX,
+                }
+            ]
+        )
         self.events: list[tuple] = []
         self.manifest_runs = 0
         self.compares: list[tuple] = []
@@ -510,9 +538,11 @@ def test_verify_live_pass_flow(tmp_path):
     assert result["metrics"] == {"baseline": 0.80, "candidate": 0.86}
     assert result["gates"] == {"pii-recall-floor": "pass"}
     assert result["preview"]["distribution"] == {"local/model-a": 7, "local/model-b": 5}
-    # AB/BA: preview first, then each pair runs baseline and candidate arms
-    # in alternating order (schedule: base0, cand0, cand1, base1)
+    # AB/BA: the Y4 registry check first, then preview, then each pair runs
+    # baseline and candidate arms in alternating order
+    # (schedule: base0, cand0, cand1, base1)
     assert stub.events == [
+        ("targets",),
         ("show", "run-base"),
         ("plan", "preview"),
         ("report", "run-preview"),
@@ -521,6 +551,8 @@ def test_verify_live_pass_flow(tmp_path):
         ("plan", "live"),
         ("manifest",),
     ]
+    # Y4: the frozen config hash of the registered MoM target
+    assert result["config_sha256"] == "sha256:" + _MOM_CONFIG_HEX
     assert stub.manifest_runs == 2
     assert len(stub.compares) == 2
     assert result["abba_summary"]["baseline"]["median"] == 0.80
@@ -828,6 +860,8 @@ def test_live_verdict_insight_refs_four_forms_merge_and_dedupe(
             "gates": {},
             "constraints": [],
             "bench_refs": ["run-a", "run-b"],
+            # Y4: the CLI ledger copies this into the record's candidate.
+            "config_sha256": "sha256:" + _MOM_CONFIG_HEX,
             "metrics": {"baseline": 0.5, "candidate": 0.6},
         },
     )
@@ -1067,6 +1101,8 @@ def test_live_cli_record_carries_constraint_evidence(monkeypatch, tmp_path, caps
                 }
             ],
             "bench_refs": ["run-a", "run-b"],
+            # Y4: the CLI ledger copies this into the record's candidate.
+            "config_sha256": "sha256:" + _MOM_CONFIG_HEX,
             "metrics": {"baseline": 0.5, "candidate": 0.6},
         }
 
@@ -1119,6 +1155,8 @@ def test_live_verdict_final_cites_frozen_test(monkeypatch, tmp_path, capsys):
             "gates": {},
             "constraints": [],
             "bench_refs": ["run-a", "run-b"],
+            # Y4: the CLI ledger copies this into the record's candidate.
+            "config_sha256": "sha256:" + _MOM_CONFIG_HEX,
             "metrics": {"baseline": 0.5, "candidate": 0.6},
         }
 
@@ -1211,7 +1249,10 @@ def test_live_verdict_accepts_bare_hexdigest_dataset_hash():
             return {
                 "id": run_id,
                 "status": "completed",
-                "manifest": {"dataset": {"sha256": "0" * 64}},
+                "manifest": {
+                    "dataset": {"sha256": "0" * 64},
+                    "targets": _RUN_DOC["manifest"]["targets"],
+                },
             }
 
         def compare(self, base, cand):
@@ -1256,7 +1297,10 @@ def test_live_verdict_binds_srbench_dataset_hash_when_declared():
             return {
                 "id": run_id,
                 "status": "completed",
-                "manifest": {"dataset": {"sha256": srbench_hex}},
+                "manifest": {
+                    "dataset": {"sha256": srbench_hex},
+                    "targets": _RUN_DOC["manifest"]["targets"],
+                },
             }
 
         def compare(self, base, cand):
@@ -2112,7 +2156,11 @@ def test_verify_reference_arms_bind_and_cache(tmp_path):
     stub = VerifyStub(
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
-        registry=[{"id": "ref-strong"}, {"id": "ref-weak"}],
+        registry=[
+            {"id": "mom-router", "config_hash": _MOM_CONFIG_HEX},
+            {"id": "ref-strong"},
+            {"id": "ref-weak"},
+        ],
     )
     stub.ref_reports = reports
     result = verify_live(cli=stub, **kwargs)
@@ -2153,7 +2201,11 @@ def test_verify_reference_arms_bind_and_cache(tmp_path):
     stub2 = VerifyStub(
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
-        registry=[{"id": "ref-strong"}, {"id": "ref-weak"}],
+        registry=[
+            {"id": "mom-router", "config_hash": _MOM_CONFIG_HEX},
+            {"id": "ref-strong"},
+            {"id": "ref-weak"},
+        ],
     )
     stub2.ref_reports = reports
     result2 = verify_live(cli=stub2, **kwargs)
@@ -2167,7 +2219,11 @@ def test_verify_failed_reference_arm_is_inconclusive(tmp_path):
     stub = VerifyStub(
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "failed", "ref-weak": "completed"},
-        registry=[{"id": "ref-strong"}, {"id": "ref-weak"}],
+        registry=[
+            {"id": "mom-router", "config_hash": _MOM_CONFIG_HEX},
+            {"id": "ref-strong"},
+            {"id": "ref-weak"},
+        ],
     )
     stub.ref_reports = {"ref-weak": _ref_report("ref-weak", 0.70)}
     result = verify_live(
@@ -2258,7 +2314,11 @@ def test_verify_manifest_injects_registry_single_arm(tmp_path):
         baseline_statuses=["completed", "completed"],
         compare_values=_ref_compare_payload(),
         ref_statuses={"ref-strong": "completed", "ref-weak": "completed"},
-        registry=[_REGISTRY_SINGLE, dict(_REGISTRY_SINGLE, id="ref-weak")],
+        registry=[
+            {"id": "mom-router", "config_hash": _MOM_CONFIG_HEX},
+            _REGISTRY_SINGLE,
+            dict(_REGISTRY_SINGLE, id="ref-weak"),
+        ],
     )
     stub.ref_reports = {
         "ref-strong": _ref_report("ref-strong", 0.85),
@@ -2312,7 +2372,10 @@ def test_verify_manifest_with_single_arm_submits_verbatim(tmp_path):
         work_dir=tmp_path,
     )
 
-    assert ("targets",) not in stub.events
+    # the Y4 registry check runs first; beyond it no registry re-fetch
+    # happens - the single arm comes from the manifest verbatim
+    assert stub.events[0] == ("targets",)
+    assert ("targets",) not in stub.events[1:]
     frozen = json.loads(
         (tmp_path / "baseline-manifest.submitted.json").read_text("utf-8")
     )
@@ -2343,7 +2406,119 @@ def test_verify_rejects_ambiguous_baseline_source(tmp_path):
         verify_live(
             baseline_run_id=None, baseline_manifest=None, **base_kwargs
         )
+    # the ambiguity check precedes the Y4 registry check: nothing ran
     assert stub.events == []
+
+
+def test_verify_rejects_target_without_config_hash(tmp_path):
+    # Y4: a live MoM target without a frozen config_hash cannot be bound to
+    # a config - the verdict would grade an unnamed recipe.
+    stub = VerifyStub(registry=[{"id": "mom-router", "kind": "mom"}])
+    with pytest.raises(ContractError, match="no frozen config_hash"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+    assert stub.events == [("targets",)]
+
+
+def test_verify_rejects_unregistered_candidate_target(tmp_path):
+    stub = VerifyStub()
+    with pytest.raises(ContractError, match="not registered"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-other"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+
+
+def test_verify_rejects_disagreeing_candidate_target_hashes(tmp_path):
+    stub = VerifyStub(
+        registry=[
+            {"id": "mom-router", "config_hash": "c" * 64},
+            {"id": "mom-router-2", "config_hash": "d" * 64},
+        ]
+    )
+    with pytest.raises(ContractError, match="disagree on config_hash"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-router", "mom-router-2"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+        )
+
+
+def test_live_verdict_rejects_candidate_without_config_hash():
+    # Y4: a candidate run whose manifest has no MoM config hash cannot
+    # name the config it graded - the verdict is never written.
+    class FakeCli:
+        def show(self, run_id):
+            return {
+                "id": run_id,
+                "status": "completed",
+                "manifest": {
+                    "dataset": {"sha256": _LEGACY_HASH},
+                    "targets": [{"id": "mom-x", "kind": "mom"}],
+                },
+            }
+
+        def compare(self, base, cand):
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
+
+    with pytest.raises(ContractError, match="config_hash"):
+        live_verdict_from_runs(
+            spec=_spec(),
+            cli=FakeCli(),
+            baseline_run_id="run-a",
+            candidate_run_id="run-b",
+            measurements=[],
+        )
+
+
+def test_live_verdict_rejects_conflicting_candidate_config_hashes():
+    class FakeCli:
+        def show(self, run_id):
+            return {
+                "id": run_id,
+                "status": "completed",
+                "manifest": {
+                    "dataset": {"sha256": _LEGACY_HASH},
+                    "targets": [
+                        {"id": "mom-x", "kind": "mom", "config_hash": "c" * 64},
+                        {"id": "mom-y", "kind": "mom", "config_hash": "d" * 64},
+                    ],
+                },
+            }
+
+        def compare(self, base, cand):
+            return {
+                "baseline": {"capability.score": 0.80},
+                "candidate": {"capability.score": 0.86},
+            }
+
+    with pytest.raises(ContractError, match="conflicting config"):
+        live_verdict_from_runs(
+            spec=_spec(),
+            cli=FakeCli(),
+            baseline_run_id="run-a",
+            candidate_run_id="run-b",
+            measurements=[],
+        )
 
 
 def test_verify_manifest_dataset_mismatch_rejected_before_submission(tmp_path):
@@ -2367,7 +2542,8 @@ def test_verify_manifest_dataset_mismatch_rejected_before_submission(tmp_path):
             work_dir=tmp_path,
         )
     assert stub.manifest_runs == 0
-    assert stub.events == []
+    # only the Y4 registry check ran; no run-dispatching call
+    assert stub.events == [("targets",)]
 
 
 def test_verify_manifest_check_binds_srbench_rendering(tmp_path):

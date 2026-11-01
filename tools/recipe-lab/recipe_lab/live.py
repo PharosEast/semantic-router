@@ -737,6 +737,45 @@ def require_run_datasets(
             )
 
 
+def candidate_config_hash_from_run(cli: SrbenchCli, run_id: str) -> str:
+    """Y4: the frozen config hash of the MoM target that served `run_id`.
+
+    The run document's manifest embeds the registered target documents
+    verbatim (R2), so the `config_hash` a live MoM target was registered
+    with is what actually served the run. Any mismatch between a run's
+    MoM targets, or a target without a frozen hash, is a ContractError -
+    a verdict that cannot name the config it graded is never written.
+    """
+    doc = cli.show(run_id)
+    manifest = doc.get("manifest") if isinstance(doc, dict) else None
+    entries = manifest.get("targets") if isinstance(manifest, dict) else None
+    if not isinstance(entries, list) or not entries:
+        raise ContractError(
+            f"candidate run {run_id} exposes no frozen targets in its run "
+            "document; cannot bind the verdict to a candidate config"
+        )
+    hashes = sorted(
+        {
+            str(entry["config_hash"])
+            for entry in entries
+            if isinstance(entry, dict)
+            and entry.get("kind") == "mom"
+            and entry.get("config_hash")
+        }
+    )
+    if not hashes:
+        raise ContractError(
+            f"candidate run {run_id} served no live MoM target with a frozen "
+            "config_hash; cannot bind the verdict to a candidate config"
+        )
+    if len(hashes) > 1:
+        raise ContractError(
+            f"candidate run {run_id} served targets with conflicting config "
+            f"hashes: {hashes}; the candidate arm must be one config"
+        )
+    return "sha256:" + hashes[0]
+
+
 def live_verdict_from_runs(
     *,
     spec: ExperimentSpec,
@@ -856,6 +895,9 @@ def live_verdict_from_runs(
         "constraints": verdict.constraints,
         "undeclared_measurements": undeclared,
         "bench_refs": [baseline_run_id, candidate_run_id],
+        # Y4: the frozen config hash of the MoM target that served the
+        # candidate run, so the ledger's candidate names the config graded.
+        "config_sha256": candidate_config_hash_from_run(cli, candidate_run_id),
         "paired": stats.to_dict() if stats else None,
         "evidence_quality": evidence,
         "references": reference_values,
@@ -1016,7 +1058,9 @@ def verify_live(
     `pareto` for the report.
 
     `targets` are the registered sr-bench MoM target ids the router is
-    serving the candidate config on. The preview run is diagnostic only:
+    serving the candidate config on. Each must be registered with a frozen
+    `config_hash` and all must agree (Y4): the result's `config_sha256`
+    names the config the verdict graded. The preview run is diagnostic only:
     a failed preview is recorded in the reasons but does not fail the
     verdict (it produces no quality numbers anyway).
 
@@ -1032,6 +1076,36 @@ def verify_live(
         raise ContractError(
             "verify needs exactly one of baseline_run_id or baseline_manifest"
         )
+    # Y4: the candidate arms' MoM targets must be registered with a frozen
+    # config hash, and all of them must agree - the ledger's candidate then
+    # names the exact config the verdict graded. Fail fast, before any run.
+    registry = {
+        entry.get("id"): entry
+        for entry in cli.targets()
+        if isinstance(entry, dict)
+    }
+    config_hashes: list[str] = []
+    for target_id in targets:
+        entry = registry.get(target_id)
+        if entry is None:
+            raise ContractError(
+                f"candidate target {target_id!r} is not registered in sr-bench; "
+                "the verify arms cannot bind to a frozen config"
+            )
+        target_hash = entry.get("config_hash")
+        if not target_hash:
+            raise ContractError(
+                f"candidate target {target_id!r} carries no frozen config_hash; "
+                "re-register it as a live MoM target so the verdict can name "
+                "the config it graded"
+            )
+        config_hashes.append("sha256:" + str(target_hash))
+    if len(set(config_hashes)) != 1:
+        raise ContractError(
+            f"candidate targets disagree on config_hash: {sorted(set(config_hashes))}; "
+            "the candidate arm must be one config"
+        )
+    config_sha256 = config_hashes[0]
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     if baseline_manifest is not None:
@@ -1394,6 +1468,9 @@ def verify_live(
         "constraints": verdict.constraints,
         "undeclared_measurements": undeclared,
         "bench_refs": bench_refs,
+        # Y4: the frozen config hash of the MoM targets the candidate arms
+        # ran on, so the ledger's candidate names the config graded.
+        "config_sha256": config_sha256,
         # R2: the resolved baseline run id (either --baseline-run-id or the run
         # submitted from --baseline-manifest), so the CLI ledger can cite it.
         "baseline_run_id": baseline_run_id,

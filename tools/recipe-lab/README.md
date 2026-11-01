@@ -222,6 +222,10 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
   用量未知序列化为 null → 约束不可评估 → INCONCLUSIVE（绝不记 0，也绝不记违规）。
   约束证据进入裁决输出与台账记录（`constraints` 字段），供报告重放。
   replay 层的代理评估见下节（E2）。
+- **候选配置绑定（Y4）**：两个 run 的 `manifest.targets` 里的 live MoM target
+  都必须带冻结 `config_hash`，且相互一致；裁决结果与台账
+  `candidate.config_sha256` 记录这份哈希（`sha256:` 前缀）。`--final` 晋升
+  裁决在台账写 `final: true`（live 层专属；bundle 以此识别晋升记录）。
 
 ## verify（驱动 sr-bench 的端到端终裁，I）
 
@@ -238,6 +242,10 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
 INCONCLUSIVE 与工具/用法错误 2（`verdict_exit_code`）。`--candidate-targets` 指定服务候选的 sr-bench MoM target，
 缺省回退到候选 JSON 的 `srbench_targets`。守卫与约束语义与 `live-verdict`
 一致（A3/E）；`--split frozen_test` 同样只留给 `--final` 晋升裁决。
+候选配置绑定（Y4）：verify 先在 sr-bench 注册表核对 `--candidate-targets` 的
+每个 MoM target 都已注册且带冻结 `config_hash`，多 target 哈希不一致即拒绝；
+结果与台账 `candidate.config_sha256` 记录该哈希，`--final` 产出带
+`final: true` 的台账晋升记录。
 
 ### model_eval 驱动（C7）
 
@@ -255,9 +263,17 @@ C2 的 labels 文件，稀有标签合并与未覆盖题归 other 都由驱动�
 用同一组比率键与上限，M4 参照臂按（改写后题集哈希, 别名）缓存。准确率
 按计划分母计（缺答/漏答计错）；某个臂崩溃是操作性错误（脚本可续跑，
 exit 2），臂产不出 judged 行是证据不完整（INCONCLUSIVE）。必填：
-`--tasks`、`--labels`、`--baseline-router-endpoint`、
+`--tasks`、`--labels`、`--candidate-config`、
+`--candidate-management-endpoint`、`--baseline-router-endpoint`、
 `--candidate-router-endpoint`、`--model-eval-dir`；sr-bench 相关旗标在此
 模式下被忽略，`--baseline-run-id`/`--baseline-manifest` 会被拒绝。
+
+**候选配置绑定（Y4）**：`--candidate-config` 的 sha256 写入结果与台账
+`candidate.config_sha256`，且候选 router 的管理 API（`GET
+/api/v1/config/hash`）必须确认一份已激活（`activation_status: active`）、
+source hash 与该文件一致的配置——路由器还在跑旧文档时任何臂都不派发，
+直接 exit 2，绝不给错配置打分。管理端点因此必填（随机混合 R 的 replay
+查询同用它）。
 
 **成本匹配随机混合 R（C8）**：驱动由 candidate 臂的 replay 记录得到
 路由分布 p_m——router 场景的 record 按 prompt 与实际路由决策 join
