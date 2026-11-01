@@ -1582,6 +1582,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 tasks_path=args.tasks,
                 baseline_endpoint=args.baseline_router_endpoint,
                 candidate_endpoint=args.candidate_router_endpoint,
+                management_endpoint=args.candidate_management_endpoint,
                 router_model=args.router_model,
                 repetitions=args.repetitions,
                 measurements=measurements,
@@ -1642,7 +1643,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
         ]
         if preview.get("run_id"):
             notes_parts.append(f"preview_run={preview['run_id']}")
-        distribution = preview.get("distribution")
+        # the model_eval driver has no sr-bench preview: its distribution
+        # rides the result (alias-keyed shares behind the random mix R)
+        distribution = preview.get("distribution") or result.get("distribution")
         if distribution:
             notes_parts.append(
                 "routing_distribution="
@@ -2594,6 +2597,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="model_eval driver: OpenAI v1 base of the router serving the "
         "candidate config (required for that driver)",
+    )
+    p_verify.add_argument(
+        "--candidate-management-endpoint",
+        default=None,
+        help="model_eval driver: router management base URL of the router "
+        "serving the candidate config (e.g. http://127.0.0.1:8080); its "
+        "replay records provide the routing distribution behind the random "
+        "mix R - without it the mix is not evaluable",
     )
     p_verify.add_argument(
         "--router-model",

@@ -981,6 +981,7 @@ _FAKE_MODEL_EVAL_RESULT = {
     "evidence_quality": {},
     "references": {},
     "pareto": [],
+    "distribution": {"STRONG": 0.6, "WEAK": 0.4},
     "driver": "model_eval",
     "tasks_hash": "sha256:ab",
     "planned_cases": 1,
@@ -1025,12 +1026,16 @@ def test_verify_model_eval_driver_runs_without_srbench(tmp_path, capsys, monkeyp
         return dict(_FAKE_MODEL_EVAL_RESULT)
 
     monkeypatch.setattr(cli_module, "verify_live_model_eval", fake_verify)
-    assert main(_model_eval_verify_args(spec_path, tmp_path, candidate)) == 0
+    assert main(
+        _model_eval_verify_args(spec_path, tmp_path, candidate)
+        + ["--candidate-management-endpoint", "http://127.0.0.1:8080"]
+    ) == 0
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "PASS"
     assert captured["tasks_path"] == str(tmp_path / "tasks.jsonl")
     assert captured["baseline_endpoint"] == "http://127.0.0.1:9001/v1"
     assert captured["candidate_endpoint"] == "http://127.0.0.1:9002/v1"
+    assert captured["management_endpoint"] == "http://127.0.0.1:8080"
     assert captured["router_model"] == "vllm-sr/auto"
 
 
@@ -1066,6 +1071,8 @@ def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
     assert record["round"] == 2
     assert record["baseline_ref"] is None  # no sr-bench run behind this evidence
     assert "repetitions=1" in record["notes"]
+    # the model_eval driver's distribution rides the result, not a preview
+    assert "routing_distribution=" in record["notes"]
 
 
 def test_verify_model_eval_rejects_srbench_baseline(tmp_path, capsys):

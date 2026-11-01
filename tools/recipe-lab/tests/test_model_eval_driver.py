@@ -4,13 +4,16 @@ import json
 from pathlib import Path
 
 import pytest
+from recipe_lab.adapters.router_replay import (
+    ReplayFetchError,
+    routing_shares_from_replays,
+)
 from recipe_lab.contract import API_VERSION, ContractError, ExperimentSpec
 from recipe_lab.live import paired_stats_from_comparison
 from recipe_lab.model_eval_driver import (
     arm_quality_rates,
     paired_stats_from_judged,
     random_mix_paired_stats,
-    routing_shares_from_records,
     run_arm,
     verify_live_model_eval,
 )
@@ -99,17 +102,13 @@ def _judged_rows(tasks: list[dict], correct_ids: set[str]) -> list[dict]:
     ]
 
 
-def _fake_run_arm(
-    correct_by_arm: dict[str, set[str]],
-    model_by_arm: dict[str, list[str]] | None = None,
-):
+def _fake_run_arm(correct_by_arm: dict[str, set[str]]):
     """A run_arm stand-in: writes judged+records driven by the plan.
 
     `correct_by_arm` keys match the endpoint for router arms and the
-    served model name for reference arms. `model_by_arm` (C8) maps the
-    same keys to one responding-model name per task index, written into
-    each record; when omitted the records carry no model field (the
-    pre-C8 script shape). Returns (fake, calls).
+    served model name for reference arms. The records carry no responding
+    model (the generation script's shape): the routing distribution is
+    replay evidence, not a record field. Returns (fake, calls).
     """
     calls: list[dict] = []
 
@@ -141,23 +140,16 @@ def _fake_run_arm(
             "".join(json.dumps(r, sort_keys=True) + "\n" for r in judged),
             encoding="utf-8",
         )
-        model_plan = (
-            model_by_arm.get(endpoint, model_by_arm.get(model))
-            if model_by_arm is not None
-            else None
-        )
-        records = []
-        for i, task in enumerate(tasks):
-            record = {
+        records = [
+            {
                 "task_id": task["task_id"],
                 "prompt_tokens": 100,
                 "completion_tokens": 10,
                 "latency_s": 0.5,
                 "error": None,
             }
-            if model_plan is not None:
-                record["model"] = model_plan[i]
-            records.append(record)
+            for task in tasks
+        ]
         (out / "records.jsonl").write_text(
             "".join(json.dumps(r, sort_keys=True) + "\n" for r in records),
             encoding="utf-8",
@@ -275,18 +267,33 @@ def test_arm_quality_rates_rates_and_missing():
     assert arm_quality_rates(rows, planned_cases=0) is None
 
 
-def test_routing_shares_from_records():
-    rows = [
-        {"model": "m-a", "error": None},
-        {"model": "m-b", "error": None},
-        {"model": "m-a", "error": None},
-        {"error": "boom"},  # failed request: no model, no share
-        {"model": "  ", "error": None},  # blank: not routing evidence
+def test_routing_shares_from_replays():
+    # the routing distribution joins the candidate router's replay records
+    # by prompt; failed records and model-less records are no routing
+    # decision, and prompts outside the task set are not this arm's traffic
+    prompts = {"question 0", "question 1"}
+    records = [
+        {"prompt": "question 0", "selected_model": "m-a"},
+        {"prompt": "question 0", "SelectedModel": "m-b"},
+        {"prompt": "question 1", "selected_model": "m-a"},
+        {"prompt": "question 1", "lifecycle_state": "failed", "selected_model": "m-a"},
+        {"prompt": "question 1", "selected_model": "  "},
+        {"prompt": "other", "selected_model": "m-z"},
+        {"selected_model": "m-a"},  # no prompt: unmatched
     ]
-    shares = routing_shares_from_records(rows)
+    shares, stats = routing_shares_from_replays(records, prompts)
     assert shares == {"m-a": 2 / 3, "m-b": 1 / 3}
-    assert routing_shares_from_records([{"task_id": "t"}]) is None
-    assert routing_shares_from_records([]) is None
+    assert stats == {"matched": 5, "failed": 1, "no_model": 1, "total": 7}
+    # nothing countable -> unknown, never guessed
+    assert routing_shares_from_replays([], prompts) == (
+        None,
+        {"matched": 0, "failed": 0, "no_model": 0, "total": 0},
+    )
+    only_failed = [{"prompt": "question 0", "lifecycle_state": "failed"}]
+    failed_shares, failed_stats = routing_shares_from_replays(only_failed, prompts)
+    assert failed_shares is None
+    assert failed_stats["matched"] == 1
+    assert failed_stats["failed"] == 1
 
 
 def test_random_mix_paired_stats_matches_analytic():
@@ -483,11 +490,12 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     cached_keys = json.loads(run_cache.read_text(encoding="utf-8"))
     assert len(cached_keys) == 2
     assert all(key.startswith(result["tasks_hash"]) for key in cached_keys)
-    # C8: these records carry no responding model, so the random mix is
-    # unknown - reported with a reason, never guessed
+    # no management endpoint: the routing distribution is unknown, so the
+    # random mix is unevaluable with a reason - never guessed
     assert result["random_mix"]["evaluable"] is False
-    assert "no responding model" in result["random_mix"]["reason"]
+    assert "no --candidate-management-endpoint" in result["random_mix"]["reason"]
     assert result["random_mix"]["expected_accuracy"] is None
+    assert result["distribution"] is None
 
     # a second verify reuses the reference arms (same tasks hash + alias)
     result2 = verify_live_model_eval(
@@ -511,23 +519,29 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
 
 
 def test_verify_live_model_eval_random_mix(tmp_path, monkeypatch):
-    # C8: the candidate router sends 3 of every 5 cases to STRONG (served
+    # C8: the candidate router routes 3 of every 5 cases to STRONG (served
     # name defaults to the alias) and the rest to the weak model's served
-    # name; the mix resolves against the reference arms and anchors a
-    # `ref:random_mix` constraint.
+    # name; the routing distribution comes from the candidate router's
+    # replay store, fetched from the management endpoint. The mix resolves
+    # against the reference arms and anchors a `ref:random_mix` constraint.
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
     _, plan = _golden_plan()
-    model_plan = {
-        BASE_ENDPOINT: [STRONG] * N_TASKS,
-        CAND_ENDPOINT: [
-            STRONG if i % 5 < 3 else "plain-served" for i in range(N_TASKS)
-        ],
-        STRONG: [STRONG] * N_TASKS,
-        "plain-served": ["plain-served"] * N_TASKS,
-    }
-    fake, _ = _fake_run_arm(plan, model_plan)
+    fake, _ = _fake_run_arm(plan)
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
+    fetch_urls: list[str] = []
+
+    def fake_fetch(url):
+        fetch_urls.append(url)
+        return [
+            {
+                "prompt": f"question {i}",
+                "selected_model": STRONG if i % 5 < 3 else "plain-served",
+            }
+            for i in range(N_TASKS)
+        ]
+
+    monkeypatch.setattr("recipe_lab.model_eval_driver.fetch_replays", fake_fetch)
     spec_dict = _spec_dict()
     # price the weak model too, so R's expected cost is computable
     spec_dict["cost_basis"]["assumed_pricing"][WEAK] = {
@@ -548,6 +562,7 @@ def test_verify_live_model_eval_random_mix(tmp_path, monkeypatch):
         tasks_path=tasks_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
+        management_endpoint="http://127.0.0.1:8080",
         router_model=ROUTER_MODEL,
         repetitions=1,
         measurements=[],
@@ -556,10 +571,12 @@ def test_verify_live_model_eval_random_mix(tmp_path, monkeypatch):
         work_dir=tmp_path / "work",
     )
 
+    assert fetch_urls == ["http://127.0.0.1:8080"]
     mix = result["random_mix"]
     assert mix["evaluable"] is True
     assert mix["reason"] is None
     assert mix["shares"] == {STRONG: 0.6, WEAK: 0.4}
+    assert result["distribution"] == {STRONG: 0.6, WEAK: 0.4}
     assert mix["expected_accuracy"] == pytest.approx(0.6)  # 0.6*1.0 + 0.4*0.0
     strong_case = (100 * 0.5 + 10 * 1.0) / 1e6
     weak_case = (100 * 0.2 + 10 * 0.4) / 1e6
@@ -597,14 +614,16 @@ def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
     _, plan = _golden_plan()
-    model_plan = {
-        BASE_ENDPOINT: [STRONG] * N_TASKS,
-        CAND_ENDPOINT: ["mystery-served"] * N_TASKS,
-        STRONG: [STRONG] * N_TASKS,
-        "plain-served": ["plain-served"] * N_TASKS,
-    }
-    fake, _ = _fake_run_arm(plan, model_plan)
+    fake, _ = _fake_run_arm(plan)
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
+
+    def fake_fetch(url):
+        return [
+            {"prompt": f"question {i}", "selected_model": "mystery-served"}
+            for i in range(N_TASKS)
+        ]
+
+    monkeypatch.setattr("recipe_lab.model_eval_driver.fetch_replays", fake_fetch)
     spec_dict = _spec_dict()
     spec_dict["objective"]["constraints"] = [
         {
@@ -620,6 +639,7 @@ def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
         tasks_path=tasks_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
+        management_endpoint="http://127.0.0.1:8080",
         router_model=ROUTER_MODEL,
         repetitions=1,
         measurements=[],
@@ -630,11 +650,79 @@ def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
     mix = result["random_mix"]
     assert mix["evaluable"] is False
     assert "outside spec.models" in mix["reason"]
+    assert result["distribution"] is None
     assert mix["expected_accuracy"] is None
     assert result["constraints"][0]["status"] == "not_evaluated"
     assert result["verdict"] == "INCONCLUSIVE"
     assert not any(row["id"] == "ref:random_mix" for row in result["pareto"])
     assert "meval:reference:random_mix" not in result["bench_refs"]
+
+
+def test_verify_live_model_eval_random_mix_replay_gaps(tmp_path, monkeypatch):
+    # the distribution evidence cannot be faked: no management endpoint, a
+    # failed fetch, or no matching replay each keep R unevaluable with the
+    # gap named, the ref:random_mix constraint unevaluated and the verdict
+    # INCONCLUSIVE
+    tasks_path = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks_path)
+    _, plan = _golden_plan()
+    fake, _ = _fake_run_arm(plan)
+    monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
+    spec_dict = _spec_dict()
+    spec_dict["objective"]["constraints"] = [
+        {
+            "name": "beat-mix",
+            "metric": "accuracy",
+            "op": "gte",
+            "bound": "ref:random_mix",
+        }
+    ]
+    spec = ExperimentSpec.from_dict(spec_dict)
+    common = {
+        "spec": spec,
+        "tasks_path": tasks_path,
+        "baseline_endpoint": BASE_ENDPOINT,
+        "candidate_endpoint": CAND_ENDPOINT,
+        "router_model": ROUTER_MODEL,
+        "repetitions": 1,
+        "measurements": [],
+        "model_eval_dir": tmp_path / "scripts",
+        "python_bin": "python",
+        "work_dir": tmp_path / "work",
+    }
+    results = [verify_live_model_eval(**common)]
+
+    def broken_fetch(url):
+        raise ReplayFetchError("management API returned HTTP 500")
+
+    monkeypatch.setattr("recipe_lab.model_eval_driver.fetch_replays", broken_fetch)
+    results.append(
+        verify_live_model_eval(**common, management_endpoint="http://127.0.0.1:8080")
+    )
+
+    monkeypatch.setattr(
+        "recipe_lab.model_eval_driver.fetch_replays",
+        lambda url: [{"prompt": "unrelated", "selected_model": "m-a"}],
+    )
+    results.append(
+        verify_live_model_eval(**common, management_endpoint="http://127.0.0.1:8080")
+    )
+
+    no_endpoint, fetch_failed, no_match = results
+    assert "no --candidate-management-endpoint" in no_endpoint["random_mix"]["reason"]
+    assert "replay fetch failed" in fetch_failed["random_mix"]["reason"]
+    assert (
+        "no replay record with a selected model matches"
+        in no_match["random_mix"]["reason"]
+    )
+    for result in results:
+        assert result["random_mix"]["evaluable"] is False
+        assert result["random_mix"]["expected_accuracy"] is None
+        assert result["distribution"] is None
+        assert result["constraints"][0]["status"] == "not_evaluated"
+        assert result["verdict"] == "INCONCLUSIVE"
+        assert not any(row["id"] == "ref:random_mix" for row in result["pareto"])
+        assert "meval:reference:random_mix" not in result["bench_refs"]
 
 
 def test_verify_live_model_eval_input_guards(tmp_path):

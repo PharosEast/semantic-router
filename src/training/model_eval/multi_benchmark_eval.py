@@ -6,10 +6,7 @@ dataset?, category?, language?, ...) and sends concurrent chat completion
 requests to a vLLM endpoint. Supports reasoning-mode injection via
 --chat-template-kwargs for thinking models (DeepSeek/Qwen).
 
-Output: records.jsonl with per-question metadata (completion, tokens,
-latency) plus the responding `model` - for a router endpoint this is the
-backend that actually served the call, which is how the router's routing
-distribution is observed.
+Output: records.jsonl with per-question metadata (completion, tokens, latency).
 
 Resumable: if the output file already exists, completed task_ids are skipped.
 
@@ -77,16 +74,12 @@ def gen_one(task, client, model, params, chat_template_kwargs, request_timeout):
 
     err = None
     chunks, finish, usage, ttft, t0 = [], None, {}, None, 0.0
-    response_model = None
     for attempt in range(3):
         try:
             t0 = time.time()
             chunks, finish, usage, ttft = [], None, {}, None
-            response_model = None
             with client.chat.completions.create(**kwargs) as stream:
                 for chunk in stream:
-                    if response_model is None and getattr(chunk, "model", None):
-                        response_model = chunk.model
                     if chunk.usage:
                         usage = chunk.usage.model_dump()
                     for ch in chunk.choices or []:
@@ -99,7 +92,7 @@ def gen_one(task, client, model, params, chat_template_kwargs, request_timeout):
                             finish = ch.finish_reason
             err = None
             break
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
             err = repr(e)
             time.sleep(5 * (attempt + 1))
 
@@ -109,7 +102,6 @@ def gen_one(task, client, model, params, chat_template_kwargs, request_timeout):
         "category": task.get("category"),
         "language": task.get("language"),
         "difficulty": task.get("difficulty"),
-        "model": response_model,
         "completion": "".join(chunks),
         "prompt_tokens": usage.get("prompt_tokens"),
         "completion_tokens": usage.get("completion_tokens"),
@@ -186,7 +178,7 @@ def main():
                     if rec.get("error") is None:
                         done.add(rec["task_id"])
                         kept_lines.append(line.rstrip("\n"))
-                except Exception:  # noqa: BLE001, S110
+                except Exception:
                     pass
         # Rewrite file with only successful records, dropping failed ones
         # so retried tasks don't accumulate duplicates.
