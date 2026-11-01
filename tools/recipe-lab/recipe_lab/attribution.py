@@ -146,6 +146,9 @@ class CaseInput:
     routed: str
     answer_ok: bool | None
     family: str | None = None
+    # Router label (category) for category-keyed oracle mappings; empty for
+    # legacy label-truth records (F1).
+    category: str = ""
     signal_values: dict[str, float] = field(default_factory=dict)
     signal_confidences: dict[str, float] = field(default_factory=dict)
 
@@ -184,6 +187,11 @@ class CaseInput:
                 f"attribution record line {lineno}: family must be a non-empty string when present"
             )
         where = f"attribution record line {lineno}"
+        category = raw.get("category", "")
+        if not isinstance(category, str):
+            raise ContractError(
+                f"{where}: category must be a string when present, got {category!r}"
+            )
         return cls(
             case_id=raw["case_id"],
             truth=truth,
@@ -191,6 +199,7 @@ class CaseInput:
             routed=raw["routed"],
             answer_ok=answer_ok,
             family=family,
+            category=category,
             signal_values=_require_number_map(
                 raw.get("signal_values", {}), f"{where}: signal_values"
             ),
@@ -339,10 +348,18 @@ def _judge_signal(name: str, fact: Any, evidence: dict[str, float]) -> dict[str,
 def _expectation_for(case: CaseInput, policy: OraclePolicy) -> Expectation | None:
     """Resolve the oracle-policy expectation for one case: signal-fact truth
     evaluates the declared rules top-down (F2); string truth uses the legacy
-    label mapping (the label is itself the intended decision)."""
+    label mapping (the label is itself the intended decision). A non-empty
+    category resolves the category-keyed mapping first: the replay/cold-start
+    oracle declares category -> model, and the decision name is
+    candidate-internal (it varies per candidate), so that expectation
+    constrains only the model route (decision="")."""
     signals = case.truth_signals
     if signals is not None:
         return policy.evaluate(signals)
+    if case.category:
+        expected_model = policy.expected(case.category)
+        if expected_model is not None:
+            return Expectation(decision="", models=(expected_model,))
     expected_model = policy.expected(case.truth)
     if expected_model is None:
         return None
@@ -404,7 +421,11 @@ def classify_case(case: CaseInput | dict, policy: OraclePolicy) -> dict[str, Any
     if case.answer_ok is None:
         row["error_class"] = NO_EVIDENCE
         return row
-    decision_ok = case.matched_decision == expectation.decision
+    # an empty expected decision means the expectation constrains only the
+    # model route (category-keyed mapping; the decision name is internal)
+    decision_ok = (
+        not expectation.decision or case.matched_decision == expectation.decision
+    )
     models_ok = not expectation.models or case.routed in expectation.models
     routed_as_expected = decision_ok and models_ok
     if case.answer_ok:

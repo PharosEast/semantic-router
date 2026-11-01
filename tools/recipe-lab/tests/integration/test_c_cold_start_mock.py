@@ -217,7 +217,7 @@ def test_cold_start_model_eval_chain_end_to_end(
         "objective": {
             "metric_key": METRIC_KEY,
             "direction": "maximize",
-            "min_improvement_pct": 1.0,
+            "min_improvement_pp": 1.0,
             "min_cases": 2,
             "replay_metric": "routed_accuracy",
         },
@@ -343,7 +343,16 @@ def test_cold_start_model_eval_chain_end_to_end(
     assert lam0["metrics"]["routed_accuracy"] > lam10["metrics"]["routed_accuracy"]
 
     # The lambda-10 sidecar: one route-team-model-a decision covering every
-    # observed label (cost dominates every per-label accuracy).
+    # observed label (cost dominates every per-label accuracy). The observed
+    # labels are the scaffold's domains - the classifier's labels on calib,
+    # which on this stack never surface a clean "history" domain - so
+    # coverage is pinned against the scaffold, not the fixture categories.
+    scaffold10 = yaml.safe_load(
+        (work / "cands" / "scaffold-lambda-10.yaml").read_text(encoding="utf-8")
+    )
+    observed_labels = {
+        domain["name"] for domain in scaffold10["routing"]["signals"]["domains"]
+    }
     sidecar10 = json.loads(
         (work / "cands" / "candidate-lambda-10.provenance.json").read_text(
             encoding="utf-8"
@@ -353,7 +362,7 @@ def test_cold_start_model_eval_chain_end_to_end(
     assert len(decisions10) == 1
     assert decisions10[0]["name"] == "route-team-model-a"
     assert decisions10[0]["model_refs"][0] == ALIAS_A
-    assert set(decisions10[0]["labels"]) >= set(CATEGORIES)
+    assert set(decisions10[0]["labels"]) == observed_labels
     assert sidecar10["default_model"] == ALIAS_A
 
     # The lambda-0 sidecar: each plan-correct model leads at least one

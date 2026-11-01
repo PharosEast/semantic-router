@@ -436,7 +436,12 @@ def evaluate_candidate(
         type(
             "CaseJoin",
             (),
-            {"case_id": c["case_id"], "prompt": c["prompt"], "truth": c["truth"]},
+            {
+                "case_id": c["case_id"],
+                "prompt": c["prompt"],
+                "truth": c["truth"],
+                "category": c.get("category") or "",
+            },
         )
         for c in cases
     ]
@@ -809,6 +814,7 @@ class HotReloadSession:
                 case_id=str(case["case_id"]),
                 prompt=str(case["prompt"]),
                 truth=str(case["truth"]),
+                category=str(case.get("category") or ""),
             )
             statuses[str(case["case_id"])] = _send_prompt(
                 router_url,

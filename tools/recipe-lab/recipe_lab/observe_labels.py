@@ -276,11 +276,24 @@ def labels_from_records(
             stats["duplicate_record"] += 1
             continue
         seen_request_ids.add(request_id)
+        # The record's `category` is the classifier's selected domain - the
+        # router fills it on every request (extproc recorder), and it is the
+        # observation target of C2 and of the Y2 seed-vs-candidate agreement.
+        # Older records may only carry the matched decision name, whose
+        # spelling differs per config (seed decisions are domain-named while
+        # bootstrap candidates name decisions `route-<model>`), so fall back
+        # to the decision spelling for those.
+        category = str(record.get("category") or record.get("Category") or "").strip()
         decision = str(record.get("decision") or record.get("Decision") or "")
+        label = (
+            category
+            if category in SUPPORTED_ROUTING_DOMAINS
+            else label_for_decision(decision)
+        )
         rows.append(
             {
                 "case_id": str(case["case_id"]),
-                "router_label": label_for_decision(decision),
+                "router_label": label,
                 "confidence": extract_confidence(record),
             }
         )

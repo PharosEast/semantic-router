@@ -103,6 +103,19 @@ def _answer_for(model: str, prompt: str) -> str:
 # accounting (engine marks the case `quality_failure: "output_limit"`).
 TRUNCATION_MAX_TOKENS = 16
 
+# Per-model completion verbosity (C6 cold-start): the cost-aware candidate
+# ranking consumes the measured mean completion_tokens per model, so the
+# expensive lane must emit more tokens than the cheap lane or cost carries
+# no signal on the mock stack (norm_cost is 1.0 for every model and the
+# lambda scan degenerates to pure accuracy). Smoke models keep the default.
+_COMPLETION_TOKENS = {"team/model-b": 8}
+_DEFAULT_COMPLETION_TOKENS = 2
+
+
+def _completion_tokens(model: str) -> int:
+    return _COMPLETION_TOKENS.get(model, _DEFAULT_COMPLETION_TOKENS)
+
+
 # Per-completion artificial latency (seconds): keeps sr-bench arms in
 # flight long enough for fault-injection polls to observe them, standing
 # in for duplicating the case set many times over.
@@ -110,6 +123,7 @@ _DELAY_STATE: dict[str, float] = {"seconds": 0.0}
 
 
 def _completion(model: str, content: str, finish_reason: str = "stop") -> bytes:
+    completion_tokens = _completion_tokens(model)
     return json.dumps(
         {
             "id": "chatcmpl-mock",
@@ -122,7 +136,11 @@ def _completion(model: str, content: str, finish_reason: str = "stop") -> bytes:
                     "finish_reason": finish_reason,
                 }
             ],
-            "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
+            "usage": {
+                "prompt_tokens": 8,
+                "completion_tokens": completion_tokens,
+                "total_tokens": 8 + completion_tokens,
+            },
         }
     ).encode("utf-8")
 
@@ -197,8 +215,8 @@ class Handler(BaseHTTPRequestHandler):
             "choices": [{"index": 0, "delta": {}, "finish_reason": finish_reason}],
             "usage": {
                 "prompt_tokens": 16,
-                "completion_tokens": 2,
-                "total_tokens": 18,
+                "completion_tokens": _completion_tokens(model),
+                "total_tokens": 16 + _completion_tokens(model),
                 "prompt_tokens_details": {"cached_tokens": 0},
             },
         }

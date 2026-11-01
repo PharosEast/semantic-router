@@ -366,6 +366,19 @@ def complete_candidate(
     deployments/system pinning.
     """
     domains = _scaffold_domains(scaffold)
+    # result_to_config scores cost-aware candidates as acc - λ*norm_cost,
+    # which goes negative for large lambdas; the router only accepts domain
+    # scores in [0, 1]. Clamp the emitted values in place - the score ORDER
+    # (what the static selector consumes) is untouched.
+    for domain in domains.values():
+        for score in domain["model_scores"]:
+            try:
+                score["score"] = min(1.0, max(0.0, float(score.get("score", 0.0))))
+            except (TypeError, ValueError) as exc:
+                raise ContractError(
+                    f"scaffold domain {domain.get('name')!r} has a non-numeric "
+                    f"model score: {score.get('score')!r}"
+                ) from exc
     default_model = _lambda_default_model(domains)
 
     # Group labels by their cost-aware first place; order groups (and
