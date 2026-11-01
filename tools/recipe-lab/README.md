@@ -254,6 +254,16 @@ compare 字段形状），M3 证据质量用同一组比率键与上限，M4 参
 `--candidate-router-endpoint`、`--model-eval-dir`；sr-bench 相关旗标在此
 模式下被忽略，`--baseline-run-id`/`--baseline-manifest` 会被拒绝。
 
+**成本匹配随机混合 R（C8）**：C7 起脚本在每条 record 里记录响应的
+`model`（router 场景即实际接单的后端）。驱动由 candidate 臂 records 得到
+路由分布 p_m（按 `spec.models` 的 served name 映射到别名），按份额混合
+参照臂的逐题对错与单例成本，得到随机混合 R 的期望准确率/成本，并给出
+C−R 的配对 bootstrap 区间（每次重采样 R 都按份额重新分配）。R 以
+`ref:random_mix` 角色进入裁决输入（约束 `bound` 可用）、追加一条
+`ref:random_mix` Pareto 行，区间写入结果的 `random_mix` 节（P3 的
+「准确率差区间下界 > 0」由此计算）。缺证据时（records 无 model、路由到
+`spec.models` 之外、参照臂缺失）R 不可评估并给出原因，绝不猜值。
+
 ## 记录格式（归因输入）
 
 每行一个 JSON 对象（router_replay 适配器产出同此形状）：
