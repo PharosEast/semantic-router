@@ -36,6 +36,8 @@ def _spec_dict(**overrides):
             "min_cases": 10,
             "min_improvement_pp": 0.0,
         },
+        # default min_label_cases is 20; the fixtures use 15 cases per label
+        "profile": {"min_label_cases": 2},
         "workloads": [
             {
                 "name": "cold",
@@ -80,6 +82,17 @@ def _write_tasks(path: Path, n: int = N_TASKS) -> None:
             "category": "math" if i % 2 == 0 else "law",
             "answer": "A",
         }
+        for i in range(n)
+    ]
+    path.write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8"
+    )
+
+
+def _write_labels(path: Path, n: int = N_TASKS) -> None:
+    """C2-shaped labels matching the tasks' own categories (math/law)."""
+    rows = [
+        {"case_id": f"t{i}", "router_label": "math" if i % 2 == 0 else "law"}
         for i in range(n)
     ]
     path.write_text(
@@ -413,6 +426,8 @@ def test_run_arm_argv_outputs_and_missing_script(tmp_path, monkeypatch):
 def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    _write_labels(labels_path)
     _, plan = _golden_plan()
     fake, calls = _fake_run_arm(plan)
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
@@ -422,6 +437,7 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     result = verify_live_model_eval(
         spec=spec,
         tasks_path=tasks_path,
+        labels_path=labels_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -445,6 +461,12 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     assert result["driver"] == "model_eval"
     assert result["planned_cases"] == N_TASKS
     assert result["tasks_hash"].startswith("sha256:")
+    assert result["labels_sha256"].startswith("sha256:")
+    assert result["labeled_tasks_sha256"].startswith("sha256:")
+    # labels matching the tasks' own categories rewrite byte-identically
+    assert result["labeled_tasks_sha256"] == result["tasks_hash"]
+    assert result["label_merges"] == {}
+    assert result["uncovered_cases"] == 0
     assert result["preview"] is None
     assert result["baseline_run_id"] is None
     # M2: merged single-pair stats in the sr-bench compare shape
@@ -481,7 +503,9 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     assert pareto[2]["role"] == "strong"
     bench_refs = result["bench_refs"]
     assert bench_refs[0].startswith("meval:tasks:sha256:")
-    assert bench_refs[1:] == [
+    assert bench_refs[1].startswith("meval:labeled-tasks:sha256:")
+    assert bench_refs[2].startswith("meval:labels:sha256:")
+    assert bench_refs[3:] == [
         "meval:baseline-rep0",
         "meval:candidate-rep0",
         "meval:reference:strong",
@@ -489,7 +513,7 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     ]
     cached_keys = json.loads(run_cache.read_text(encoding="utf-8"))
     assert len(cached_keys) == 2
-    assert all(key.startswith(result["tasks_hash"]) for key in cached_keys)
+    assert all(key.startswith(result["labeled_tasks_sha256"]) for key in cached_keys)
     # no management endpoint: the routing distribution is unknown, so the
     # random mix is unevaluable with a reason - never guessed
     assert result["random_mix"]["evaluable"] is False
@@ -497,10 +521,12 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     assert result["random_mix"]["expected_accuracy"] is None
     assert result["distribution"] is None
 
-    # a second verify reuses the reference arms (same tasks hash + alias)
+    # a second verify reuses the reference arms (same rewritten tasks hash
+    # + alias)
     result2 = verify_live_model_eval(
         spec=spec,
         tasks_path=tasks_path,
+        labels_path=labels_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -526,6 +552,8 @@ def test_verify_live_model_eval_random_mix(tmp_path, monkeypatch):
     # against the reference arms and anchors a `ref:random_mix` constraint.
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    _write_labels(labels_path)
     _, plan = _golden_plan()
     fake, _ = _fake_run_arm(plan)
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
@@ -560,6 +588,7 @@ def test_verify_live_model_eval_random_mix(tmp_path, monkeypatch):
     result = verify_live_model_eval(
         spec=spec,
         tasks_path=tasks_path,
+        labels_path=labels_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         management_endpoint="http://127.0.0.1:8080",
@@ -613,6 +642,8 @@ def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
     # ref:random_mix constraint is then not evaluated (INCONCLUSIVE)
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    _write_labels(labels_path)
     _, plan = _golden_plan()
     fake, _ = _fake_run_arm(plan)
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
@@ -637,6 +668,7 @@ def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
     result = verify_live_model_eval(
         spec=spec,
         tasks_path=tasks_path,
+        labels_path=labels_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         management_endpoint="http://127.0.0.1:8080",
@@ -665,6 +697,8 @@ def test_verify_live_model_eval_random_mix_replay_gaps(tmp_path, monkeypatch):
     # INCONCLUSIVE
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    _write_labels(labels_path)
     _, plan = _golden_plan()
     fake, _ = _fake_run_arm(plan)
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
@@ -681,6 +715,7 @@ def test_verify_live_model_eval_random_mix_replay_gaps(tmp_path, monkeypatch):
     common = {
         "spec": spec,
         "tasks_path": tasks_path,
+        "labels_path": labels_path,
         "baseline_endpoint": BASE_ENDPOINT,
         "candidate_endpoint": CAND_ENDPOINT,
         "router_model": ROUTER_MODEL,
@@ -726,6 +761,9 @@ def test_verify_live_model_eval_random_mix_replay_gaps(tmp_path, monkeypatch):
 
 
 def test_verify_live_model_eval_input_guards(tmp_path):
+    # every guard below fires before the labels file is touched, so an
+    # absent labels path is fine here
+    labels_path = tmp_path / "absent-labels.jsonl"
     tasks_path = tmp_path / "tasks.jsonl"
     tasks_path.write_text("", encoding="utf-8")
     spec = ExperimentSpec.from_dict(_spec_dict())
@@ -739,6 +777,7 @@ def test_verify_live_model_eval_input_guards(tmp_path):
             repetitions=1,
             measurements=[],
             model_eval_dir=tmp_path,
+            labels_path=labels_path,
             python_bin="python",
             work_dir=tmp_path / "w",
         )
@@ -752,6 +791,7 @@ def test_verify_live_model_eval_input_guards(tmp_path):
             repetitions=0,
             measurements=[],
             model_eval_dir=tmp_path,
+            labels_path=labels_path,
             python_bin="python",
             work_dir=tmp_path / "w",
         )
@@ -768,14 +808,107 @@ def test_verify_live_model_eval_input_guards(tmp_path):
             repetitions=1,
             measurements=[],
             model_eval_dir=tmp_path,
+            labels_path=labels_path,
             python_bin="python",
             work_dir=tmp_path / "w",
+        )
+
+
+def test_verify_live_model_eval_rewrites_categories_from_labels(tmp_path, monkeypatch):
+    # Y3: the driver rewrites the bound tasks' categories from the C2
+    # labels file itself - the arms answer the rewritten file written into
+    # the work dir, never an externally produced one, and the rewrite
+    # inputs are hashed into the result (uncovered cases join `other`).
+    tasks_path = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    # labels cover only every other case; the rest is uncovered
+    rows = [
+        {"case_id": f"t{i}", "router_label": "code"} for i in range(0, N_TASKS, 2)
+    ]
+    labels_path.write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8"
+    )
+    seen_tasks: list[Path] = []
+
+    def fake(**kwargs):
+        seen_tasks.append(Path(kwargs["tasks_path"]))
+        out = Path(kwargs["out_dir"])
+        out.mkdir(parents=True, exist_ok=True)
+        tasks = [
+            json.loads(line)
+            for line in Path(kwargs["tasks_path"])
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+        judged_rows = _judged_rows(tasks, {t["task_id"] for t in tasks})
+        judged = out / "judged.jsonl"
+        judged.write_text(
+            "".join(json.dumps(r, sort_keys=True) + "\n" for r in judged_rows),
+            encoding="utf-8",
+        )
+        return judged
+
+    monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
+    spec = ExperimentSpec.from_dict(_spec_dict())
+    result = verify_live_model_eval(
+        spec=spec,
+        tasks_path=tasks_path,
+        labels_path=labels_path,
+        baseline_endpoint=BASE_ENDPOINT,
+        candidate_endpoint=CAND_ENDPOINT,
+        router_model=ROUTER_MODEL,
+        repetitions=1,
+        measurements=[],
+        model_eval_dir=tmp_path / "scripts",
+        python_bin="python",
+        work_dir=tmp_path / "work",
+    )
+    # every arm answered the same rewritten file, not the bound one
+    assert seen_tasks
+    assert all(path == seen_tasks[0] for path in seen_tasks)
+    assert seen_tasks[0] != tasks_path
+    labeled = [
+        json.loads(line)
+        for line in seen_tasks[0].read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [row["category"] for row in labeled] == [
+        "code" if i % 2 == 0 else "other" for i in range(N_TASKS)
+    ]
+    assert result["uncovered_cases"] == N_TASKS // 2
+    assert result["label_merges"] == {}
+    assert result["labels_sha256"].startswith("sha256:")
+    assert result["labeled_tasks_sha256"].startswith("sha256:")
+    assert result["labeled_tasks_sha256"] != result["tasks_hash"]
+
+
+def test_verify_live_model_eval_missing_labels_is_actionable(tmp_path):
+    tasks_path = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks_path)
+    spec = ExperimentSpec.from_dict(_spec_dict())
+    with pytest.raises(ContractError, match="labels file not found"):
+        verify_live_model_eval(
+            spec=spec,
+            tasks_path=tasks_path,
+            labels_path=tmp_path / "absent-labels.jsonl",
+            baseline_endpoint=BASE_ENDPOINT,
+            candidate_endpoint=CAND_ENDPOINT,
+            router_model=ROUTER_MODEL,
+            repetitions=1,
+            measurements=[],
+            model_eval_dir=tmp_path / "scripts",
+            python_bin="python",
+            work_dir=tmp_path / "work",
         )
 
 
 def test_verify_live_model_eval_empty_arm_is_inconclusive(tmp_path, monkeypatch):
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    _write_labels(labels_path)
 
     def fake(**kwargs):
         out = Path(kwargs["out_dir"])
@@ -803,6 +936,7 @@ def test_verify_live_model_eval_empty_arm_is_inconclusive(tmp_path, monkeypatch)
     result = verify_live_model_eval(
         spec=spec,
         tasks_path=tasks_path,
+        labels_path=labels_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,
@@ -821,6 +955,8 @@ def test_verify_live_model_eval_empty_arm_is_inconclusive(tmp_path, monkeypatch)
 def test_verify_live_model_eval_constraint_not_measurable(tmp_path, monkeypatch):
     tasks_path = tmp_path / "tasks.jsonl"
     _write_tasks(tasks_path)
+    labels_path = tmp_path / "labels.jsonl"
+    _write_labels(labels_path)
     _, plan = _golden_plan()
     fake, _ = _fake_run_arm(plan)
     monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
@@ -832,6 +968,7 @@ def test_verify_live_model_eval_constraint_not_measurable(tmp_path, monkeypatch)
     result = verify_live_model_eval(
         spec=spec,
         tasks_path=tasks_path,
+        labels_path=labels_path,
         baseline_endpoint=BASE_ENDPOINT,
         candidate_endpoint=CAND_ENDPOINT,
         router_model=ROUTER_MODEL,

@@ -940,9 +940,16 @@ def test_every_documented_invocation_exists():
 
 
 def _write_model_eval_spec(tmp_path):
-    """Spec with one model_eval-driver workload whose dev split is a real file."""
+    """Spec with one model_eval-driver workload whose dev split is a real
+    cases manifest with its declared model_eval tasks rendering (Y3) and a
+    C2 labels file."""
     dev = tmp_path / "dev.jsonl"
-    dev.write_bytes(b'{"task_id":"t1","prompt_user":"q","answer":"A"}\n')
+    dev.write_bytes(b'{"case_id":"t1","prompt":"q","truth":"A"}\n')
+    tasks = tmp_path / "tasks.jsonl"
+    tasks.write_bytes(b'{"task_id":"t1","prompt_user":"q","answer":"A"}\n')
+    (tmp_path / "labels.jsonl").write_bytes(
+        b'{"case_id":"t1","router_label":"math"}\n'
+    )
     spec = copy.deepcopy(VALID_SPEC)
     spec.pop("workload", None)
     spec["workloads"] = [
@@ -955,6 +962,9 @@ def _write_model_eval_spec(tmp_path):
                     "manifest": "dev.jsonl",
                     "content_hash": "sha256:"
                     + hashlib.sha256(dev.read_bytes()).hexdigest(),
+                    "model_eval_tasks": "tasks.jsonl",
+                    "model_eval_tasks_sha256": "sha256:"
+                    + hashlib.sha256(tasks.read_bytes()).hexdigest(),
                 }
             },
         }
@@ -997,6 +1007,8 @@ def _model_eval_verify_args(spec_path, tmp_path, candidate):
         str(candidate),
         "--tasks",
         str(tmp_path / "tasks.jsonl"),
+        "--labels",
+        str(tmp_path / "labels.jsonl"),
         "--baseline-router-endpoint",
         "http://127.0.0.1:9001/v1",
         "--candidate-router-endpoint",
@@ -1013,10 +1025,11 @@ def _model_eval_verify_args(spec_path, tmp_path, candidate):
 def test_verify_model_eval_driver_runs_without_srbench(tmp_path, capsys, monkeypatch):
     # C7: the driver branch skips the sr-bench targets entirely - the
     # candidate JSON needs no srbench_targets and SrbenchCli is never built.
+    # Y3: --tasks is hash-checked against the contract's declared rendering
+    # and --labels is passed through for the in-driver category rewrite.
     import recipe_lab.cli as cli_module
 
     spec_path = _write_model_eval_spec(tmp_path)
-    (tmp_path / "tasks.jsonl").write_text('{"task_id":"t1"}\n', encoding="utf-8")
     candidate = tmp_path / "candidate.json"
     candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
     captured: dict = {}
@@ -1033,6 +1046,7 @@ def test_verify_model_eval_driver_runs_without_srbench(tmp_path, capsys, monkeyp
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "PASS"
     assert captured["tasks_path"] == str(tmp_path / "tasks.jsonl")
+    assert captured["labels_path"] == str(tmp_path / "labels.jsonl")
     assert captured["baseline_endpoint"] == "http://127.0.0.1:9001/v1"
     assert captured["candidate_endpoint"] == "http://127.0.0.1:9002/v1"
     assert captured["management_endpoint"] == "http://127.0.0.1:8080"
@@ -1043,7 +1057,6 @@ def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
     import recipe_lab.cli as cli_module
 
     spec_path = _write_model_eval_spec(tmp_path)
-    (tmp_path / "tasks.jsonl").write_text('{"task_id":"t1"}\n', encoding="utf-8")
     candidate = tmp_path / "candidate.json"
     candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
     ledger = tmp_path / "ledger.jsonl"
@@ -1077,7 +1090,6 @@ def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
 
 def test_verify_model_eval_rejects_srbench_baseline(tmp_path, capsys):
     spec_path = _write_model_eval_spec(tmp_path)
-    (tmp_path / "tasks.jsonl").write_text('{"task_id":"t1"}\n', encoding="utf-8")
     candidate = tmp_path / "candidate.json"
     candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
     rc = main(
@@ -1107,4 +1119,99 @@ def test_verify_model_eval_requires_tasks_and_flags(tmp_path, capsys):
         ]
     )
     assert err == EXIT_CONTRACT_ERROR
+    assert "--labels" in capsys.readouterr().err
+    err = main(
+        base
+        + [
+            "--tasks",
+            str(tmp_path / "tasks.jsonl"),
+            "--labels",
+            str(tmp_path / "labels.jsonl"),
+            "--baseline-router-endpoint",
+            "http://ep1/v1",
+            "--candidate-router-endpoint",
+            "http://ep2/v1",
+        ]
+    )
+    assert err == EXIT_CONTRACT_ERROR
     assert "--model-eval-dir" in capsys.readouterr().err
+
+
+def test_verify_model_eval_rejects_unbound_tasks(tmp_path, capsys):
+    # Y3: --tasks must be byte-identical to the contract's declared
+    # rendering - a different task file is refused even when it is a
+    # valid tasks JSONL.
+    spec_path = _write_model_eval_spec(tmp_path)
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    other = tmp_path / "other-tasks.jsonl"
+    other.write_bytes(b'{"task_id":"t1","prompt_user":"DIFFERENT","answer":"A"}\n')
+    rc = main(
+        [
+            "verify",
+            "--spec",
+            spec_path,
+            "--candidate",
+            str(candidate),
+            "--tasks",
+            str(other),
+            "--labels",
+            str(tmp_path / "labels.jsonl"),
+            "--baseline-router-endpoint",
+            "http://ep1/v1",
+            "--candidate-router-endpoint",
+            "http://ep2/v1",
+            "--model-eval-dir",
+            str(tmp_path / "s"),
+        ]
+    )
+    assert rc == EXIT_CONTRACT_ERROR
+    assert "--tasks hash mismatch" in capsys.readouterr().err
+
+
+def test_verify_model_eval_requires_declared_rendering(tmp_path, capsys):
+    # Y3: without the contract declaration the driver refuses to run at
+    # all - no hash to bind --tasks to.
+    dev = tmp_path / "dev.jsonl"
+    dev.write_bytes(b'{"case_id":"t1","prompt":"q","truth":"A"}\n')
+    spec = copy.deepcopy(VALID_SPEC)
+    spec.pop("workload", None)
+    spec["workloads"] = [
+        {
+            "name": "cold",
+            "profile": "quick",
+            "driver": "model_eval",
+            "splits": {
+                "dev": {
+                    "manifest": "dev.jsonl",
+                    "content_hash": "sha256:"
+                    + hashlib.sha256(dev.read_bytes()).hexdigest(),
+                }
+            },
+        }
+    ]
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    rc = main(
+        [
+            "verify",
+            "--spec",
+            str(spec_path),
+            "--candidate",
+            str(candidate),
+            "--tasks",
+            str(tmp_path / "tasks.jsonl"),
+            "--labels",
+            str(tmp_path / "labels.jsonl"),
+            "--baseline-router-endpoint",
+            "http://ep1/v1",
+            "--candidate-router-endpoint",
+            "http://ep2/v1",
+            "--model-eval-dir",
+            str(tmp_path / "s"),
+        ]
+    )
+    assert rc == EXIT_CONTRACT_ERROR
+    assert "must declare model_eval_tasks" in capsys.readouterr().err

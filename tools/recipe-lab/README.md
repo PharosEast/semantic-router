@@ -244,25 +244,31 @@ INCONCLUSIVE 与工具/用法错误 2（`verdict_exit_code`）。`--candidate-ta
 工作载声明 `driver: model_eval` 时，verify 完全绕开 sr-bench：每个臂都是
 一次 `multi_benchmark_eval.py` + `mcq_judge.py`——baseline/candidate 两臂
 分别打各自配置的 router 端点，S/W 参照臂直连 `spec.models` 里对应模型的
-端点，全部跑在同一个重写过类别的题集上（C3 profile 的
-`<split>/tasks.jsonl`，`--tasks` 传入）。逐题对错交给与 sr-bench 驱动
-相同的 M2/M3/M4 机器：M2 配对统计走 `compute_paired_stats`（sr-bench
-compare 字段形状），M3 证据质量用同一组比率键与上限，M4 参照臂按
-（题集哈希, 别名）缓存。准确率按计划分母计（缺答/漏答计错）；某个臂
-崩溃是操作性错误（脚本可续跑，exit 2），臂产不出 judged 行是证据
-不完整（INCONCLUSIVE）。必填：`--tasks`、`--baseline-router-endpoint`、
+端点。`--tasks` 必须是契约声明的 `model_eval_tasks` 渲染（`cases
+to-model-eval` 生成的 split 级文件；契约里同时声明 `model_eval_tasks`
+与 `model_eval_tasks_sha256`，verify_workload 既核哈希又核 task_id 与
+cases manifest 一一对应），题集改写不再接受外部成品：`--labels` 传入
+C2 的 labels 文件，稀有标签合并与未覆盖题归 other 都由驱动内部按
+`min_label_cases` 完成（改写后题集、labels 哈希与合并明细都记录在
+结果里）。逐题对错交给与 sr-bench 驱动相同的 M2/M3/M4 机器：M2 配对
+统计走 `compute_paired_stats`（sr-bench compare 字段形状），M3 证据质量
+用同一组比率键与上限，M4 参照臂按（改写后题集哈希, 别名）缓存。准确率
+按计划分母计（缺答/漏答计错）；某个臂崩溃是操作性错误（脚本可续跑，
+exit 2），臂产不出 judged 行是证据不完整（INCONCLUSIVE）。必填：
+`--tasks`、`--labels`、`--baseline-router-endpoint`、
 `--candidate-router-endpoint`、`--model-eval-dir`；sr-bench 相关旗标在此
 模式下被忽略，`--baseline-run-id`/`--baseline-manifest` 会被拒绝。
 
-**成本匹配随机混合 R（C8）**：C7 起脚本在每条 record 里记录响应的
-`model`（router 场景即实际接单的后端）。驱动由 candidate 臂 records 得到
-路由分布 p_m（按 `spec.models` 的 served name 映射到别名），按份额混合
-参照臂的逐题对错与单例成本，得到随机混合 R 的期望准确率/成本，并给出
-C−R 的配对 bootstrap 区间（每次重采样 R 都按份额重新分配）。R 以
+**成本匹配随机混合 R（C8）**：驱动由 candidate 臂的 replay 记录得到
+路由分布 p_m——router 场景的 record 按 prompt 与实际路由决策 join
+（见「记录格式」），按 `spec.models` 的 served name 映射到别名——再按
+份额混合参照臂的逐题对错与单例成本，得到随机混合 R 的期望准确率/成本，
+并给出 C−R 的配对 bootstrap 区间（每次重采样 R 都按份额重新分配）。R 以
 `ref:random_mix` 角色进入裁决输入（约束 `bound` 可用）、追加一条
 `ref:random_mix` Pareto 行，区间写入结果的 `random_mix` 节（P3 的
-「准确率差区间下界 > 0」由此计算）。缺证据时（records 无 model、路由到
-`spec.models` 之外、参照臂缺失）R 不可评估并给出原因，绝不猜值。
+「准确率差区间下界 > 0」由此计算）。缺证据时（candidate records 无
+replay 路由结果、路由到 `spec.models` 之外、参照臂缺失）R 不可评估并
+给出原因，绝不猜值。
 
 ## 记录格式（归因输入）
 

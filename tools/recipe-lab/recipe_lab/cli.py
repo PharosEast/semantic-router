@@ -1558,11 +1558,31 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 "the model_eval driver takes no sr-bench baseline: the "
                 "baseline arm is --baseline-router-endpoint"
             )
+        # Y3: the arms answer the contract-declared `model_eval_tasks`
+        # rendering of the split - never an arbitrary file. verify_workload
+        # above re-hashed the declared rendering; here the CLI file must be
+        # byte-identical to it, and the C2 labels file drives the in-driver
+        # category rewrite.
         if not args.tasks:
             raise ContractError(
-                "the model_eval driver needs --tasks (the profile's rewritten "
-                "<split>/tasks.jsonl for this split)"
+                "the model_eval driver needs --tasks (the contract-declared "
+                "model_eval_tasks rendering for this split)"
             )
+        declared_tasks_hash = workload.split_model_eval_tasks_hash(args.split)
+        if declared_tasks_hash is None:
+            raise ContractError(
+                f"workload {workload.name!r} split {args.split!r} must declare "
+                "model_eval_tasks and model_eval_tasks_sha256 (the "
+                "`cases to-model-eval` rendering) for the model_eval driver"
+            )
+        if not args.labels:
+            raise ContractError(
+                "the model_eval driver needs --labels (the C2 labels JSONL "
+                "for this split; the driver rewrites task categories from it)"
+            )
+        spec.require_dataset_file(
+            args.tasks, what="--tasks", expected_hash=declared_tasks_hash
+        )
         missing_flags = [
             flag
             for flag, value in (
@@ -1580,6 +1600,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
             result = verify_live_model_eval(
                 spec=spec,
                 tasks_path=args.tasks,
+                labels_path=args.labels,
                 baseline_endpoint=args.baseline_router_endpoint,
                 candidate_endpoint=args.candidate_router_endpoint,
                 management_endpoint=args.candidate_management_endpoint,
@@ -2583,8 +2604,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument(
         "--tasks",
         default=None,
-        help="model_eval driver: the profile's rewritten <split>/tasks.jsonl "
-        "both arms answer (required for that driver)",
+        help="model_eval driver: the contract-declared model_eval_tasks "
+        "rendering for this split (from `cases to-model-eval`; hash-checked "
+        "against the contract; required for that driver)",
+    )
+    p_verify.add_argument(
+        "--labels",
+        default=None,
+        help="model_eval driver: the C2 labels-<split>.jsonl the driver "
+        "rewrites the task categories from (required for that driver)",
     )
     p_verify.add_argument(
         "--baseline-router-endpoint",
