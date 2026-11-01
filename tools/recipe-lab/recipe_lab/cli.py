@@ -82,6 +82,7 @@ from .diagnose import (
 from .insights import merge_insight_refs, parse_insight_refs, resolve_insight_refs
 from .ledger import Ledger, LedgerRecord
 from .live import live_verdict_from_runs, measurements_from_rows, verify_live
+from .model_eval_driver import verify_live_model_eval
 from .model_eval_tasks import load_source_rows, rows_to_model_eval_tasks, write_tasks
 from .next import write_next_context
 from .observe_labels import (
@@ -1536,53 +1537,102 @@ def cmd_verify(args: argparse.Namespace) -> int:
     ledger = Ledger(args.ledger) if args.ledger else None
     insight_refs = resolve_insight_refs(parse_insight_refs(args.insight_refs), ledger)
     merge_insight_refs(candidate_row.setdefault("provenance", {}), insight_refs)
-    # sr-bench MoM target ids the router is serving the candidate on: the
-    # CLI flag wins; otherwise the candidate file must carry srbench_targets.
-    if args.candidate_targets:
-        targets = [t.strip() for t in args.candidate_targets.split(",") if t.strip()]
-    else:
-        targets = candidate_row.get("srbench_targets")
-    if (
-        not isinstance(targets, list)
-        or not targets
-        or not all(isinstance(t, str) and t.strip() for t in targets)
-    ):
-        raise ContractError(
-            "verify needs sr-bench MoM target ids: pass --candidate-targets "
-            "(comma-separated) or add a non-empty srbench_targets list to the candidate JSON"
-        )
+    # M4: reference-arm run IDs are cached so repeated verify invocations do
+    # not re-run the (expensive) reference arms; default location follows the
+    # ledger when present, else the work dir.
+    run_cache = args.run_cache or (
+        Path(args.ledger).parent / "run-id-cache.json" if args.ledger else None
+    )
     work_dir = (
         Path(args.work_dir)
         if args.work_dir
         else Path(tempfile.mkdtemp(prefix="rl-verify-"))
     )
-    cli = SrbenchCli(
-        bin=args.srbench_bin,
-        url=args.srbench_url,
-        store=args.srbench_store,
-        timeout_s=args.timeout,
-    )
-    try:
-        # M4: reference-arm run IDs are cached so repeated verify invocations
-        # do not re-run the (expensive) reference arms; default location
-        # follows the ledger when present, else the work dir.
-        run_cache = args.run_cache or (
-            Path(args.ledger).parent / "run-id-cache.json" if args.ledger else None
+    if workload.driver == "model_eval":
+        # C7: the model_eval driver replaces sr-bench end to end - every arm
+        # is a multi_benchmark_eval + mcq_judge pass (router arms hit the
+        # router endpoints, reference arms the models' direct endpoints) and
+        # the per-case correctness feeds the same M2/M3/M4 machinery.
+        if args.baseline_run_id or args.baseline_manifest:
+            raise ContractError(
+                "the model_eval driver takes no sr-bench baseline: the "
+                "baseline arm is --baseline-router-endpoint"
+            )
+        if not args.tasks:
+            raise ContractError(
+                "the model_eval driver needs --tasks (the profile's rewritten "
+                "<split>/tasks.jsonl for this split)"
+            )
+        missing_flags = [
+            flag
+            for flag, value in (
+                ("--baseline-router-endpoint", args.baseline_router_endpoint),
+                ("--candidate-router-endpoint", args.candidate_router_endpoint),
+                ("--model-eval-dir", args.model_eval_dir),
+            )
+            if not value
+        ]
+        if missing_flags:
+            raise ContractError(
+                "the model_eval driver needs " + ", ".join(missing_flags)
+            )
+        try:
+            result = verify_live_model_eval(
+                spec=spec,
+                tasks_path=args.tasks,
+                baseline_endpoint=args.baseline_router_endpoint,
+                candidate_endpoint=args.candidate_router_endpoint,
+                router_model=args.router_model,
+                repetitions=args.repetitions,
+                measurements=measurements,
+                model_eval_dir=args.model_eval_dir,
+                python_bin=args.python_bin,
+                work_dir=work_dir,
+                concurrency=args.concurrency,
+                request_timeout=args.request_timeout,
+                force=args.force,
+                run_cache=run_cache,
+            )
+        except (ContractError, OSError) as exc:
+            raise SystemExit(f"verify error: {exc}") from exc
+    else:
+        # sr-bench MoM target ids the router is serving the candidate on: the
+        # CLI flag wins; otherwise the candidate file must carry srbench_targets.
+        if args.candidate_targets:
+            targets = [t.strip() for t in args.candidate_targets.split(",") if t.strip()]
+        else:
+            targets = candidate_row.get("srbench_targets")
+        if (
+            not isinstance(targets, list)
+            or not targets
+            or not all(isinstance(t, str) and t.strip() for t in targets)
+        ):
+            raise ContractError(
+                "verify needs sr-bench MoM target ids: pass --candidate-targets "
+                "(comma-separated) or add a non-empty srbench_targets list to the "
+                "candidate JSON"
+            )
+        cli = SrbenchCli(
+            bin=args.srbench_bin,
+            url=args.srbench_url,
+            store=args.srbench_store,
+            timeout_s=args.timeout,
         )
-        result = verify_live(
-            spec=spec,
-            cli=cli,
-            baseline_run_id=args.baseline_run_id,
-            baseline_manifest=args.baseline_manifest,
-            targets=targets,
-            repetitions=args.repetitions,
-            measurements=measurements,
-            work_dir=work_dir,
-            workload_split=args.split,
-            run_cache=run_cache,
-        )
-    except (ContractError, RuntimeError) as exc:
-        raise SystemExit(f"verify error: {exc}") from exc
+        try:
+            result = verify_live(
+                spec=spec,
+                cli=cli,
+                baseline_run_id=args.baseline_run_id,
+                baseline_manifest=args.baseline_manifest,
+                targets=targets,
+                repetitions=args.repetitions,
+                measurements=measurements,
+                work_dir=work_dir,
+                workload_split=args.split,
+                run_cache=run_cache,
+            )
+        except (ContractError, RuntimeError) as exc:
+            raise SystemExit(f"verify error: {exc}") from exc
 
     if args.ledger:
         preview = result.get("preview") or {}
@@ -2525,6 +2575,60 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument("--srbench-url", default=None)
     p_verify.add_argument("--srbench-store", default=None)
     p_verify.add_argument("--timeout", type=float, default=3600.0)
+    # C7: model_eval driver (workload.driver == "model_eval") - every arm is
+    # a multi_benchmark_eval + mcq_judge pass instead of an sr-bench run.
+    p_verify.add_argument(
+        "--tasks",
+        default=None,
+        help="model_eval driver: the profile's rewritten <split>/tasks.jsonl "
+        "both arms answer (required for that driver)",
+    )
+    p_verify.add_argument(
+        "--baseline-router-endpoint",
+        default=None,
+        help="model_eval driver: OpenAI v1 base of the router serving the "
+        "baseline config (required for that driver)",
+    )
+    p_verify.add_argument(
+        "--candidate-router-endpoint",
+        default=None,
+        help="model_eval driver: OpenAI v1 base of the router serving the "
+        "candidate config (required for that driver)",
+    )
+    p_verify.add_argument(
+        "--router-model",
+        default="vllm-sr/auto",
+        help="model_eval driver: model name of the router entrypoint both "
+        "router arms call",
+    )
+    p_verify.add_argument(
+        "--model-eval-dir",
+        default=None,
+        help="model_eval driver: directory holding multi_benchmark_eval.py / "
+        "mcq_judge.py (required for that driver)",
+    )
+    p_verify.add_argument(
+        "--python-bin",
+        default=sys.executable,
+        help="model_eval driver: python used to run the scripts",
+    )
+    p_verify.add_argument(
+        "--concurrency",
+        type=int,
+        default=8,
+        help="model_eval driver: per-arm request concurrency",
+    )
+    p_verify.add_argument(
+        "--request-timeout",
+        type=float,
+        default=1800.0,
+        help="model_eval driver: per-request timeout in seconds",
+    )
+    p_verify.add_argument(
+        "--force",
+        action="store_true",
+        help="model_eval driver: re-run all tasks instead of resuming completed records",
+    )
     p_verify.add_argument("--round", type=int, default=1)
     p_verify.set_defaults(func=cmd_verify)
 

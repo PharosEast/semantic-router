@@ -74,7 +74,7 @@ pip install -e '.[dev]'
 | `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |
 | `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2；`--reload restart\|hot` H；`cost_model` 成本代理 E2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
-| `verify` | 驱动 sr-bench 端到端：preview + AB/BA 多轮 → 三态裁决（I） |
+| `verify` | 驱动 sr-bench 端到端：preview + AB/BA 多轮 → 三态裁决（I）；`driver: model_eval` 工作载改走 model_eval 驱动（C7） |
 | `live-verdict` | 比较两个现成 sr-bench run 出三态裁决（A3/G2/E，frozen_test 仅 `--final`） |
 | `report` | 只从台账重放的运行报告（G1） |
 | `provenance` | recipe-lab-run-v1 manifest（记录 ID、台账哈希、bench_refs） |
@@ -238,6 +238,21 @@ frozen_test 只出现 split 名称与哈希、绝不导出逐题内容：
 INCONCLUSIVE 与工具/用法错误 2（`verdict_exit_code`）。`--candidate-targets` 指定服务候选的 sr-bench MoM target，
 缺省回退到候选 JSON 的 `srbench_targets`。守卫与约束语义与 `live-verdict`
 一致（A3/E）；`--split frozen_test` 同样只留给 `--final` 晋升裁决。
+
+### model_eval 驱动（C7）
+
+工作载声明 `driver: model_eval` 时，verify 完全绕开 sr-bench：每个臂都是
+一次 `multi_benchmark_eval.py` + `mcq_judge.py`——baseline/candidate 两臂
+分别打各自配置的 router 端点，S/W 参照臂直连 `spec.models` 里对应模型的
+端点，全部跑在同一个重写过类别的题集上（C3 profile 的
+`<split>/tasks.jsonl`，`--tasks` 传入）。逐题对错交给与 sr-bench 驱动
+相同的 M2/M3/M4 机器：M2 配对统计走 `compute_paired_stats`（sr-bench
+compare 字段形状），M3 证据质量用同一组比率键与上限，M4 参照臂按
+（题集哈希, 别名）缓存。准确率按计划分母计（缺答/漏答计错）；某个臂
+崩溃是操作性错误（脚本可续跑，exit 2），臂产不出 judged 行是证据
+不完整（INCONCLUSIVE）。必填：`--tasks`、`--baseline-router-endpoint`、
+`--candidate-router-endpoint`、`--model-eval-dir`；sr-bench 相关旗标在此
+模式下被忽略，`--baseline-run-id`/`--baseline-manifest` 会被拒绝。
 
 ## 记录格式（归因输入）
 
