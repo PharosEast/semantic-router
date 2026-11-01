@@ -78,6 +78,19 @@ only), `2` usage, contract or tool error, and INCONCLUSIVE for
 - `recipe-lab bank apply --bank B --records R [--output R2]`
   Joins correctness by (case_id, routed model); missing entries stay
   `no_evidence`.
+- `recipe-lab observe-labels --spec S --split calib --out D
+  --router-bin B --mock-backend M [--workload W] [--request-timeout S]`
+  Cold-start observation (C2): writes the seed config (14 domain decisions +
+  an `unmatched` catch-all, the decision model pinned, response cache
+  disabled), boots the router against the mock backend and sends each split
+  case tagged with `x-request-id: rl-observe-<case_id>`, then joins the
+  router_replay records by request id. Each case gets `router_label` = the
+  matched decision's domain (the `unmatched` catch-all records `other`) and
+  `confidence` when the record carries one. Writes `seed-config.yaml`,
+  `labels-<split>.jsonl` (sorted by case_id) and
+  `labels-<split>-summary.json`; its `label_coverage` (non-other labels over
+  all cases; missing records count as uncovered) is the number the
+  provenance records. `frozen_test` is refused (exit 2).
 
 ## Diagnosis and distribution calibration (D)
 
