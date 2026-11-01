@@ -114,6 +114,38 @@ only), `2` usage, contract or tool error, and INCONCLUSIVE for
   result_to_config dirname round-trip (one `/` or no `_`, never `auto`).
   `calib` outputs feed bootstrap (C4/C5), `dev` outputs the answer bank
   (C6); `frozen_test` is refused (exit 2).
+- `recipe-lab bootstrap --spec S --profile P --model-eval-dir M --out D
+  [--lambdas 0,0.1,0.2,0.3] [--python-bin B] [--validate-bin V]
+  [--listener-port N]`
+  Cold-start candidates (C4+C5). Consumes the C3 profile's calib split
+  only (anti-leak). Per lambda: runs the real `result_to_config.py`
+  (`--mode full`) over `P/calib/results` + `P/calib/token_costs` into
+  `scaffold-lambda-<lambda>.yaml`; the script is invoked, never copied,
+  and the sidecar records its path, sha256, git blob hash and command
+  line. If the script prints the §3.2-5 `Warning: --cost-lambda` marker
+  (token costs missing -> lambda silently treated as 0) the command fails
+  with exit 2, and the scaffold must cover every profile calib label and
+  every spec model. Completion (C5) turns each scaffold into a runnable
+  canonical config: gateway listener on `--listener-port` (default 8899),
+  each alias's `backend_refs` pointed at its contract endpoint with
+  `pricing` from `cost_basis` (unpriced models get none), decisions
+  grouping the labels that share the cost-aware `model_scores` first
+  place into one `route-<model>` decision (OR-joined `type: domain`
+  conditions, modelRefs in that domain's score order, router_replay
+  plugin mounted for replay capture), priorities following calib traffic
+  share, a `route-fallback` catch-all, `providers.defaults.model` = best
+  mean over the lambda-adjusted domain scores, and the scaffold's sparse
+  global merged with the C2 seed model catalog. The response cache and
+  tools are DISABLED (repeat hits would poison replay/live evidence; the
+  reasons sit in the sidecar for the bundle write-up - re-enable for
+  production if wanted). Every candidate must pass
+  `<validate-bin> config validate --config` before it is emitted; a
+  rejected candidate fails with exit 2. Writes
+  `candidate-lambda-<lambda>.yaml` plus
+  `candidate-lambda-<lambda>.provenance.json` (proposer `bootstrap`,
+  lambda, per-label selected model / accuracy / cost / traffic share,
+  scaffold + profile + candidate hashes, decisions layout). Candidates
+  are byte-stable on rerun; feed them to `run --split dev` for ranking.
 
 ## Diagnosis and distribution calibration (D)
 

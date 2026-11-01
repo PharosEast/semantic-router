@@ -12,6 +12,9 @@ Subcommands:
   propose-rule-thresholds move every rule-level predicate site of one signal (C)
   propose-calibrated      rule threshold candidates at observed quantiles (D)
   run                     evaluate candidate configs in the replay tier -> ledger
+  bootstrap               C4+C5 cold start: per-lambda scaffold via the real
+                          result_to_config.py over the calib profile, completed
+                          into validated runnable candidates
   ledger                  inspect or append to the evidence ledger (append/show/top)
   live-verdict            compare two sr-bench runs -> PASS/FAIL/INCONCLUSIVE
                           (guard floors from spec.gates (A3), --guard-measurements
@@ -29,7 +32,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import subprocess
 import sys
 import tempfile
 import time
@@ -52,6 +54,12 @@ from .attribution import (
     write_jsonl,
 )
 from .bank import apply_bank, build_bank, load_bank, write_bank
+from .bootstrap import (
+    DEFAULT_LAMBDAS,
+    DEFAULT_LISTENER_PORT,
+    run_bootstrap,
+    validate_config,
+)
 from .contract import (
     RUNNABLE_SPLITS,
     ContractError,
@@ -377,6 +385,41 @@ def cmd_profile(args: argparse.Namespace) -> int:
             "min_label_cases": spec.profile_config.min_label_cases,
         }
     )
+    return 0
+
+
+def cmd_bootstrap(args: argparse.Namespace) -> int:
+    """C4+C5: per-lambda scaffold via result_to_config, completed to candidates.
+
+    Consumes the C3 profile's calib split only (anti-leak); every candidate
+    must pass ``<validate-bin> config validate`` before it is emitted.
+    """
+    spec = _load_spec(args.spec)
+    if not spec.models:
+        raise ContractError(
+            "spec declares no models section: bootstrap needs the candidate "
+            "models and their direct endpoints"
+        )
+    model_eval_dir = Path(args.model_eval_dir)
+    if not model_eval_dir.is_dir():
+        raise ContractError(f"model_eval directory not found: {model_eval_dir}")
+    profile_dir = Path(args.profile)
+    if not (profile_dir / "profile.json").is_file():
+        raise ContractError(
+            f"profile not found: {profile_dir / 'profile.json'} (bootstrap "
+            "consumes the C3 profile directory)"
+        )
+    result = run_bootstrap(
+        spec=spec,
+        profile_dir=profile_dir,
+        model_eval_dir=model_eval_dir,
+        lambdas=args.lambdas,
+        out_dir=Path(args.out),
+        python_bin=args.python_bin,
+        validate_bin=args.validate_bin,
+        listener_port=args.listener_port,
+    )
+    _print_json(result)
     return 0
 
 
@@ -806,27 +849,6 @@ def _candidate_entry(
     }
 
 
-def _validate_config(path: Path, validate_bin: str) -> str | None:
-    """C: returns None when the config validates, else the rejection reason."""
-    try:
-        proc = subprocess.run(
-            [validate_bin, "config", "validate", "--config", str(path)],
-            capture_output=True,
-            text=True,
-            timeout=300.0,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise ContractError(f"validator binary not found: {validate_bin}") from exc
-    except subprocess.TimeoutExpired:
-        return "config validate timed out"
-    if proc.returncode != 0:
-        detail = (proc.stderr or proc.stdout or "").strip().splitlines()
-        tail = detail[-1] if detail else "no output"
-        return f"config validate exit {proc.returncode}: {tail}"
-    return None
-
-
 def cmd_run(args: argparse.Namespace) -> int:
     spec = _load_spec(args.spec)
     # A5 budget gate: rounds beyond the contract are refused up front.
@@ -861,7 +883,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     if args.validate:
         kept: list[Path] = []
         for path in candidates:
-            reason = _validate_config(path, args.validate_bin)
+            reason = validate_config(path, args.validate_bin)
             if reason is None:
                 kept.append(path)
             else:
@@ -1776,6 +1798,58 @@ def build_parser() -> argparse.ArgumentParser:
         help="re-run all tasks instead of resuming completed records",
     )
     p_profile.set_defaults(func=cmd_profile)
+
+    p_boot = sub.add_parser(
+        "bootstrap",
+        help="generate candidate configs from the C3 profile (C4+C5: runs the "
+        "real result_to_config.py per --lambdas value over calib only, "
+        "completes each scaffold into a runnable canonical config - per-model "
+        "endpoints, route-<model> decisions grouped by cost-aware first place, "
+        "traffic-ordered priorities, cache/tools off - and validates every "
+        "candidate before emitting it)",
+    )
+    p_boot.add_argument(
+        "--spec", required=True, help="experiment spec YAML (models + cost_basis)"
+    )
+    p_boot.add_argument(
+        "--profile",
+        required=True,
+        help="C3 profile directory (profile.json + calib/results + calib/token_costs)",
+    )
+    p_boot.add_argument(
+        "--model-eval-dir",
+        required=True,
+        help="directory holding result_to_config.py; the script runs as a "
+        "subprocess and its hash lands in the provenance sidecar",
+    )
+    p_boot.add_argument(
+        "--lambdas",
+        default=DEFAULT_LAMBDAS,
+        help="comma-separated cost-lambda values (0 = pure accuracy; a lambda "
+        "whose token costs are missing is rejected, never silently ignored)",
+    )
+    p_boot.add_argument(
+        "--out",
+        required=True,
+        help="output directory (scaffold-lambda-<lambda>.yaml + "
+        "candidate-lambda-<lambda>.yaml + candidate-lambda-<lambda>.provenance.json)",
+    )
+    p_boot.add_argument(
+        "--python-bin", default=sys.executable, help="python used to run the script"
+    )
+    p_boot.add_argument(
+        "--validate-bin",
+        default="vllm-sr",
+        help="validator invoked as '<bin> config validate --config <path>'; a "
+        "rejected candidate fails the command (C5 completion criterion)",
+    )
+    p_boot.add_argument(
+        "--listener-port",
+        type=int,
+        default=DEFAULT_LISTENER_PORT,
+        help="gateway listener port written into every candidate",
+    )
+    p_boot.set_defaults(func=cmd_bootstrap)
 
     p_attr = sub.add_parser(
         "attribute", help="run E1/E2/E3 misroute attribution over labeled records"
