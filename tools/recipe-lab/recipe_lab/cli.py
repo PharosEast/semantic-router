@@ -62,6 +62,7 @@ from .bootstrap import (
     run_bootstrap,
     validate_config,
 )
+from .bundle import build_bundle
 from .contract import (
     RUNNABLE_SPLITS,
     ContractError,
@@ -1490,6 +1491,35 @@ def cmd_record_draft(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_bundle(args: argparse.Namespace) -> int:
+    """C9: package final-verify evidence into a reviewable bundle."""
+    revisions: dict[str, str] = {}
+    for item in args.model_revision:
+        name, sep, revision = item.partition("=")
+        if not sep or not name.strip() or not revision.strip():
+            raise ContractError(
+                f"--model-revision must be NAME=REVISION, got {item!r}"
+            )
+        revisions[name.strip()] = revision.strip()
+    spec = _load_spec(args.spec)
+    result = build_bundle(
+        spec=spec,
+        ledger_path=args.ledger,
+        record_id=args.record,
+        out_dir=args.out,
+        config_path=args.config,
+        skeleton_path=args.skeleton,
+        profile_path=args.profile,
+        validate_bin=args.validate_bin,
+        router_commit=args.router_commit,
+        model_revisions=revisions,
+        model_eval_script=args.model_eval_script,
+        extra_private_patterns=list(args.private_pattern),
+    )
+    _print_json(result)
+    return 0
+
+
 def cmd_verify(args: argparse.Namespace) -> int:
     """Drive sr-bench end to end for one candidate (I).
 
@@ -2716,6 +2746,58 @@ def build_parser() -> argparse.ArgumentParser:
     p_draft.add_argument("--ledger", required=True, help="ledger JSONL")
     p_draft.add_argument("--output", required=True, help="output Markdown draft path")
     p_draft.set_defaults(func=cmd_record_draft)
+
+    p_bundle = sub.add_parser(
+        "bundle",
+        help="package final-verify evidence into a reviewable bundle (C9)",
+    )
+    p_bundle.add_argument("--spec", required=True, help="experiment spec YAML")
+    p_bundle.add_argument("--ledger", required=True, help="evidence ledger JSONL")
+    p_bundle.add_argument(
+        "--record", required=True, help="ledger record id (rec-...) to package"
+    )
+    p_bundle.add_argument("--out", required=True, help="output bundle directory")
+    p_bundle.add_argument(
+        "--config", required=True, help="final candidate config YAML to package"
+    )
+    p_bundle.add_argument(
+        "--skeleton",
+        required=True,
+        help="scaffold config the candidate was completed from (config.diff source)",
+    )
+    p_bundle.add_argument(
+        "--profile", required=True, help="C3 profile.json to archive in the bundle"
+    )
+    p_bundle.add_argument(
+        "--validate-bin",
+        default="vllm-sr",
+        help="config validator binary (same convention as bootstrap)",
+    )
+    p_bundle.add_argument(
+        "--router-commit",
+        default=None,
+        help="router git commit the acceptance ran against (provenance)",
+    )
+    p_bundle.add_argument(
+        "--model-revision",
+        action="append",
+        default=[],
+        metavar="NAME=REVISION",
+        help="model revision recorded in provenance (repeatable)",
+    )
+    p_bundle.add_argument(
+        "--model-eval-script",
+        default=None,
+        help="path to the model_eval script; hashed into provenance",
+    )
+    p_bundle.add_argument(
+        "--private-pattern",
+        action="append",
+        default=[],
+        metavar="REGEX",
+        help="extra private-content regex; a match fails the bundle (repeatable)",
+    )
+    p_bundle.set_defaults(func=cmd_bundle)
 
     return parser
 
