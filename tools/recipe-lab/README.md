@@ -66,6 +66,7 @@ pip install -e '.[dev]'
 | `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签（`--unlabeled` 出原始诊断行） |
 | `observe-labels` | C2 冷启动观测：种子配置 + request-id 打标探测 → labels-<split>.jsonl（case_id/router_label/confidence，未命中记 other） |
 | `profile` | C3 模型画像：task 类别改写为 router 标签 + 调用 model_eval 脚本直连各模型 → profile.json（含区间/成本/质量门） |
+| `bootstrap` | C4+C5 冷启动候选：每个 λ 调真实 `result_to_config.py` 出骨架（只吃 calib，Warning 即拒绝），补全成可运行配置（契约端点/按第一名分组的 `route-<模型>` 决策/流量优先级/缓存与 tools 关闭）并逐个过 `config validate` 后才落盘 |
 | `bank` | 构建 / 应用 per-case/per-model 答案库（`contains` / `mcq` 判卷，I） |
 | `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D） |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
@@ -96,6 +97,13 @@ recipe-lab observe-labels --spec spec.yaml --split calib --out observe/ \
 # C3 模型画像：调 model_eval 脚本直连各模型，profile.json 含脚本哈希与完整命令行
 recipe-lab profile --spec spec.yaml --labels observe/ --splits calib,dev \
   --out profile/ --model-eval-dir src/training/model_eval
+
+# C4+C5 冷启动候选：每个 λ 一份骨架 + 一份补全后的候选（先过 config validate）
+# 产物：scaffold-lambda-<λ>.yaml、candidate-lambda-<λ>.yaml、
+#       candidate-lambda-<λ>.provenance.json（proposer/λ/逐标签表/哈希/命令）
+recipe-lab bootstrap --spec spec.yaml --profile profile/ \
+  --model-eval-dir src/training/model_eval --lambdas 0,0.1,0.2,0.3 \
+  --out cands/ --validate-bin vllm-sr
 
 # 诊断：不需要标准答案，从无标签 replay 流量里发现死决策、压缩量程与不可达阈值
 recipe-lab diagnose --records rows.jsonl --config config.yaml --output-dir diag/ \
