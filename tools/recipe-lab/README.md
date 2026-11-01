@@ -81,6 +81,7 @@ pip install -e '.[dev]'
 | `report` | 只从台账重放的运行报告（G1） |
 | `provenance` | recipe-lab-run-v1 manifest（记录 ID、台账哈希、bench_refs） |
 | `record-draft` | 从最近一条 PASS live 记录生成晋升草稿 |
+| `bundle` | 成品打包：live PASS + final-verify 的记录 → 可评审目录（C9，见下） |
 | `next` | 导出下一轮 agent 上下文（G3；不可信材料头 + 可引用 ID） |
 
 常用示例：
@@ -330,6 +331,30 @@ bootstrap）；任一不满足即 exit 2，什么都不写。产物对同样输�
 写盘前扫描全部产物的私有内容（个人用户目录、非本机 IP 字面量 URL，可用
 `--private-pattern REGEX` 追加），命中即失败且不回显命中内容。验收证据的
 归档目录放在仓库之外，不进公开仓库。
+
+### 冷启动（C10，从零生成配置）
+
+没有可改的存量配置时，从 n 个后端模型加一份带标签的选择题题集出发，
+`examples/cold-start/cold-start.sh` 按顺序串起全流程：
+
+```bash
+recipe-lab split ...             # 切 calib/dev/frozen_test；hash 先锁定题集指纹
+recipe-lab observe-labels ...    # 真实 router 在 calib 上实际打出的 domain 标签
+recipe-lab profile ...           # model_eval 直连各模型：骨架输入、答案库、token 成本
+recipe-lab bootstrap ...         # 每 λ 一份骨架 + 补全成可用候选（逐个过 config validate）
+recipe-lab bank import ...       # 画像的 dev 判卷结果转答案库（不再打端点）
+recipe-lab run ...               # replay 排序，RANKED 进台账
+recipe-lab verify --split frozen_test --final ...   # live 终裁
+recipe-lab bundle ...            # 成品打包
+```
+
+脚本参数全部来自环境变量（`CASES`/`SPEC`/`VERIFY_CANDIDATE`/
+`BUNDLE_CONFIG`/`BUNDLE_SKELETON`，外加各步 `*_FLAGS` 透传，见脚本头注释），
+不含任何私有路径；阶段按输入齐备情况依次执行，缺什么就提示下一步设置什么。
+失败行为：profile 校验模型别名可往返、bootstrap 的 Warning 即拒绝、候选先过
+`config validate` 才落盘，任一步失败即退出且不产出后续产物；verify 需要真实
+端点（`VERIFY_FLAGS` 携带），bundle 拒绝非 live PASS 记录（见上节）。
+frozen_test 只被 `verify --final` 触碰一次，调参与排序永远只看 calib/dev。
 
 ## 记录格式（归因输入）
 
