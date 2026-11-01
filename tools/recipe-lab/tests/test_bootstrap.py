@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
 import sys
 from pathlib import Path
 from urllib.parse import quote
@@ -24,6 +26,7 @@ from recipe_lab.bootstrap import (
     lambda_tag,
     parse_lambdas,
     run_bootstrap,
+    validate_config,
 )
 from recipe_lab.cli import main
 from recipe_lab.contract import API_VERSION, ContractError, ExperimentSpec
@@ -794,3 +797,35 @@ def test_bootstrap_cli_requires_dev_split(tmp_path, capsys):
     )
     assert rc == 2
     assert "declares no dev split" in capsys.readouterr().err
+
+
+def _real_validator() -> str | None:
+    """The real config validator, or None when this checkout has none."""
+    return os.environ.get("RECIPE_LAB_VLLM_SR_BIN") or shutil.which("vllm-sr")
+
+
+def test_bootstrap_candidates_pass_real_validate(tmp_path):
+    """C5: with the real vllm-sr validator the completed candidates are
+    canonical configs, not just fixtures that pass a stub (skipped without
+    the CLI; the cold-start chain exercises the same gate on every phase)."""
+    validator = _real_validator()
+    if validator is None:
+        pytest.skip("vllm-sr CLI not available; real config validate required")
+    out = tmp_path / "cands"
+    summary = run_bootstrap(
+        spec=_spec(tmp_path),
+        profile_dir=_write_profile(tmp_path),
+        model_eval_dir=REAL_MODEL_EVAL,
+        lambdas="0",
+        out_dir=out,
+        python_bin=sys.executable,
+        validate_bin=validator,
+        classification=CLASSIFICATION,
+        classification_path=_write_classification_source(tmp_path),
+        dev_cases=_dev_cases(),
+        env=_label_check_env(tmp_path),
+    )
+    assert [candidate["lambda"] for candidate in summary["candidates"]] == [0.0]
+    # validate_config returns None only when the validator accepted the file;
+    # re-check the emitted candidate to pin the contract, not the side effect.
+    assert validate_config(out / "candidate-lambda-0.yaml", validator) is None

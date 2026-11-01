@@ -152,14 +152,26 @@ def _load_spec(path: str) -> ExperimentSpec:
 
 
 def _select_split(
-    spec: ExperimentSpec, split_name: str, workload: Workload | None = None
+    spec: ExperimentSpec,
+    split_name: str,
+    workload: Workload | None = None,
+    *,
+    allow_frozen_test: bool = False,
 ) -> str:
     """B: resolve --split against the workload; frozen_test is quarantined and
     legacy single-dataset workloads only accept 'dev'. M5: `workload` is the
-    selected Workload (default: the spec's first)."""
+    selected Workload (default: the spec's first).
+
+    Y1: observe-labels passes ``allow_frozen_test`` - the model_eval verify
+    driver rewrites the frozen split's categories from the C2 labels file, so
+    the seed config must be able to label frozen_test too. Observation through
+    the seed config is labeling, never tuning: the profile only ever consumes
+    the calib/dev labels, so the quarantine's purpose (no frozen_test feedback
+    into candidate selection) still holds."""
     workload = workload if workload is not None else spec.workload
     try:
-        check_runnable_split(split_name)
+        if not allow_frozen_test:
+            check_runnable_split(split_name)
         workload.split_hash(split_name)
     except ContractError as exc:
         raise ContractError(str(exc)) from exc
@@ -264,9 +276,12 @@ def cmd_observe_labels(args: argparse.Namespace) -> int:
     summary carrying the label coverage the provenance records.
     """
     spec = _load_spec(args.spec)
-    # B/M5: the same split resolution and quarantine rules as run/attribute.
+    # B/M5: the same split resolution as run/attribute - except frozen_test,
+    # which the C2 labeler may observe (Y1: the model_eval verify driver
+    # rewrites the frozen split's task categories from these labels; the
+    # profile never sees them, so the quarantine still holds).
     workload = spec.require_tunable_workload(getattr(args, "workload", None))
-    split_name = _select_split(spec, args.split, workload)
+    split_name = _select_split(spec, args.split, workload, allow_frozen_test=True)
     # A4: re-hash the selected split before touching it.
     spec.verify_workload(split=split_name, workload=workload.name)
     if spec.spec_dir is None:
@@ -1737,9 +1752,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
     for item in args.model_revision:
         name, sep, revision = item.partition("=")
         if not sep or not name.strip() or not revision.strip():
-            raise ContractError(
-                f"--model-revision must be NAME=REVISION, got {item!r}"
-            )
+            raise ContractError(f"--model-revision must be NAME=REVISION, got {item!r}")
         revisions[name.strip()] = revision.strip()
     spec = _load_spec(args.spec)
     result = build_bundle(
@@ -2102,7 +2115,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--split",
         default="dev",
         choices=["calib", "dev", "frozen_test"],
-        help="workload split to observe (frozen_test is quarantined; B)",
+        help="workload split to observe (frozen_test allowed: the C2 labels "
+        "feed the model_eval verify driver's category rewrite, Y1)",
     )
     p_observe.add_argument(
         "--workload",
