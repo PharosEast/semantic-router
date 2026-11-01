@@ -82,3 +82,35 @@ def test_script_has_no_private_content():
     scan_private_content({"cold-start.sh": text}, [])
     # beyond the bundle's own patterns: no Windows drive-letter path at all
     scan_private_content({"cold-start.sh": text}, [r"[A-Za-z]:\\"])
+
+
+def test_script_covers_y1_model_eval_chain():
+    """Y1: the default model_eval driver observes the frozen split too (its
+    verify rewrites the task categories from those C2 labels), pins the
+    answer-plan fixture and the validate binary, ranks only bootstrap
+    candidates, auto-picks the winner from `ledger top` and patches verify
+    copies so the Y4 hash check names the file the candidate router served."""
+    text = _script_text()
+    # Y1 gate: frozen_test is observed through the seed config as well
+    assert 'OBSERVE_SPLITS="calib dev frozen_test"' in text
+    # fixture inputs and validator override of the model_eval driver
+    for token in (
+        "DRIVER",
+        "ANSWER_PLAN",
+        "CLASSIFICATION_CONFIG",
+        "VALIDATE_BIN",
+        "VERIFY_REPETITIONS",
+    ):
+        assert token in text
+    # only candidate-lambda-*.yaml files are ranked (never the scaffolds or
+    # the seed config that share the bootstrap out dir)
+    assert "candidate-lambda-*.yaml" in text
+    # winner auto-pick + patched verify copies (Y4 hash binding)
+    for token in (
+        "ledger top",
+        "to-model-eval",
+        "patch_listener",
+        "--candidate-management-endpoint",
+        "--candidate-config",
+    ):
+        assert token in text

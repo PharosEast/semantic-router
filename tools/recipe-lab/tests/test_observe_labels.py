@@ -554,7 +554,14 @@ def test_observe_labels_cli_writes_labels_and_summary(tmp_path, capsys):
     assert catalog["modules"]["classifier"]["domain"]["fallback_category"] == "other"
 
 
-def test_observe_labels_cli_refuses_frozen_test(tmp_path):
+def test_observe_labels_cli_allows_frozen_test(tmp_path, capsys):
+    """Y1: observe-labels may label frozen_test through the seed config.
+
+    The model_eval verify driver rewrites the frozen split's task categories
+    from the C2 labels file, so the cold-start chain observes frozen_test
+    like any other split. This is labeling, not tuning: the profile only
+    consumes the calib/dev labels, so the quarantine still holds.
+    """
     spec_path = _write_observe_spec(
         tmp_path,
         {
@@ -563,7 +570,13 @@ def test_observe_labels_cli_refuses_frozen_test(tmp_path):
             "frozen_test": '{"case_id":"f1","prompt":"pf","truth":"math"}\n',
         },
     )
-    router, mock = _write_cli_stack(tmp_path, tmp_path / "unused.json")
+    out = tmp_path / "labels"
+    state_path = out / "work" / "fake_state.json"
+    _write_state(
+        state_path,
+        {"f1": {"decision": "history", "confidence_score": 0.66}},
+    )
+    router, mock = _write_cli_stack(tmp_path, state_path)
     exit_code = main(
         [
             "observe-labels",
@@ -572,13 +585,27 @@ def test_observe_labels_cli_refuses_frozen_test(tmp_path):
             "--split",
             "frozen_test",
             "--out",
-            str(tmp_path / "labels"),
+            str(out),
             "--router-bin",
             router,
             "--mock-backend",
             mock,
             "--classification-config",
             _write_classification_source(tmp_path),
+            "--ready-timeout",
+            "30",
         ]
     )
-    assert exit_code == 2
+    assert exit_code == 0
+    parsed = json.loads(capsys.readouterr().out)
+    assert parsed["observed"] == 1
+    labels = Path(parsed["labels"]).read_text(encoding="utf-8")
+    rows = [json.loads(line) for line in labels.splitlines() if line.strip()]
+    assert [row["case_id"] for row in rows] == ["f1"]
+    assert rows[0]["router_label"] == "history"
+    summary = json.loads(
+        (tmp_path / "labels" / "labels-frozen_test-summary.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert summary["split"] == "frozen_test"
