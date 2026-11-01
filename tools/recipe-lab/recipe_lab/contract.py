@@ -1083,6 +1083,31 @@ def _check_cost_model(raw: Any) -> dict[str, float] | None:
     return out
 
 
+def _derived_cost_model(rates: dict[str, dict[str, float]]) -> dict[str, float]:
+    """C6: derive the replay cost model from provider pricing rates.
+
+    One model's unit rate is the sum of its prompt and completion rates
+    (per-1M tokens); the relative cost is that sum divided by the cheapest
+    positive sum, so the cheapest priced model sits at 1.0 and a free model
+    stays at 0. Deterministic and token-statistics-free: it assumes direct
+    model evals spend a comparable token mix per question, which is exactly
+    the mcq workload shape the cold-start lane runs. All-zero rates cannot
+    be normalized and are a contract error.
+    """
+    totals = {
+        model: float(rates_["prompt_per_1m"]) + float(rates_["completion_per_1m"])
+        for model, rates_ in rates.items()
+    }
+    positives = [value for value in totals.values() if value > 0]
+    if not positives:
+        raise ContractError(
+            "cost_basis.assumed_pricing rates are all zero: cannot derive a "
+            "cost model (declare cost_model directly instead)"
+        )
+    floor = min(positives)
+    return {model: total / floor for model, total in totals.items()}
+
+
 @dataclass(frozen=True)
 class Stack:
     mode: str
@@ -1472,6 +1497,27 @@ class ExperimentSpec:
             if cost_basis_raw is not None
             else None
         )
+        # C6: the replay cost model is derived from the cost basis, so a spec
+        # declares one economic source, never two. A provider-pricing basis
+        # with declared rates derives the cost model (relative to the
+        # cheapest model); rates are optional so a basis can still be
+        # declared for live-tier pricing alone. A cost_model basis must be
+        # backed by the top-level section it names.
+        if cost_basis is not None and cost_basis.source == "provider_pricing":
+            _require(
+                cost_model is None,
+                "cost_basis.source=provider_pricing derives the replay cost model "
+                "from assumed_pricing; remove the explicit cost_model section "
+                "(declare one or the other, not both)",
+            )
+            if cost_basis.assumed_pricing:
+                cost_model = _derived_cost_model(cost_basis.assumed_pricing)
+        elif cost_basis is not None and cost_basis.source == "cost_model":
+            _require(
+                cost_model is not None,
+                "cost_basis.source=cost_model requires the top-level cost_model "
+                "section it derives from",
+            )
         # Cold start (C3): candidate models, shared generation params and
         # profile settings.
         models_raw = raw.get("models", [])
@@ -1704,7 +1750,17 @@ class ExperimentSpec:
         }
         if self.stack is not None:
             out["stack"] = self.stack.to_dict()
-        if self.cost_model is not None:
+        # C6: a cost_model derived from a provider-pricing basis is not
+        # written back - re-parsing the output would re-derive it, and an
+        # explicit key would trip the one-economic-source check.
+        derived = None
+        if (
+            self.cost_basis is not None
+            and self.cost_basis.source == "provider_pricing"
+            and self.cost_basis.assumed_pricing
+        ):
+            derived = _derived_cost_model(self.cost_basis.assumed_pricing)
+        if self.cost_model is not None and self.cost_model != derived:
             out["cost_model"] = dict(self.cost_model)
         if self.evidence_quality != EvidenceQuality():
             out["evidence_quality"] = self.evidence_quality.to_dict()

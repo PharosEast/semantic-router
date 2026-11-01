@@ -26,7 +26,13 @@ only), `2` usage, contract or tool error, and INCONCLUSIVE for
 - Optional top-level `cost_model` (E2): map of served model name to a
   finite positive relative cost. Its presence lets the replay tier compute
   `routed_cost_index` and proxy cost constraints; without it, cost is
-  adjudicated only in the live tier.
+  adjudicated only in the live tier. C6: a `cost_basis` with
+  `source: provider_pricing` and declared `assumed_pricing` rates derives
+  the replay cost model automatically (per-model prompt+completion rate sum,
+  normalized against the cheapest positive sum; a free model stays at 0), so
+  the basis alone equips replay - declaring `cost_model` alongside such a
+  basis is a contract error. A basis without rates derives nothing (live-tier
+  pricing only), and `source: cost_model` requires the top-level section.
 
 ## Dataset identity and splits (stage 2)
 
@@ -75,6 +81,16 @@ only), `2` usage, contract or tool error, and INCONCLUSIVE for
   (`src/` must be on `PYTHONPATH`; an unextractable letter is wrong, never
   unevaluated - the sr-bench no-answer convention). Any other grader name
   is a contract error.
+- `recipe-lab bank import --spec S --profile-dir P [--split dev] --output B`
+  Cold-start answer bank (C6): converts each spec model's direct-model
+  `judged.jsonl` from the profile run (`P/<split>/results/<dirname>/`) into
+  bank entries - no endpoint traffic, the C3 evidence *is* the bank. Rows
+  map task_id -> case_id, is_correct -> answer_ok, completion -> answer,
+  completion_tokens -> tokens (carried through `apply` for per-question
+  cost work). Duplicate task_ids, missing task_id, or a non-boolean
+  is_correct are contract errors; every spec model must have a judged file
+  (exit 2 listing the missing one), and the output is written only after
+  all models convert.
 - `recipe-lab bank apply --bank B --records R [--output R2]`
   Joins correctness by (case_id, routed model); missing entries stay
   `no_evidence`.

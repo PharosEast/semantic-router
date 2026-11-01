@@ -681,6 +681,89 @@ def test_references_and_cost_basis_roundtrip():
     assert spec2.to_dict() == out
 
 
+# ---- C6: the replay cost model is derived from the cost basis ----
+
+
+def test_cost_basis_provider_pricing_derives_cost_model():
+    # the V1 cold-start shape: B is priced 4x A, so the derived relative
+    # costs sit at 1.0 and 4.0 without any explicit cost_model section.
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["cost_basis"] = {
+        "source": "provider_pricing",
+        "assumed_pricing": {
+            "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0},
+            "model-b": {"prompt_per_1m": 4.0, "completion_per_1m": 8.0},
+        },
+    }
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.cost_model == {"model-a": 1.0, "model-b": 4.0}
+    # the derived value is not written back: re-parsing stays idempotent and
+    # does not trip the one-economic-source check
+    out = spec.to_dict()
+    assert "cost_model" not in out
+    assert ExperimentSpec.from_dict(out).to_dict() == out
+
+
+def test_cost_basis_provider_pricing_conflicts_with_explicit_cost_model():
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["cost_model"] = {"model-a": 1.0}
+    raw["cost_basis"] = {
+        "source": "provider_pricing",
+        "assumed_pricing": {
+            "model-a": {"prompt_per_1m": 1.0, "completion_per_1m": 2.0}
+        },
+    }
+    with pytest.raises(ContractError, match="one or the other, not both"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_cost_basis_provider_pricing_without_rates_derives_nothing():
+    # a basis can be declared for live-tier pricing alone: no rates means no
+    # derived replay cost model (the replay tier then does no cost work).
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["cost_basis"] = {"source": "provider_pricing"}
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.cost_model is None
+    assert spec.cost_basis is not None
+
+
+def test_cost_basis_all_zero_rates_rejected():
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["cost_basis"] = {
+        "source": "provider_pricing",
+        "assumed_pricing": {
+            "model-a": {"prompt_per_1m": 0.0, "completion_per_1m": 0.0}
+        },
+    }
+    with pytest.raises(ContractError, match="cannot derive a cost model"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_cost_basis_free_model_derives_zero_relative_cost():
+    # a free (local) model sits at 0 relative cost; the floor is the cheapest
+    # positive sum, not zero.
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["cost_basis"] = {
+        "source": "provider_pricing",
+        "assumed_pricing": {
+            "model-a": {"prompt_per_1m": 0.0, "completion_per_1m": 0.0},
+            "model-b": {"prompt_per_1m": 2.0, "completion_per_1m": 2.0},
+        },
+    }
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.cost_model == {"model-a": 0.0, "model-b": 1.0}
+
+
+def test_cost_basis_cost_model_source_requires_cost_model():
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["cost_basis"] = {"source": "cost_model"}
+    with pytest.raises(ContractError, match="requires the top-level cost_model"):
+        ExperimentSpec.from_dict(raw)
+    raw["cost_model"] = {"model-a": 1.0}
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.cost_model == {"model-a": 1.0}
+
+
 def test_references_absent_by_default():
     spec = ExperimentSpec.from_dict(copy.deepcopy(VALID_SPEC))
     assert spec.references is None
