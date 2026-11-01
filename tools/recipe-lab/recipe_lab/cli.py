@@ -7,7 +7,9 @@ Subcommands:
   attribute               E1/E2/E3 misroute attribution over labeled records
   collect-replays         pull router_replay records from the management API
   diagnose                coverage / distribution / reachability over unlabeled rows (D)
-  bank                    build or apply the per-case/per-model answer bank
+  bank                    build/import/apply the per-case/per-model answer bank
+                          (import converts the profile's direct-model dev
+                          judged.jsonl, C6)
   propose-thresholds      perturb one decision-signal threshold
   propose-rule-thresholds move every rule-level predicate site of one signal (C)
   propose-calibrated      rule threshold candidates at observed quantiles (D)
@@ -53,7 +55,7 @@ from .attribution import (
     summarize,
     write_jsonl,
 )
-from .bank import apply_bank, build_bank, load_bank, write_bank
+from .bank import apply_bank, build_bank, import_judged, load_bank, write_bank
 from .bootstrap import (
     DEFAULT_LAMBDAS,
     DEFAULT_LISTENER_PORT,
@@ -90,7 +92,7 @@ from .observe_labels import (
     write_labels_summary,
     write_seed_config,
 )
-from .profile import run_profile
+from .profile import results_dirname, run_profile
 from .proposers import distribution_calibration, rule_threshold, threshold_search
 from .provenance import write_run_manifest
 from .report import render_promotion_draft, write_run_report
@@ -595,6 +597,60 @@ def cmd_bank(args: argparse.Namespace) -> int:
             _fail(f"answer bank error: {exc}")
         out = write_bank(entries, args.output)
         _print_json({"entries": len(entries), "models": models, "output": str(out)})
+        return 0
+
+    if args.bank_action == "import":
+        # C6: convert the profile's direct-model dev judged.jsonl files into
+        # the answer bank format (no endpoint traffic - the evidence is the
+        # profile run itself).
+        try:
+            spec = _load_spec(args.spec)
+            if not spec.models:
+                raise ContractError("spec declares no models: nothing to import")
+            split = str(args.split)
+            if split not in RUNNABLE_SPLITS:
+                raise ContractError(
+                    f"split {split!r} is not importable: profile runs "
+                    f"{sorted(RUNNABLE_SPLITS)} only"
+                )
+            profile_dir = Path(args.profile_dir)
+            stats: dict[str, object] = {}
+            entries: list = []
+            for model in spec.models:
+                judged_path = (
+                    profile_dir
+                    / split
+                    / "results"
+                    / results_dirname(model.name)
+                    / "judged.jsonl"
+                )
+                if not judged_path.is_file():
+                    raise ContractError(
+                        f"no profile judged.jsonl for model {model.name!r}: "
+                        f"{judged_path} (run recipe-lab profile with this split first)"
+                    )
+                judged_rows = [
+                    json.loads(line)
+                    for line in judged_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                ]
+                model_entries = import_judged(model.name, judged_rows)
+                entries.extend(model_entries)
+                stats[model.name] = {
+                    "cases": len(model_entries),
+                    "correct": sum(1 for e in model_entries if e.answer_ok),
+                }
+            out = write_bank(entries, args.output)
+            _print_json(
+                {
+                    "entries": len(entries),
+                    "models": stats,
+                    "split": split,
+                    "output": str(out),
+                }
+            )
+        except (ContractError, OSError, json.JSONDecodeError) as exc:
+            _fail(f"bank import error: {exc}")
         return 0
 
     if args.bank_action == "apply":
@@ -2013,6 +2069,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_bbuild.add_argument("--output", required=True, help="output bank JSONL path")
     p_bbuild.add_argument("--timeout", type=float, default=180.0)
     p_bbuild.set_defaults(func=cmd_bank)
+
+    p_bimport = bank_sub.add_parser(
+        "import",
+        help="convert profile direct-model judged.jsonl into the answer bank (C6)",
+    )
+    p_bimport.add_argument(
+        "--spec", required=True, help="experiment spec YAML (declares the models)"
+    )
+    p_bimport.add_argument(
+        "--profile-dir",
+        required=True,
+        help="profile output directory (contains <split>/results/.../judged.jsonl)",
+    )
+    p_bimport.add_argument(
+        "--split",
+        default="dev",
+        help="profile split to import (default: dev; the bank split)",
+    )
+    p_bimport.add_argument("--output", required=True, help="output bank JSONL path")
+    p_bimport.set_defaults(func=cmd_bank)
 
     p_bapply = bank_sub.add_parser(
         "apply", help="join bank correctness into attribution records"

@@ -3,6 +3,11 @@
 Serves deterministic chat completions so the router can dispatch end to end
 without a real model. Answer text is fixed; correctness for the smoke is
 judged by the case list, not by this server.
+
+C6 cold-start fixtures: `--cases` rows may declare `expected` (option
+letter) and `category`, and `--answer-plan` pins served model x category
+pairs to correct/wrong completions ("Answer: <letter>."), so replay-tier
+routing and direct-model evals observe the same per-question correctness.
 """
 
 from __future__ import annotations
@@ -37,12 +42,49 @@ WRONG_LOCAL_ANSWERS = {"fun fact about honey": "The capital of France is Paris."
 
 _CAPABILITY_TABLE: dict = {}
 
+# C6 answer-plan fixture: served model name -> {category -> correct?}. When a
+# capability-table case declares `expected` (option letter) and `category`,
+# and the plan declares that category for the routed model, the completion is
+# exactly "Answer: <letter>." - the correct letter when ok, a deterministic
+# wrong letter otherwise. This makes replay-tier routing and direct-model
+# evals agree on per-question correctness on the mock stack, so the cold-start
+# fixtures (V1) can pin replay rankings to the plan.
+_ANSWER_PLAN: dict = {}
+_CATEGORIES: set = set()
+
+_WRONG_LETTERS = "ABCDEFGHIJ"
+
+
+def _wrong_letter(expected: str) -> str:
+    """The next letter after `expected` (cycling) - deterministic and wrong."""
+    idx = _WRONG_LETTERS.find(expected.upper())
+    return _WRONG_LETTERS[(idx + 1) % len(_WRONG_LETTERS)]
+
+
+def _plan_answer(model: str, case: dict) -> str | None:
+    """Fixture-driven completion for planned (model, category) pairs, or None."""
+    plan = _ANSWER_PLAN.get(model)
+    if plan is None:
+        return None
+    category = case.get("category")
+    expected = case.get("expected")
+    if category is None or expected is None:
+        return None
+    ok = plan.get(str(category), plan.get("*"))
+    if ok is None:
+        return None
+    letter = str(expected).strip().upper()
+    return f"Answer: {letter}." if ok else f"Answer: {_wrong_letter(letter)}."
+
 
 def _answer_for(model: str, prompt: str) -> str:
     # capability model from the cases file: hard questions fail on the local
     # lane and succeed on the frontier lane, so routing decisions move accuracy
     if prompt in _CAPABILITY_TABLE:
         case = _CAPABILITY_TABLE[prompt]
+        planned = _plan_answer(model, case)
+        if planned is not None:
+            return planned
         hard = case.get("truth") == "cloud_frontier_reasoning"
         if not hard or not model.startswith("local"):
             return str(case.get("expected_contains", "mock answer"))
@@ -181,8 +223,16 @@ def main() -> None:
     parser.add_argument(
         "--cases",
         default=None,
-        help="cases JSONL (prompt/expected_contains/truth): enables the capability model - "
-        "the local lane fails hard questions, the frontier lane answers correctly",
+        help="cases JSONL (prompt/expected_contains/truth, optional expected "
+        "option letter + category): enables the capability model - the local "
+        "lane fails hard questions, the frontier lane answers correctly",
+    )
+    parser.add_argument(
+        "--answer-plan",
+        default=None,
+        help="fixture JSON: {served model: {category: correct?}} - planned "
+        "categories answer with 'Answer: <letter>.' (deterministic wrong "
+        "letter when false); requires --cases rows with expected+category",
     )
     parser.add_argument(
         "--delay-ms",
@@ -196,6 +246,7 @@ def main() -> None:
     _DELAY_SECONDS = args.delay_ms / 1000.0
     if args.cases:
         _CAPABILITY_TABLE.clear()
+        _CATEGORIES.clear()
         with open(args.cases, encoding="utf-8") as fh:
             for raw_line in fh:
                 line = raw_line.strip()
@@ -203,6 +254,30 @@ def main() -> None:
                     continue
                 case = json.loads(line)
                 _CAPABILITY_TABLE[case["prompt"]] = case
+                if case.get("category") is not None:
+                    _CATEGORIES.add(str(case["category"]))
+    if args.answer_plan:
+        with open(args.answer_plan, encoding="utf-8") as fh:
+            plan = json.load(fh)
+        if not isinstance(plan, dict):
+            parser.error("--answer-plan must be a JSON object of model -> category -> bool")
+        for model, categories in plan.items():
+            if not isinstance(categories, dict) or not categories:
+                parser.error(
+                    f"--answer-plan[{model!r}] must be a non-empty category -> bool object"
+                )
+            for category, ok in categories.items():
+                if not isinstance(ok, bool):
+                    parser.error(
+                        f"--answer-plan[{model!r}][{category!r}] must be a boolean"
+                    )
+                if category != "*" and _CATEGORIES and category not in _CATEGORIES:
+                    parser.error(
+                        f"--answer-plan[{model!r}] references unknown category "
+                        f"{category!r} (declared case categories: {sorted(_CATEGORIES)})"
+                    )
+        _ANSWER_PLAN.clear()
+        _ANSWER_PLAN.update(plan)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"mock backend listening on {args.host}:{args.port}", flush=True)
     server.serve_forever()
