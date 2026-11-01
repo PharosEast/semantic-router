@@ -53,6 +53,7 @@ from .attribution import (
 )
 from .bank import apply_bank, build_bank, load_bank, write_bank
 from .contract import (
+    RUNNABLE_SPLITS,
     ContractError,
     ExperimentSpec,
     Workload,
@@ -81,6 +82,7 @@ from .observe_labels import (
     write_labels_summary,
     write_seed_config,
 )
+from .profile import run_profile
 from .proposers import distribution_calibration, rule_threshold, threshold_search
 from .provenance import write_run_manifest
 from .report import render_promotion_draft, write_run_report
@@ -309,6 +311,70 @@ def cmd_observe_labels(args: argparse.Namespace) -> int:
             "missing": summary["missing"],
             "label_coverage": summary["label_coverage"],
             "label_counts": summary["label_counts"],
+        }
+    )
+    return 0
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    """C3: per-model profiles grouped by the router's own domain labels."""
+    spec = _load_spec(args.spec)
+    workload = spec.require_tunable_workload(getattr(args, "workload", None))
+    if spec.spec_dir is None:
+        raise ContractError("spec must be loaded from a file to resolve its manifest")
+    if not spec.models:
+        raise ContractError(
+            "spec declares no models section: profile needs the candidate "
+            "models and their direct endpoints"
+        )
+    if spec.generation is None:
+        raise ContractError(
+            "spec declares no generation section: profile needs the shared "
+            "generation params"
+        )
+    splits = [s.strip() for s in args.splits.split(",") if s.strip()]
+    if not splits:
+        raise ContractError("--splits is empty")
+    for split in splits:
+        if split not in RUNNABLE_SPLITS:
+            raise ContractError(
+                f"split {split!r} is not profileable: profile runs calib/dev only "
+                "(frozen_test is quarantined; calib feeds bootstrap, dev the bank)"
+            )
+    model_eval_dir = Path(args.model_eval_dir)
+    if not model_eval_dir.is_dir():
+        raise ContractError(f"model_eval directory not found: {model_eval_dir}")
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    cases_paths: dict[str, Path] = {}
+    cases_hashes: dict[str, str] = {}
+    for split in splits:
+        cases_hashes[split] = spec.verify_workload(
+            split=split, workload=workload.name
+        )
+        cases_paths[split] = Path(spec.spec_dir) / workload.split_manifest(split)
+
+    # ContractError propagates to main() -> exit 2.
+    profile_path = run_profile(
+        spec=spec,
+        cases_paths=cases_paths,
+        cases_hashes=cases_hashes,
+        labels_dir=Path(args.labels),
+        splits=splits,
+        out_dir=out_dir,
+        model_eval_dir=model_eval_dir,
+        python_bin=args.python_bin,
+        concurrency=args.concurrency,
+        request_timeout=args.request_timeout,
+        force=args.force,
+    )
+    _print_json(
+        {
+            "profile": str(profile_path),
+            "splits": splits,
+            "models": [model.name for model in spec.models],
+            "min_label_cases": spec.profile_config.min_label_cases,
         }
     )
     return 0
@@ -1652,6 +1718,64 @@ def build_parser() -> argparse.ArgumentParser:
         help="per-request timeout in seconds",
     )
     p_observe.set_defaults(func=cmd_observe_labels)
+
+    p_profile = sub.add_parser(
+        "profile",
+        help="per-model MCQ profiles grouped by the router's own domain labels "
+        "(C3: rewrites task categories to router labels, runs the model_eval "
+        "scripts direct per model, writes profile.json with the provenance)",
+    )
+    p_profile.add_argument(
+        "--spec", required=True, help="experiment spec YAML (models/generation/profile)"
+    )
+    p_profile.add_argument(
+        "--labels",
+        required=True,
+        help="labels directory from observe-labels (labels-<split>.jsonl)",
+    )
+    p_profile.add_argument(
+        "--splits",
+        default="calib,dev",
+        help="comma-separated splits to profile (calib,dev; frozen_test is "
+        "quarantined; calib feeds bootstrap, dev the answer bank)",
+    )
+    p_profile.add_argument(
+        "--out",
+        required=True,
+        help="output directory (generation.json + <split>/{tasks,results,token_costs}"
+        " + profile.json)",
+    )
+    p_profile.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads (default: the first workload; "
+        "transfer workloads are quarantined; M5)",
+    )
+    p_profile.add_argument(
+        "--model-eval-dir",
+        required=True,
+        help="directory holding the invoked model_eval scripts "
+        "(multi_benchmark_eval.py / mcq_judge.py / cost_aware_calib.py); "
+        "the scripts run as subprocesses and their hashes land in the profile",
+    )
+    p_profile.add_argument(
+        "--python-bin", default=sys.executable, help="python used to run the scripts"
+    )
+    p_profile.add_argument(
+        "--concurrency", type=int, default=8, help="per-model request concurrency"
+    )
+    p_profile.add_argument(
+        "--request-timeout",
+        type=float,
+        default=1800.0,
+        help="per-request timeout in seconds (multi_benchmark_eval default)",
+    )
+    p_profile.add_argument(
+        "--force",
+        action="store_true",
+        help="re-run all tasks instead of resuming completed records",
+    )
+    p_profile.set_defaults(func=cmd_profile)
 
     p_attr = sub.add_parser(
         "attribute", help="run E1/E2/E3 misroute attribution over labeled records"

@@ -91,6 +91,29 @@ only), `2` usage, contract or tool error, and INCONCLUSIVE for
   `labels-<split>-summary.json`; its `label_coverage` (non-other labels over
   all cases; missing records count as uncovered) is the number the
   provenance records. `frozen_test` is refused (exit 2).
+- `recipe-lab profile --spec S --labels D --splits calib,dev --out P
+  --model-eval-dir M [--workload W] [--python-bin B] [--concurrency N]
+  [--request-timeout S] [--force]`
+  Model profiles (C3). For every spec `models:` entry, per split: rewrites
+  the split tasks so `category` is the router label from `labels-<split>.jsonl`
+  (labels under `profile.min_label_cases`, default 20, merge into `other`
+  with the merge recorded; uncovered cases join `other`), runs
+  `multi_benchmark_eval.py` direct against the model's endpoint (resumes
+  completed records unless `--force`), then `mcq_judge.py --analysis`;
+  one `cost_aware_calib.py --token-costs-only` invocation per split writes
+  `token_costs/` for bootstrap. The scripts are invoked, never copied:
+  the profile records script path, content sha256, git blob hash and every
+  command line. Truncation (`finish_reason: length`) and no-answer rates
+  beyond `evidence_quality` ceilings fail with exit 2 and a
+  generation-params hint. Writes `generation.json` (the shared
+  `generation:` params, also used by the live arms), per-split
+  `tasks.jsonl` / `results/<alias>_direct/` / `token_costs/` and a
+  byte-stable `profile.json` (recipe-lab-profile-v1: per model x label n,
+  accuracy with Wilson CI, tokens, assumed-pricing cost, p50/p95 latency,
+  quality rates, all input hashes). Aliases must survive the
+  result_to_config dirname round-trip (one `/` or no `_`, never `auto`).
+  `calib` outputs feed bootstrap (C4/C5), `dev` outputs the answer bank
+  (C6); `frozen_test` is refused (exit 2).
 
 ## Diagnosis and distribution calibration (D)
 
