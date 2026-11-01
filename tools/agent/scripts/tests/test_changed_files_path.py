@@ -190,6 +190,7 @@ class ImpactTests(unittest.TestCase):
                 "onnx-artifacts",
                 "mock-provider",
                 "learning-tools",
+                "recipe-lab",
                 "harness-tools",
                 "e2e-unit",
                 "soak-tools",
