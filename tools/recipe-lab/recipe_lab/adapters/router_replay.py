@@ -332,6 +332,49 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return rows
 
 
+def routing_shares_from_replays(
+    records: list[dict[str, Any]],
+    task_prompts: set[str],
+) -> tuple[dict[str, float] | None, dict[str, int]]:
+    """One router arm's routing distribution from its replay records.
+
+    The model-eval verify driver's evidence: the generation records carry
+    no responding model, so the candidate router's own replay store is the
+    routing observation. A record joins the arm when its prompt is one the
+    arm sent - the verify candidate arm is the only traffic that sends the
+    task prompts on that router. Failed records are evidence of an
+    interrupted request, not a routing decision, and stay out of numerator
+    and denominator; records without a selected model are reported in the
+    stats but not counted. No countable record -> (None, stats): the
+    distribution is unknown, never guessed.
+    """
+    stats: dict[str, int] = {
+        "matched": 0,
+        "failed": 0,
+        "no_model": 0,
+        "total": len(records),
+    }
+    counts: dict[str, int] = {}
+    for record in records:
+        prompt = _record_field(record, "prompt", "Prompt")
+        if not isinstance(prompt, str) or prompt not in task_prompts:
+            continue
+        stats["matched"] += 1
+        state = str(_record_field(record, "lifecycle_state", "LifecycleState") or "")
+        if state == "failed":
+            stats["failed"] += 1
+            continue
+        selected = _record_field(record, "selected_model", "SelectedModel")
+        if not isinstance(selected, str) or not selected.strip():
+            stats["no_model"] += 1
+            continue
+        counts[selected] = counts.get(selected, 0) + 1
+    if not counts:
+        return None, stats
+    total = sum(counts.values())
+    return {model: count / total for model, count in sorted(counts.items())}, stats
+
+
 def records_to_cases(
     records: list[dict[str, Any]],
     cases: list[CaseJoin],

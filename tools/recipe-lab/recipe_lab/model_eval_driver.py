@@ -31,14 +31,17 @@ over the cases both arms judged (the sr-bench compare convention).
 
 Router-arm spend is unknown and stays None; reference arms get an
 "assumed" estimate from `cost_basis.assumed_pricing` when the records
-carry token counts. Since C8 the records also carry each response's
-`model` (the backend that actually served the call), which gives the
-candidate arm's routing distribution and the cost-matched random mix R:
-the share-weighted mixture of the reference arms' per-case accuracy and
-cost, a paired C-vs-R bootstrap interval where every resample redraws
-R's assignment by the shares, a Pareto row, and the `ref:random_mix`
-constraint bound. Missing evidence (no records, no responding model, a
-routed model outside `spec.models`, an unmeasured reference) keeps R
+carry token counts. The candidate arm's routing distribution comes from
+the candidate router's replay store, not from the generation records:
+after the arms run the driver fetches the router's replay records via
+its management endpoint and joins them by prompt (the verify candidate
+arm is the only traffic that sends the task prompts on that router).
+The shares give the cost-matched random mix R: the share-weighted
+mixture of the reference arms' per-case accuracy and cost, a paired
+C-vs-R bootstrap interval where every resample redraws R's assignment
+by the shares, a Pareto row, and the `ref:random_mix` constraint bound.
+Missing evidence (no management endpoint, no matching replay, a routed
+model outside `spec.models`, an unmeasured reference) keeps R
 unevaluable with a reason - never guessed.
 """
 
@@ -48,11 +51,15 @@ import bisect
 import json
 import random
 import statistics
-from collections import Counter
 from pathlib import Path
 from typing import Any
 
 from . import abba
+from .adapters.router_replay import (
+    ReplayFetchError,
+    fetch_replays,
+    routing_shares_from_replays,
+)
 from .contract import ContractError, ExperimentSpec, dataset_content_hash
 from .live import (
     _evidence_entry,
@@ -273,29 +280,6 @@ def _arm_mean_case_cost(
     return sum(costs) / len(costs) if costs else None
 
 
-def routing_shares_from_records(
-    records_rows: list[dict[str, Any]],
-) -> dict[str, float] | None:
-    """C8: one arm's routing distribution from its records.
-
-    Each record's `model` field is the responding model - for a router arm
-    the backend that actually served the call. Shares are the fraction of
-    model-carrying records per model; rows without a model (failed
-    requests, endpoints that do not report it) are not routing evidence
-    and stay out of the denominator. No model at all -> None: the routing
-    distribution is unknown, never guessed.
-    """
-    counts: Counter[str] = Counter()
-    for row in records_rows:
-        model = row.get("model")
-        if isinstance(model, str) and model.strip():
-            counts[model] += 1
-    total = sum(counts.values())
-    if not total:
-        return None
-    return {model: count / total for model, count in sorted(counts.items())}
-
-
 def random_mix_paired_stats(
     cand_rows: list[dict[str, Any]],
     ref_rows_by_alias: dict[str, list[dict[str, Any]]],
@@ -388,18 +372,20 @@ def _random_mix_evidence(
     spec: ExperimentSpec,
     planned: int,
     cand_judged_rows: list[dict[str, Any]],
-    cand_records_rows: list[dict[str, Any]],
+    cand_replay_shares: dict[str, float] | None,
+    cand_replay_note: str | None,
     ref_rows_by_role: dict[str, list[dict[str, Any]]],
     ref_case_cost_by_role: dict[str, float | None],
 ) -> dict[str, Any]:
     """C8: the cost-matched random mix R for the candidate arm.
 
-    Shares come from the candidate arm's records (the responding model of
-    each request, mapped to `spec.models` aliases via served names);
-    expected accuracy and cost mix the reference arms' per-case values by
-    those shares. Every gap - no records, no responding model, a routed
-    model outside `spec.models`, an unmeasured needed reference - keeps R
-    unevaluable with a reason; missing evidence is never counted as zero.
+    Shares come from the candidate router's replay records (joined by
+    prompt by the caller), mapped to `spec.models` aliases via the
+    models' names or served names; expected accuracy and cost mix the
+    reference arms' per-case values by those shares. Every gap - no
+    replay evidence, a routed model outside `spec.models`, an unmeasured
+    needed reference - keeps R unevaluable with a reason; missing
+    evidence is never counted as zero.
     """
     evidence: dict[str, Any] = {
         "evaluable": False,
@@ -413,20 +399,23 @@ def _random_mix_evidence(
     if spec.references is None:
         evidence["reason"] = "the spec declares no references section"
         return evidence
-    served_shares = routing_shares_from_records(cand_records_rows)
-    if served_shares is None:
+    if cand_replay_shares is None:
         evidence["reason"] = (
-            "candidate arm records carry no responding model: the routing "
-            "distribution is unknown"
+            "candidate routing distribution unknown: "
+            + (cand_replay_note or "no replay evidence")
         )
         return evidence
-    served_to_alias = {model.served_name: model.name for model in spec.models}
+    # a replay's selected model is the routed model: the spec's model
+    # name, or the backend's served name - either form maps to the alias,
+    # and anything else stays unknown
+    model_to_alias = {model.name: model.name for model in spec.models}
+    model_to_alias.update({model.served_name: model.name for model in spec.models})
     shares: dict[str, float] = {}
     unknown: list[str] = []
-    for served, share in served_shares.items():
-        alias = served_to_alias.get(served)
+    for routed, share in cand_replay_shares.items():
+        alias = model_to_alias.get(routed)
         if alias is None:
-            unknown.append(served)
+            unknown.append(routed)
         else:
             shares[alias] = shares.get(alias, 0.0) + share
     if unknown:
@@ -525,6 +514,7 @@ def verify_live_model_eval(
     tasks_path: str | Path,
     baseline_endpoint: str,
     candidate_endpoint: str,
+    management_endpoint: str | None = None,
     router_model: str,
     repetitions: int,
     measurements: list[dict[str, Any]],
@@ -552,15 +542,20 @@ def verify_live_model_eval(
     `run_cache`; their values anchor `ref:`-bound constraints.
 
     C8: the cost-matched random mix R mixes the reference arms' per-case
-    accuracy and cost by the candidate arm's routing distribution (the
-    responding `model` in its records, last completed repetition); it
-    anchors `ref:random_mix` constraint bounds and the Pareto row.
+    accuracy and cost by the candidate arm's routing distribution. The
+    distribution is read from the candidate router's replay store
+    (`management_endpoint`, the router management base URL) and joined by
+    prompt - the candidate arm is the only traffic that sends the task
+    prompts on that router. It anchors `ref:random_mix` constraint bounds
+    and the Pareto row; without the endpoint or without matching replays
+    R stays unevaluable with a reason.
 
     The result dict mirrors the sr-bench driver's shape (verdict/reasons/
     metrics/gates/constraints/bench_refs/trials/abba_summary/paired/
     evidence_quality/references/random_mix/pareto) plus `driver`,
-    `tasks_hash` and `planned_cases`; `preview` and `baseline_run_id` are
-    None - there is no sr-bench run behind this evidence.
+    `tasks_hash`, `planned_cases` and `distribution` (the alias-keyed
+    routing shares when R is evaluable); `preview` and `baseline_run_id`
+    are None - there is no sr-bench run behind this evidence.
     """
     if repetitions < 1:
         raise ContractError("verify needs at least one repetition")
@@ -809,7 +804,6 @@ def verify_live_model_eval(
     # Pareto rows: the last completed pair's arms plus the references.
     pareto: list[dict[str, Any]] = []
     last_rep = max(judged_by_arm, key=lambda k: k[0], default=None)
-    cand_records_rows: list[dict[str, Any]] = []
     if last_rep is not None:
         rep = last_rep[0]
         for label in (abba.BASELINE, abba.CANDIDATE):
@@ -818,8 +812,6 @@ def verify_live_model_eval(
             records_rows = _read_optional(
                 Path(trials[rep][label]["judged"]).parent / "records.jsonl"
             )
-            if label == abba.CANDIDATE:
-                cand_records_rows = records_rows
             pareto.append(
                 _pareto_row(
                     arm=label,
@@ -835,10 +827,49 @@ def verify_live_model_eval(
             )
     pareto.extend(ref_pareto)
 
-    # C8: the cost-matched random mix R, from the last completed candidate
-    # repetition (the same convention as the Pareto rows). Its expected
-    # accuracy anchors `ref:random_mix` constraint bounds; a Pareto row and
-    # a paired C-vs-R bootstrap interval carry the P3 comparison.
+    # C8: the cost-matched random mix R. Its expected accuracy anchors
+    # `ref:random_mix` constraint bounds; a Pareto row and a paired C-vs-R
+    # bootstrap interval carry the P3 comparison. The candidate arm's
+    # routing shares come from the candidate router's replay store (the
+    # generation records carry no responding model), joined by prompt -
+    # the candidate arm is the only traffic that sends the task prompts,
+    # and failed records are no routing decision. Any gap - no endpoint,
+    # a failed fetch, no matching record - keeps R unevaluable with a
+    # reason, never guessed.
+    replay_shares: dict[str, float] | None = None
+    replay_note: str | None = None
+    if spec.references is not None:
+        if management_endpoint is None:
+            replay_note = (
+                "no --candidate-management-endpoint: the candidate router's "
+                "replay store was not queried"
+            )
+        else:
+            task_prompts = {
+                row["prompt_user"]
+                for row in task_rows
+                if isinstance(row.get("prompt_user"), str) and row["prompt_user"]
+            }
+            if not task_prompts:
+                replay_note = "the tasks file declares no prompt_user values"
+            else:
+                try:
+                    replay_records = fetch_replays(management_endpoint)
+                except ReplayFetchError as exc:
+                    replay_note = f"replay fetch failed: {exc}"
+                else:
+                    replay_shares, replay_stats = routing_shares_from_replays(
+                        replay_records, task_prompts
+                    )
+                    if replay_shares is None:
+                        replay_note = (
+                            "no replay record with a selected model matches "
+                            "the task prompts "
+                            f"(matched={replay_stats['matched']} of "
+                            f"{replay_stats['total']} records, "
+                            f"{replay_stats['failed']} failed, "
+                            f"{replay_stats['no_model']} without a model)"
+                        )
     random_mix = _random_mix_evidence(
         spec=spec,
         planned=planned,
@@ -847,7 +878,8 @@ def verify_live_model_eval(
             if last_rep is not None
             else []
         ),
-        cand_records_rows=cand_records_rows,
+        cand_replay_shares=replay_shares,
+        cand_replay_note=replay_note,
         ref_rows_by_role=ref_rows_by_role,
         ref_case_cost_by_role=ref_case_cost_by_role,
     )
@@ -923,6 +955,7 @@ def verify_live_model_eval(
         "evidence_quality": evidence,
         "references": references_evidence,
         "random_mix": random_mix,
+        "distribution": random_mix["shares"] if random_mix["evaluable"] else None,
         "pareto": pareto,
         "driver": "model_eval",
         "tasks_hash": tasks_hash,
