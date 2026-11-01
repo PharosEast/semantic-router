@@ -63,5 +63,51 @@ Drive the closed loop with `tools/recipe-lab/recipe_lab/cli.py` (installed as
    report.md`; stop when the objective is met, the budget is exhausted, or
    evidence is repeatedly incomplete.
 
+## Cold-start config generation
+
+When no usable recipe exists, generate one instead of tuning. The steps below
+are chained by `tools/recipe-lab/examples/cold-start/cold-start.sh` (set the
+environment variables listed in its header to run end to end); drive them by
+hand when you need to inspect between steps.
+
+1. Freeze and split the dataset: `recipe-lab hash --file cases.jsonl`, then
+   `recipe-lab split --cases cases.jsonl --output-dir splits/`. Input: a
+   labeled MCQ jsonl. Output: calib/dev/frozen_test files and the content hash
+   the spec must pin. Failure: a later hash mismatch means the dataset moved -
+   restart from a frozen copy, never relabel in place.
+2. Observe the router's own labels: `recipe-lab observe-labels --spec
+   spec.yaml --split calib --out observe/ --router-bin ... --mock-backend
+   ...`. Input: the spec, a router binary, its model backend. Output:
+   labels-calib.jsonl (case_id/router_label/confidence). Failure: the router
+   did not come up or mislabels everything - read the router log; never
+   continue on guessed labels.
+3. Profile every backend model: `recipe-lab profile --spec spec.yaml --labels
+   observe/ --splits calib,dev --out profile/ --model-eval-dir ...`. Input:
+   the observed labels plus OpenAI-compatible endpoints for each model.
+   Output: profile.json (accuracy intervals, token costs, quality gates) and
+   per-split judged output. Failure: an alias that cannot round-trip, or a
+   quality-gate failure, is a hard stop - fix the spec aliases or the model
+   output first.
+4. Bootstrap candidates: `recipe-lab bootstrap --spec spec.yaml --profile
+   profile/ --model-eval-dir ... --lambdas 0,0.1,0.2,0.3 --out cands/`.
+   Input: profile.json. Output: one scaffold plus one completed candidate per
+   lambda, each pre-validated with `config validate`. Failure: any
+   result_to_config warning or failed validation aborts the batch - repair
+   the profile, do not hand-edit candidates around the failure.
+5. Rank by replay: `recipe-lab bank import --spec spec.yaml --profile-dir
+   profile/ --split dev --output bank.jsonl`, then `recipe-lab run --spec
+   spec.yaml --split dev --cases splits/dev.jsonl --bank bank.jsonl
+   --candidates cands/ --proposer bootstrap --ledger ledger.jsonl ...`.
+   Output: RANKED records. Failure: rejected candidates never enter the
+   ledger; read the bootstrap provenance instead of guessing why.
+6. Final verdict and bundle: pick a winner with `recipe-lab ledger top --file
+   ledger.jsonl --metric-key capability.score`, author the candidate JSON,
+   then `recipe-lab verify --spec spec.yaml --split frozen_test --final
+   --candidate cand.json --ledger ledger.jsonl ...` against real endpoints,
+   and finally `recipe-lab bundle --spec spec.yaml --ledger ledger.jsonl
+   --record rec-... --out bundle/ --config FINAL.yaml --skeleton SCAFFOLD.yaml
+   --profile profile/profile.json`. Failure: any non-PASS verdict stops the
+   loop - frozen_test is never retried after a failed final.
+
 Run `make check` after changing recipe-lab code; skill changes follow the
 `tools/agent` structure checks and public-skill sync tests.

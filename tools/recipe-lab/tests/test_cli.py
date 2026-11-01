@@ -861,13 +861,25 @@ def _top_level_subcommands() -> list[str]:
     raise AssertionError("build_parser() registers no subcommands")
 
 
-def test_every_subcommand_is_documented():
+def _doc_texts() -> dict:
+    """Docs whose CLI surface must mirror build_parser() (S4, both ways)."""
     root = Path(__file__).resolve().parents[3]
-    docs = {
+    skill = root / "tools/agent/skills/recipe-lab-loop"
+    texts = {
         "README": (root / "tools/recipe-lab/README.md").read_text(encoding="utf-8"),
-        "command-reference.md": (
-            root / "tools/agent/skills/recipe-lab-loop/references/command-reference.md"
-        ).read_text(encoding="utf-8"),
+        "SKILL.md": (skill / "SKILL.md").read_text(encoding="utf-8"),
+    }
+    for ref in sorted((skill / "references").glob("*.md")):
+        texts[f"references/{ref.name}"] = ref.read_text(encoding="utf-8")
+    return texts
+
+
+def test_every_subcommand_is_documented():
+    # the command-surface docs must name every subcommand; prose references
+    # (SKILL.md steps, evidence/red-line notes) legitimately mention only the
+    # commands their flow uses, so they join the reverse check below only
+    docs = {
+        k: v for k, v in _doc_texts().items() if k in ("README", "references/command-reference.md")
     }
     missing = []
     for name in _top_level_subcommands():
@@ -890,13 +902,7 @@ def _top_level_parser_map() -> dict:
 
 def _documented_invocations() -> list:
     """(doc, args) for every recipe-lab invocation the docs teach."""
-    root = Path(__file__).resolve().parents[3]
-    docs = {
-        "README": (root / "tools/recipe-lab/README.md").read_text(encoding="utf-8"),
-        "command-reference.md": (
-            root / "tools/agent/skills/recipe-lab-loop/references/command-reference.md"
-        ).read_text(encoding="utf-8"),
-    }
+    docs = _doc_texts()
     found = []
     for doc, text in docs.items():
         for line in text.splitlines():
