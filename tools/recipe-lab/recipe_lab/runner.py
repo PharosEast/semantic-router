@@ -250,27 +250,34 @@ def _send_prompt(
         return int(exc.code)
 
 
-def evaluate_candidate(
-    *,
-    candidate_config: str | Path,
-    cases: list[dict[str, Any]],
-    oracle_policy: OraclePolicy,
-    bank: dict[tuple[str, str], Any],
+def probe_records(
     env: RunnerEnv,
+    config: str | Path,
+    cases: list[dict[str, Any]],
+    *,
     router_model: str = "vllm-sr/auto",
-    family: str = "d3",
     request_timeout: float = 180.0,
     trial_timeout_s: float | None = None,
-) -> dict[str, Any]:
-    """Evaluate one candidate config; returns rows + summary + request log.
+    request_id_prefix: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, float]]:
+    """The one probe primitive of the replay tier: boot the stack, send every
+    case once, pull the replay records, stop the stack.
+
+    Shared by evaluate_candidate (grading join) and the cold-start label
+    observation (observe_labels): readiness wait, per-case deadline checks,
+    the timing keys and the cleanup behave identically for both. When
+    `request_id_prefix` is given, every request carries
+    `x-request-id: <prefix><case_id>` (kept verbatim by the record), so the
+    caller can join records to cases by request id.
 
     trial_timeout_s (A5, budget.max_minutes_per_trial * 60) bounds the whole
     trial: readiness wait + request loop + replay fetch. Exceeding it raises
     RunnerTimeoutError; processes are always cleaned up in `finally`.
+    Returns (records, statuses, timings).
     """
     env.work_dir.mkdir(parents=True, exist_ok=True)
     patched_config, router_port, management_port = _patch_ports(
-        Path(candidate_config), env.work_dir
+        Path(config), env.work_dir
     )
     management_url = f"http://127.0.0.1:{management_port}"
     router_url = f"http://127.0.0.1:{router_port}"
@@ -366,8 +373,14 @@ def evaluate_candidate(
         request_started = time.monotonic()
         for case in cases:
             check_deadline(f"case {case['case_id']}")
+            request_id = (
+                None
+                if request_id_prefix is None
+                else f"{request_id_prefix}{case['case_id']}"
+            )
             statuses[case["case_id"]] = _send_prompt(
-                router_url, router_model, case["prompt"], request_timeout
+                router_url, router_model, case["prompt"], request_timeout,
+                request_id=request_id,
             )
         timings["request_s"] = time.monotonic() - request_started
 
@@ -375,31 +388,7 @@ def evaluate_candidate(
         fetch_started = time.monotonic()
         records = fetch_replays(management_url, api_key_env=env.api_key_env)
         timings["fetch_s"] = time.monotonic() - fetch_started
-        join_cases = [
-            type(
-                "CaseJoin",
-                (),
-                {"case_id": c["case_id"], "prompt": c["prompt"], "truth": c["truth"]},
-            )
-            for c in cases
-        ]
-        rows, join_stats = records_to_cases(records, join_cases, family=family)
-        rows, bank_stats = apply_bank(rows, bank)
-        classified = attribute(
-            [CaseInput.from_dict(r, i) for i, r in enumerate(rows)],
-            oracle_policy,
-            dataset_hash="",  # stamped by the caller via the spec
-        )
-        summary = summarize(classified)
-        return {
-            "rows": classified,
-            "summary": summary,
-            "statuses": statuses,
-            "join_stats": join_stats,
-            "bank_stats": bank_stats,
-            "timings": timings,
-            "reload": "restart",
-        }
+        return records, statuses, timings
     finally:
         for proc in procs:
             try:
@@ -413,6 +402,58 @@ def evaluate_candidate(
             except subprocess.TimeoutExpired:
                 with contextlib.suppress(ProcessLookupError, PermissionError):
                     os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+
+def evaluate_candidate(
+    *,
+    candidate_config: str | Path,
+    cases: list[dict[str, Any]],
+    oracle_policy: OraclePolicy,
+    bank: dict[tuple[str, str], Any],
+    env: RunnerEnv,
+    router_model: str = "vllm-sr/auto",
+    family: str = "d3",
+    request_timeout: float = 180.0,
+    trial_timeout_s: float | None = None,
+) -> dict[str, Any]:
+    """Evaluate one candidate config; returns rows + summary + request log.
+
+    Delegates the stack lifecycle to probe_records and adds the grading join:
+    records -> cases (prompt join) -> answer bank -> attribution.
+    """
+    records, statuses, timings = probe_records(
+        env,
+        candidate_config,
+        cases,
+        router_model=router_model,
+        request_timeout=request_timeout,
+        trial_timeout_s=trial_timeout_s,
+    )
+    join_cases = [
+        type(
+            "CaseJoin",
+            (),
+            {"case_id": c["case_id"], "prompt": c["prompt"], "truth": c["truth"]},
+        )
+        for c in cases
+    ]
+    rows, join_stats = records_to_cases(records, join_cases, family=family)
+    rows, bank_stats = apply_bank(rows, bank)
+    classified = attribute(
+        [CaseInput.from_dict(r, i) for i, r in enumerate(rows)],
+        oracle_policy,
+        dataset_hash="",  # stamped by the caller via the spec
+    )
+    summary = summarize(classified)
+    return {
+        "rows": classified,
+        "summary": summary,
+        "statuses": statuses,
+        "join_stats": join_stats,
+        "bank_stats": bank_stats,
+        "timings": timings,
+        "reload": "restart",
+    }
 
 
 def _management_headers(env: RunnerEnv) -> dict[str, str]:

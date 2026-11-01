@@ -73,6 +73,14 @@ from .ledger import Ledger, LedgerRecord
 from .live import live_verdict_from_runs, measurements_from_rows, verify_live
 from .model_eval_tasks import load_source_rows, rows_to_model_eval_tasks, write_tasks
 from .next import write_next_context
+from .observe_labels import (
+    build_seed_config,
+    observe_split,
+    seed_config_fingerprint,
+    write_labels,
+    write_labels_summary,
+    write_seed_config,
+)
 from .proposers import distribution_calibration, rule_threshold, threshold_search
 from .provenance import write_run_manifest
 from .report import render_promotion_draft, write_run_report
@@ -217,6 +225,90 @@ def cmd_cases_to_model_eval(args: argparse.Namespace) -> int:
             "output": str(output),
             "tasks_count": len(tasks),
             "tasks_sha256": dataset_content_hash(output),
+        }
+    )
+    return 0
+
+
+def cmd_observe_labels(args: argparse.Namespace) -> int:
+    """C2: observe the router's own domain labels for one split.
+
+    Generates the seed config (14 domain decisions + catch-all, decision
+    model pinned), boots the stack via the runner with tagged request ids,
+    and writes labels-<split>.jsonl (case_id/router_label/confidence) plus a
+    summary carrying the label coverage the provenance records.
+    """
+    spec = _load_spec(args.spec)
+    # B/M5: the same split resolution and quarantine rules as run/attribute.
+    workload = spec.require_tunable_workload(getattr(args, "workload", None))
+    split_name = _select_split(spec, args.split, workload)
+    # A4: re-hash the selected split before touching it.
+    spec.verify_workload(split=split_name, workload=workload.name)
+    if spec.spec_dir is None:
+        raise ContractError("spec must be loaded from a file to resolve its manifest")
+    cases_path = Path(spec.spec_dir) / workload.split_manifest(split_name)
+    try:
+        cases = load_cases(cases_path)
+    except OSError as exc:
+        raise ContractError(f"cannot read split manifest: {exc}") from exc
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    seed_config = build_seed_config(backend_endpoint=f"127.0.0.1:{args.backend_port}")
+    config_path = write_seed_config(seed_config, out_dir / "seed-config.yaml")
+
+    env = RunnerEnv(
+        router_bin=args.router_bin,
+        mock_backend_script=args.mock_backend,
+        python_bin=args.python_bin,
+        work_dir=out_dir / "work",
+        backend_port=args.backend_port,
+        ready_timeout_s=args.ready_timeout,
+        hf_home=args.hf_home,
+        mock_extra_args=(
+            tuple(args.mock_extra_args.split()) if args.mock_extra_args else ()
+        ),
+    )
+    # A5: the per-trial budget bounds readiness wait + requests + fetch.
+    trial_timeout_s = spec.budget.max_minutes_per_trial * 60
+    try:
+        result = observe_split(
+            env=env,
+            config=config_path,
+            cases=cases,
+            router_model=args.router_model,
+            request_timeout=args.request_timeout,
+            trial_timeout_s=trial_timeout_s,
+        )
+    except RunnerTimeoutError as exc:
+        raise SystemExit(f"observation exceeded the trial budget: {exc}") from exc
+    except (RunnerError, ContractError) as exc:
+        raise SystemExit(f"observation failed: {exc}") from exc
+
+    labels_path = write_labels(result["rows"], out_dir / f"labels-{split_name}.jsonl")
+    summary = {
+        **result["summary"],
+        "split": split_name,
+        "workload": workload.name,
+        "cases_file": str(cases_path),
+        "cases_sha256": workload.split_hash(split_name),
+        "seed_config": str(config_path),
+        "seed_config_sha256": seed_config_fingerprint(config_path),
+        "join_stats": result["stats"],
+        "timings": result["timings"],
+    }
+    summary_path = write_labels_summary(
+        summary, out_dir / f"labels-{split_name}-summary.json"
+    )
+    _print_json(
+        {
+            "labels": str(labels_path),
+            "summary": str(summary_path),
+            "cases": summary["cases"],
+            "observed": summary["observed"],
+            "missing": summary["missing"],
+            "label_coverage": summary["label_coverage"],
+            "label_counts": summary["label_counts"],
         }
     )
     return 0
@@ -1496,6 +1588,70 @@ def build_parser() -> argparse.ArgumentParser:
         help="dataset label for raw rows without a source field",
     )
     p_toeval.set_defaults(func=cmd_cases_to_model_eval)
+
+    p_observe = sub.add_parser(
+        "observe-labels",
+        help="observe the router's own domain labels for a split (C2: seed "
+        "config + tagged probe -> labels-<split>.jsonl with case_id/"
+        "router_label/confidence; unmatched decisions record other)",
+    )
+    p_observe.add_argument(
+        "--spec", required=True, help="experiment spec YAML (selects the split)"
+    )
+    p_observe.add_argument(
+        "--split",
+        default="dev",
+        choices=["calib", "dev", "frozen_test"],
+        help="workload split to observe (frozen_test is quarantined; B)",
+    )
+    p_observe.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads (default: the first workload; "
+        "transfer workloads are quarantined; M5)",
+    )
+    p_observe.add_argument(
+        "--out",
+        required=True,
+        help="output directory (seed-config.yaml + labels-<split>.jsonl + "
+        "labels-<split>-summary.json + work/)",
+    )
+    p_observe.add_argument(
+        "--router-bin", required=True, help="path to the semantic-router binary"
+    )
+    p_observe.add_argument(
+        "--mock-backend",
+        required=True,
+        help="path to a mock/real OpenAI backend launcher script",
+    )
+    p_observe.add_argument(
+        "--python-bin", default=sys.executable, help="python used to launch the backend"
+    )
+    p_observe.add_argument("--router-model", default="vllm-sr/auto")
+    p_observe.add_argument("--backend-port", type=int, default=8000)
+    p_observe.add_argument(
+        "--ready-timeout",
+        type=int,
+        default=300,
+        help="model-runtime readiness timeout in seconds",
+    )
+    p_observe.add_argument(
+        "--hf-home",
+        default=None,
+        help="HF_HOME for the router process (model artifacts)",
+    )
+    p_observe.add_argument(
+        "--mock-extra-args",
+        default="",
+        help="extra args passed to the mock backend (split on spaces)",
+    )
+    p_observe.add_argument(
+        "--request-timeout",
+        type=float,
+        default=180.0,
+        help="per-request timeout in seconds",
+    )
+    p_observe.set_defaults(func=cmd_observe_labels)
 
     p_attr = sub.add_parser(
         "attribute", help="run E1/E2/E3 misroute attribution over labeled records"
