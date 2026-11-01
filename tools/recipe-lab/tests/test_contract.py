@@ -802,7 +802,7 @@ def test_cost_basis_rejects_bad_source_or_rates():
         ExperimentSpec.from_dict(raw)
 
 
-@pytest.mark.parametrize("ref_bound", ["ref:strong", "ref:weak"])
+@pytest.mark.parametrize("ref_bound", ["ref:strong", "ref:weak", "ref:random_mix"])
 def test_ref_bound_requires_references_section(ref_bound):
     # ref-bound constraint without a references section is a contract error
     raw = copy.deepcopy(VALID_SPEC)
@@ -850,6 +850,26 @@ def test_non_cost_ref_bound_needs_no_cost_basis():
     ]
     spec = ExperimentSpec.from_dict(raw)
     assert spec.cost_basis is None
+
+
+def test_random_mix_ref_bound_parses():
+    # C8: ref:random_mix is a valid reference bound (resolved against the
+    # model_eval driver's computed mix, not a declared arm)
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["references"] = {"strong": "model-a", "weak": "model-b"}
+    raw["objective"]["constraints"] = [
+        {
+            "name": "beat-mix",
+            "metric": "capability.score",
+            "op": "gte",
+            "bound": "ref:random_mix",
+        }
+    ]
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.objective.constraints[0].bound == "ref:random_mix"
+    raw["objective"]["constraints"][0]["factor"] = 0.95
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.objective.constraints[0].factor == 0.95
 
 
 def test_constraint_ref_factor_and_tolerance_pp_parse():

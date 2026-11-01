@@ -29,15 +29,26 @@ sr-bench: an unanswered or missing case counts as incorrect, never as
 absent evidence in the score. The paired delta, by contrast, is computed
 over the cases both arms judged (the sr-bench compare convention).
 
-Router-arm spend is unknown (the router hides which model served each
-call) and stays None; reference arms get an "assumed" estimate from
-`cost_basis.assumed_pricing` when the records carry token counts.
+Router-arm spend is unknown and stays None; reference arms get an
+"assumed" estimate from `cost_basis.assumed_pricing` when the records
+carry token counts. Since C8 the records also carry each response's
+`model` (the backend that actually served the call), which gives the
+candidate arm's routing distribution and the cost-matched random mix R:
+the share-weighted mixture of the reference arms' per-case accuracy and
+cost, a paired C-vs-R bootstrap interval where every resample redraws
+R's assignment by the shares, a Pareto row, and the `ref:random_mix`
+constraint bound. Missing evidence (no records, no responding model, a
+routed model outside `spec.models`, an unmeasured reference) keeps R
+unevaluable with a reason - never guessed.
 """
 
 from __future__ import annotations
 
+import bisect
 import json
+import random
 import statistics
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -57,7 +68,13 @@ from .profile import (
     _run,
     wilson_interval,
 )
-from .verdict import PairedStats, compute_paired_stats, evaluate_verdict
+from .verdict import (
+    _BOOTSTRAP_SAMPLES,
+    _BOOTSTRAP_SEED,
+    PairedStats,
+    compute_paired_stats,
+    evaluate_verdict,
+)
 
 _GEN_SCRIPT = "multi_benchmark_eval.py"
 _JUDGE_SCRIPT = "mcq_judge.py"
@@ -211,18 +228,18 @@ def _arm_accuracy(judged_rows: list[dict[str, Any]], planned: int) -> float:
     return correct / planned if planned else 0.0
 
 
-def _arm_cost_usd(
+def _arm_token_costs(
     records_rows: list[dict[str, Any]], pricing: dict[str, float] | None
-) -> float | None:
-    """Total assumed spend of one direct arm from its records' token counts.
+) -> list[float] | None:
+    """Per-request assumed costs from one arm's records' token counts.
 
     Only `assumed_pricing` rates are available here (provider billing never
-    sees these calls); no rates or unknown token counts -> None.
+    sees these calls); rows without numeric token counts are skipped. None
+    means pricing itself is undeclared - unknown, never zero.
     """
     if pricing is None:
         return None
-    total = 0.0
-    seen = False
+    costs: list[float] = []
     for row in records_rows:
         prompt = row.get("prompt_tokens")
         completion = row.get("completion_tokens")
@@ -230,12 +247,238 @@ def _arm_cost_usd(
             continue
         if not isinstance(completion, (int, float)) or isinstance(completion, bool):
             continue
-        total += (
+        costs.append(
             prompt / 1e6 * pricing["prompt_per_1m"]
             + completion / 1e6 * pricing["completion_per_1m"]
         )
-        seen = True
-    return total if seen else None
+    return costs
+
+
+def _arm_cost_usd(
+    records_rows: list[dict[str, Any]], pricing: dict[str, float] | None
+) -> float | None:
+    """Total assumed spend of one direct arm from its records' token counts.
+
+    No rates or unknown token counts -> None.
+    """
+    costs = _arm_token_costs(records_rows, pricing)
+    return sum(costs) if costs else None
+
+
+def _arm_mean_case_cost(
+    records_rows: list[dict[str, Any]], pricing: dict[str, float] | None
+) -> float | None:
+    """Mean per-request assumed cost of one direct arm (None without prices)."""
+    costs = _arm_token_costs(records_rows, pricing)
+    return sum(costs) / len(costs) if costs else None
+
+
+def routing_shares_from_records(
+    records_rows: list[dict[str, Any]],
+) -> dict[str, float] | None:
+    """C8: one arm's routing distribution from its records.
+
+    Each record's `model` field is the responding model - for a router arm
+    the backend that actually served the call. Shares are the fraction of
+    model-carrying records per model; rows without a model (failed
+    requests, endpoints that do not report it) are not routing evidence
+    and stay out of the denominator. No model at all -> None: the routing
+    distribution is unknown, never guessed.
+    """
+    counts: Counter[str] = Counter()
+    for row in records_rows:
+        model = row.get("model")
+        if isinstance(model, str) and model.strip():
+            counts[model] += 1
+    total = sum(counts.values())
+    if not total:
+        return None
+    return {model: count / total for model, count in sorted(counts.items())}
+
+
+def random_mix_paired_stats(
+    cand_rows: list[dict[str, Any]],
+    ref_rows_by_alias: dict[str, list[dict[str, Any]]],
+    shares: dict[str, float],
+    *,
+    alpha: float = 0.05,
+    bootstrap_samples: int = _BOOTSTRAP_SAMPLES,
+    seed: int = _BOOTSTRAP_SEED,
+) -> dict[str, Any] | None:
+    """C8: paired statistics of the candidate arm against the random mix R.
+
+    R answers task i with model m drawn with probability p_m (the
+    candidate arm's routing shares over `spec.models` aliases), so its
+    per-task correctness is a random variable: every bootstrap resample
+    redraws R's assignment as well as the task indices, and the interval
+    is the bootstrap quantiles with the same fixed seed and quantile
+    indexing as `compute_paired_stats`. The point delta is analytic - the
+    candidate accuracy minus the share-weighted reference accuracies over
+    the paired cases. Cases pair only when the candidate row and every
+    weighted reference arm judged them; an empty pairing yields None.
+    """
+    cand_by_task = {
+        row.get("task_id"): bool(row.get("is_correct"))
+        for row in cand_rows
+        if row.get("task_id")
+    }
+    ref_by_task = {
+        alias: {
+            row.get("task_id"): bool(row.get("is_correct"))
+            for row in rows
+            if row.get("task_id")
+        }
+        for alias, rows in ref_rows_by_alias.items()
+    }
+    aliases = sorted(a for a, p in shares.items() if p > 0)
+    if not aliases or not cand_by_task:
+        return None
+    paired = [
+        task_id
+        for task_id in sorted(cand_by_task)
+        if all(task_id in ref_by_task[a] for a in aliases)
+    ]
+    if not paired:
+        return None
+    weight_sum = sum(shares[a] for a in aliases)
+    probs = {a: shares[a] / weight_sum for a in aliases}
+    cand_ok = [1.0 if cand_by_task[task_id] else 0.0 for task_id in paired]
+    ref_ok = {
+        a: [1.0 if ref_by_task[a][task_id] else 0.0 for task_id in paired]
+        for a in aliases
+    }
+    delta = statistics.mean(cand_ok) - sum(
+        probs[a] * statistics.mean(ref_ok[a]) for a in aliases
+    )
+    # Joint bootstrap: resample task indices with replacement and redraw
+    # R's per-task assignment by the shares on every resample.
+    cumulative: list[float] = []
+    total = 0.0
+    for a in aliases:
+        total += probs[a]
+        cumulative.append(total)
+    rng = random.Random(seed)
+    n = len(paired)
+    samples: list[float] = []
+    for _ in range(bootstrap_samples):
+        idx = rng.choices(range(n), k=n)
+        c_sum = 0.0
+        r_sum = 0.0
+        for i in idx:
+            c_sum += cand_ok[i]
+            draw = rng.random() * total
+            alias = aliases[bisect.bisect_left(cumulative, draw)]
+            r_sum += ref_ok[alias][i]
+        samples.append(c_sum / n - r_sum / n)
+    samples.sort()
+    low_i = max(0, int(0.025 * bootstrap_samples) - 1)
+    high_i = min(bootstrap_samples - 1, int(0.975 * bootstrap_samples) - 1)
+    return {
+        "paired_cases": n,
+        "delta": delta,
+        # the C8 validation check: the resampled mean converges to the
+        # analytic delta (report cross-check, P3 evidence)
+        "bootstrap_mean": statistics.mean(samples),
+        "bootstrap_ci95": (samples[low_i], samples[high_i]),
+    }
+
+
+def _random_mix_evidence(
+    *,
+    spec: ExperimentSpec,
+    planned: int,
+    cand_judged_rows: list[dict[str, Any]],
+    cand_records_rows: list[dict[str, Any]],
+    ref_rows_by_role: dict[str, list[dict[str, Any]]],
+    ref_case_cost_by_role: dict[str, float | None],
+) -> dict[str, Any]:
+    """C8: the cost-matched random mix R for the candidate arm.
+
+    Shares come from the candidate arm's records (the responding model of
+    each request, mapped to `spec.models` aliases via served names);
+    expected accuracy and cost mix the reference arms' per-case values by
+    those shares. Every gap - no records, no responding model, a routed
+    model outside `spec.models`, an unmeasured needed reference - keeps R
+    unevaluable with a reason; missing evidence is never counted as zero.
+    """
+    evidence: dict[str, Any] = {
+        "evaluable": False,
+        "reason": None,
+        "shares": {},
+        "expected_accuracy": None,
+        "expected_cost": None,
+        "cost_note": None,
+        "paired": None,
+    }
+    if spec.references is None:
+        evidence["reason"] = "the spec declares no references section"
+        return evidence
+    served_shares = routing_shares_from_records(cand_records_rows)
+    if served_shares is None:
+        evidence["reason"] = (
+            "candidate arm records carry no responding model: the routing "
+            "distribution is unknown"
+        )
+        return evidence
+    served_to_alias = {model.served_name: model.name for model in spec.models}
+    shares: dict[str, float] = {}
+    unknown: list[str] = []
+    for served, share in served_shares.items():
+        alias = served_to_alias.get(served)
+        if alias is None:
+            unknown.append(served)
+        else:
+            shares[alias] = shares.get(alias, 0.0) + share
+    if unknown:
+        evidence["reason"] = (
+            "candidate arm routed to models outside spec.models: "
+            + ", ".join(sorted(unknown))
+        )
+        return evidence
+    ref_rows_by_alias: dict[str, list[dict[str, Any]]] = {}
+    case_cost_by_alias: dict[str, float | None] = {}
+    missing: list[str] = []
+    for role in ("strong", "weak"):
+        alias = getattr(spec.references, role)
+        rows = ref_rows_by_role.get(role)
+        if rows:
+            ref_rows_by_alias[alias] = rows
+            case_cost_by_alias[alias] = ref_case_cost_by_role.get(role)
+        else:
+            missing.append(f"{role} ({alias})")
+    needed = sorted(a for a, p in shares.items() if p > 0)
+    unmeasured = [a for a in needed if a not in ref_rows_by_alias]
+    if missing or unmeasured:
+        gaps = sorted(set(missing) | set(unmeasured))
+        evidence["reason"] = (
+            "reference arms missing or unmeasured for the random mix: "
+            + ", ".join(gaps)
+        )
+        return evidence
+    case_costs = {a: case_cost_by_alias.get(a) for a in needed}
+    expected_case_cost: float | None = None
+    if all(cost is not None for cost in case_costs.values()):
+        expected_case_cost = sum(shares[a] * case_costs[a] for a in needed)
+    evidence.update(
+        {
+            "evaluable": True,
+            "shares": dict(sorted(shares.items())),
+            "expected_accuracy": sum(
+                shares[a] * _arm_accuracy(ref_rows_by_alias[a], planned)
+                for a in needed
+            ),
+            "expected_cost": (
+                expected_case_cost * planned
+                if expected_case_cost is not None
+                else None
+            ),
+            "cost_note": "assumed" if expected_case_cost is not None else None,
+        }
+    )
+    evidence["paired"] = random_mix_paired_stats(
+        cand_judged_rows, ref_rows_by_alias, shares
+    )
+    return evidence
 
 
 def _latency_percentiles(records_rows: list[dict[str, Any]]) -> tuple[
@@ -308,11 +551,16 @@ def verify_live_model_eval(
     endpoint (`spec.models` entry), cached by (tasks hash, alias) in
     `run_cache`; their values anchor `ref:`-bound constraints.
 
+    C8: the cost-matched random mix R mixes the reference arms' per-case
+    accuracy and cost by the candidate arm's routing distribution (the
+    responding `model` in its records, last completed repetition); it
+    anchors `ref:random_mix` constraint bounds and the Pareto row.
+
     The result dict mirrors the sr-bench driver's shape (verdict/reasons/
     metrics/gates/constraints/bench_refs/trials/abba_summary/paired/
-    evidence_quality/references/pareto) plus `driver`, `tasks_hash` and
-    `planned_cases`; `preview` and `baseline_run_id` are None - there is
-    no sr-bench run behind this evidence.
+    evidence_quality/references/random_mix/pareto) plus `driver`,
+    `tasks_hash` and `planned_cases`; `preview` and `baseline_run_id` are
+    None - there is no sr-bench run behind this evidence.
     """
     if repetitions < 1:
         raise ContractError("verify needs at least one repetition")
@@ -459,6 +707,9 @@ def verify_live_model_eval(
     references_evidence: dict[str, Any] = {}
     reference_values: dict[str, float | None] = {"strong": None, "weak": None}
     ref_pareto: list[dict[str, Any]] = []
+    # C8: per-role judged rows and mean per-case costs feed the random mix
+    ref_rows_by_role: dict[str, list[dict[str, Any]]] = {}
+    ref_case_cost_by_role: dict[str, float | None] = {}
     if spec.references is not None:
         models_by_name = {model.name: model for model in spec.models}
         cache = _load_run_cache(run_cache)
@@ -506,6 +757,7 @@ def verify_live_model_eval(
                 entry["cached"] = True
             ref_rows = _read_jsonl(judged_path)
             ref_records = _read_optional(judged_path.parent / "records.jsonl")
+            ref_rows_by_role[role] = ref_rows
             entry.update(
                 {
                     "judged": str(judged_path),
@@ -513,6 +765,7 @@ def verify_live_model_eval(
                 }
             )
             pricing = pricing_by_alias.get(alias)
+            ref_case_cost_by_role[role] = _arm_mean_case_cost(ref_records, pricing)
             cost = _arm_cost_usd(ref_records, pricing)
             entry.update(
                 {
@@ -556,6 +809,7 @@ def verify_live_model_eval(
     # Pareto rows: the last completed pair's arms plus the references.
     pareto: list[dict[str, Any]] = []
     last_rep = max(judged_by_arm, key=lambda k: k[0], default=None)
+    cand_records_rows: list[dict[str, Any]] = []
     if last_rep is not None:
         rep = last_rep[0]
         for label in (abba.BASELINE, abba.CANDIDATE):
@@ -564,6 +818,8 @@ def verify_live_model_eval(
             records_rows = _read_optional(
                 Path(trials[rep][label]["judged"]).parent / "records.jsonl"
             )
+            if label == abba.CANDIDATE:
+                cand_records_rows = records_rows
             pareto.append(
                 _pareto_row(
                     arm=label,
@@ -572,13 +828,46 @@ def verify_live_model_eval(
                     judged_rows=judged_rows,
                     records_rows=records_rows,
                     planned=planned,
-                    # the router hides which model served each call: spend
-                    # is unknown, never zero
+                    # the router hides the spend: unknown, never zero
                     cost_usd=None,
                     cost_note=None,
                 )
             )
     pareto.extend(ref_pareto)
+
+    # C8: the cost-matched random mix R, from the last completed candidate
+    # repetition (the same convention as the Pareto rows). Its expected
+    # accuracy anchors `ref:random_mix` constraint bounds; a Pareto row and
+    # a paired C-vs-R bootstrap interval carry the P3 comparison.
+    random_mix = _random_mix_evidence(
+        spec=spec,
+        planned=planned,
+        cand_judged_rows=(
+            judged_by_arm[(last_rep[0], abba.CANDIDATE)]
+            if last_rep is not None
+            else []
+        ),
+        cand_records_rows=cand_records_rows,
+        ref_rows_by_role=ref_rows_by_role,
+        ref_case_cost_by_role=ref_case_cost_by_role,
+    )
+    if random_mix["evaluable"]:
+        reference_values["random_mix"] = random_mix["expected_accuracy"]
+        pareto.append(
+            {
+                "arm": "reference",
+                "id": "ref:random_mix",
+                "role": "random_mix",
+                "accuracy": random_mix["expected_accuracy"],
+                # a share-weighted mixture has no single binomial count:
+                # the paired bootstrap interval is the reported interval
+                "accuracy_ci95": None,
+                "cost_usd": random_mix["expected_cost"],
+                "cost_note": random_mix["cost_note"],
+                "latency_p50_s": None,
+                "latency_p95_s": None,
+            }
+        )
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
     stats = _merge_paired_stats(pair_stats) if pair_stats else None
@@ -607,6 +896,8 @@ def verify_live_model_eval(
     for role in ("strong", "weak"):
         if role in references_evidence:
             bench_refs.append(f"meval:reference:{role}")
+    if random_mix["evaluable"]:
+        bench_refs.append("meval:reference:random_mix")
     result: dict[str, Any] = {
         "verdict": verdict.verdict,
         "reasons": list(verdict.reasons),
@@ -631,6 +922,7 @@ def verify_live_model_eval(
         "paired": stats.to_dict() if stats else None,
         "evidence_quality": evidence,
         "references": references_evidence,
+        "random_mix": random_mix,
         "pareto": pareto,
         "driver": "model_eval",
         "tasks_hash": tasks_hash,
