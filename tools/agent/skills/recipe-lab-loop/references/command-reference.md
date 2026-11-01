@@ -344,6 +344,20 @@ proposals.
 - `recipe-lab provenance --ledger L --output M` - recipe-lab-run-v1 manifest.
 - `recipe-lab record-draft --ledger L --output D` - promotion draft from the
   latest PASS live record (human checklist included).
+- `recipe-lab bundle --spec S --ledger L --record rec-... --out DIR --config
+  FINAL.yaml --skeleton SCAFFOLD.yaml --profile PROFILE.json` - C9 packaging
+  of final-verify evidence. Only a live PASS citing `split: frozen_test` or
+  a `role: transfer` workload, with every guard `pass` and a config that
+  passes `<validate-bin> config validate`, is bundled; anything else exits 2
+  without writing. Byte-stable artifacts: config.yaml, validate.txt,
+  config.diff, report.md (verdict detail, campaign table, per-workload
+  counts, evidence quality, assumptions, limitations, cache/tools note),
+  ledger.jsonl (same-dataset-hash excerpt), provenance.json (hashes plus
+  `--router-commit` / `--model-revision NAME=REV` / `--model-eval-script`,
+  missing evidence recorded as null), PROMOTION.md (the record draft) and
+  REVIEW.md (empty V5 template). All artifacts are scanned for private
+  content (personal user paths, non-local IP URLs, `--private-pattern`
+  regexes) before anything is written.
 
 ## Notes
 
