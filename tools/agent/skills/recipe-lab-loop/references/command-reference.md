@@ -284,6 +284,17 @@ proposals.
     `--router-model vllm-sr/auto`, `--python-bin B`, `--concurrency N`,
     `--request-timeout S`, `--force`. sr-bench flags are ignored and
     `--baseline-run-id` / `--baseline-manifest` are rejected in this mode.
+    Random mix R (C8): the records now carry each response's `model` (the
+    actually-routed backend), so the driver derives the candidate arm's
+    routing shares, mixes the reference arms' per-case accuracy and
+    per-case cost by those shares, and reports the expected accuracy/cost
+    plus a paired C-vs-R bootstrap interval (R is re-assigned by the
+    shares on every resample). R enters the verdict input as the
+    `ref:random_mix` reference role (usable as a constraint `bound`), a
+    trailing `ref:random_mix` Pareto row, and the result's `random_mix`
+    section (the P3 interval). Missing evidence - no `model` in the
+    records, a routed model outside `spec.models`, an unmeasured needed
+    reference - keeps R unevaluable with a reason, never guessed.
 - `recipe-lab live-verdict --spec S [--split dev|calib|frozen_test] --final?
   --baseline-run-id A --candidate-run-id B [--guard-measurements M]
   [--candidate J] [--insight-refs R]

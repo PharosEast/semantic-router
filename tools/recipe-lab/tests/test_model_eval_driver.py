@@ -9,6 +9,8 @@ from recipe_lab.live import paired_stats_from_comparison
 from recipe_lab.model_eval_driver import (
     arm_quality_rates,
     paired_stats_from_judged,
+    random_mix_paired_stats,
+    routing_shares_from_records,
     run_arm,
     verify_live_model_eval,
 )
@@ -97,11 +99,17 @@ def _judged_rows(tasks: list[dict], correct_ids: set[str]) -> list[dict]:
     ]
 
 
-def _fake_run_arm(correct_by_arm: dict[str, set[str]]):
+def _fake_run_arm(
+    correct_by_arm: dict[str, set[str]],
+    model_by_arm: dict[str, list[str]] | None = None,
+):
     """A run_arm stand-in: writes judged+records driven by the plan.
 
     `correct_by_arm` keys match the endpoint for router arms and the
-    served model name for reference arms. Returns (fake, calls).
+    served model name for reference arms. `model_by_arm` (C8) maps the
+    same keys to one responding-model name per task index, written into
+    each record; when omitted the records carry no model field (the
+    pre-C8 script shape). Returns (fake, calls).
     """
     calls: list[dict] = []
 
@@ -133,16 +141,23 @@ def _fake_run_arm(correct_by_arm: dict[str, set[str]]):
             "".join(json.dumps(r, sort_keys=True) + "\n" for r in judged),
             encoding="utf-8",
         )
-        records = [
-            {
+        model_plan = (
+            model_by_arm.get(endpoint, model_by_arm.get(model))
+            if model_by_arm is not None
+            else None
+        )
+        records = []
+        for i, task in enumerate(tasks):
+            record = {
                 "task_id": task["task_id"],
                 "prompt_tokens": 100,
                 "completion_tokens": 10,
                 "latency_s": 0.5,
                 "error": None,
             }
-            for task in tasks
-        ]
+            if model_plan is not None:
+                record["model"] = model_plan[i]
+            records.append(record)
         (out / "records.jsonl").write_text(
             "".join(json.dumps(r, sort_keys=True) + "\n" for r in records),
             encoding="utf-8",
@@ -258,6 +273,60 @@ def test_arm_quality_rates_rates_and_missing():
         "finish_reason_length_rate": None,
     }
     assert arm_quality_rates(rows, planned_cases=0) is None
+
+
+def test_routing_shares_from_records():
+    rows = [
+        {"model": "m-a", "error": None},
+        {"model": "m-b", "error": None},
+        {"model": "m-a", "error": None},
+        {"error": "boom"},  # failed request: no model, no share
+        {"model": "  ", "error": None},  # blank: not routing evidence
+    ]
+    shares = routing_shares_from_records(rows)
+    assert shares == {"m-a": 2 / 3, "m-b": 1 / 3}
+    assert routing_shares_from_records([{"task_id": "t"}]) is None
+    assert routing_shares_from_records([]) is None
+
+
+def test_random_mix_paired_stats_matches_analytic():
+    # C8 test: two models, synthetic per-task data; the bootstrap mean
+    # matches the analytic delta mean(c) - sum(p_m * mean(ref_m)) and the
+    # interval brackets it.
+    n = 40
+    cand = [{"task_id": f"t{i}", "is_correct": i < 30} for i in range(n)]
+    strong = [{"task_id": f"t{i}", "is_correct": True} for i in range(n)]
+    weak = [{"task_id": f"t{i}", "is_correct": i < 10} for i in range(n)]
+    shares = {STRONG: 0.5, WEAK: 0.5}
+    stats = random_mix_paired_stats(cand, {STRONG: strong, WEAK: weak}, shares)
+    assert stats is not None
+    assert stats["paired_cases"] == n
+    analytic = 0.75 - (0.5 * 1.0 + 0.5 * 0.25)
+    assert stats["delta"] == pytest.approx(analytic)
+    assert stats["bootstrap_mean"] == pytest.approx(analytic, abs=0.01)
+    low, high = stats["bootstrap_ci95"]
+    assert low <= analytic <= high
+
+
+def test_random_mix_paired_stats_edges():
+    n = 10
+    cand = [{"task_id": f"t{i}", "is_correct": i % 2 == 0} for i in range(n)]
+    strong = [{"task_id": f"t{i}", "is_correct": True} for i in range(n)]
+    weak = [{"task_id": f"t{i}", "is_correct": False} for i in range(n)]
+    # a single-model share collapses R to that reference arm exactly
+    stats = random_mix_paired_stats(
+        cand, {STRONG: strong, WEAK: weak}, {STRONG: 1.0, WEAK: 0.0}
+    )
+    assert stats is not None
+    assert stats["delta"] == pytest.approx(0.5 - 1.0)
+    assert stats["bootstrap_mean"] == pytest.approx(0.5 - 1.0, abs=0.01)
+    # no common cases between the arms -> no paired evidence
+    stranger = [{"task_id": "zz", "is_correct": True}]
+    assert (
+        random_mix_paired_stats(stranger, {STRONG: strong}, {STRONG: 1.0}) is None
+    )
+    # no positively-weighted model -> nothing to mix
+    assert random_mix_paired_stats(cand, {STRONG: strong}, {STRONG: 0.0}) is None
 
 
 def test_run_arm_argv_outputs_and_missing_script(tmp_path, monkeypatch):
@@ -414,6 +483,11 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     cached_keys = json.loads(run_cache.read_text(encoding="utf-8"))
     assert len(cached_keys) == 2
     assert all(key.startswith(result["tasks_hash"]) for key in cached_keys)
+    # C8: these records carry no responding model, so the random mix is
+    # unknown - reported with a reason, never guessed
+    assert result["random_mix"]["evaluable"] is False
+    assert "no responding model" in result["random_mix"]["reason"]
+    assert result["random_mix"]["expected_accuracy"] is None
 
     # a second verify reuses the reference arms (same tasks hash + alias)
     result2 = verify_live_model_eval(
@@ -434,6 +508,133 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     assert result2["verdict"] == "PASS"
     ref_calls = [c for c in calls if c["model"] != ROUTER_MODEL]
     assert len(ref_calls) == 2  # not re-run
+
+
+def test_verify_live_model_eval_random_mix(tmp_path, monkeypatch):
+    # C8: the candidate router sends 3 of every 5 cases to STRONG (served
+    # name defaults to the alias) and the rest to the weak model's served
+    # name; the mix resolves against the reference arms and anchors a
+    # `ref:random_mix` constraint.
+    tasks_path = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks_path)
+    _, plan = _golden_plan()
+    model_plan = {
+        BASE_ENDPOINT: [STRONG] * N_TASKS,
+        CAND_ENDPOINT: [
+            STRONG if i % 5 < 3 else "plain-served" for i in range(N_TASKS)
+        ],
+        STRONG: [STRONG] * N_TASKS,
+        "plain-served": ["plain-served"] * N_TASKS,
+    }
+    fake, _ = _fake_run_arm(plan, model_plan)
+    monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
+    spec_dict = _spec_dict()
+    # price the weak model too, so R's expected cost is computable
+    spec_dict["cost_basis"]["assumed_pricing"][WEAK] = {
+        "prompt_per_1m": 0.2,
+        "completion_per_1m": 0.4,
+    }
+    spec_dict["objective"]["constraints"] = [
+        {
+            "name": "beat-mix",
+            "metric": "accuracy",
+            "op": "gte",
+            "bound": "ref:random_mix",
+        }
+    ]
+    spec = ExperimentSpec.from_dict(spec_dict)
+    result = verify_live_model_eval(
+        spec=spec,
+        tasks_path=tasks_path,
+        baseline_endpoint=BASE_ENDPOINT,
+        candidate_endpoint=CAND_ENDPOINT,
+        router_model=ROUTER_MODEL,
+        repetitions=1,
+        measurements=[],
+        model_eval_dir=tmp_path / "scripts",
+        python_bin="python",
+        work_dir=tmp_path / "work",
+    )
+
+    mix = result["random_mix"]
+    assert mix["evaluable"] is True
+    assert mix["reason"] is None
+    assert mix["shares"] == {STRONG: 0.6, WEAK: 0.4}
+    assert mix["expected_accuracy"] == pytest.approx(0.6)  # 0.6*1.0 + 0.4*0.0
+    strong_case = (100 * 0.5 + 10 * 1.0) / 1e6
+    weak_case = (100 * 0.2 + 10 * 0.4) / 1e6
+    assert mix["expected_cost"] == pytest.approx(
+        N_TASKS * (0.6 * strong_case + 0.4 * weak_case)
+    )
+    assert mix["cost_note"] == "assumed"
+    paired = mix["paired"]
+    assert paired["paired_cases"] == N_TASKS
+    assert paired["delta"] == pytest.approx(0.4)  # 1.0 - 0.6
+    assert paired["bootstrap_mean"] == pytest.approx(0.4, abs=0.01)
+    low, high = paired["bootstrap_ci95"]
+    assert low <= 0.4 <= high
+    # the constraint resolves against the mix and passes
+    constraint = result["constraints"][0]
+    assert constraint["status"] == "pass"
+    assert constraint["bound_value"] == pytest.approx(0.6)
+    assert result["verdict"] == "PASS"
+    # R's Pareto row trails the reference arms
+    assert [row["id"] for row in result["pareto"]] == [
+        f"router:{BASE_ENDPOINT}",
+        f"router:{CAND_ENDPOINT}",
+        STRONG,
+        WEAK,
+        "ref:random_mix",
+    ]
+    assert result["pareto"][-1]["accuracy"] == pytest.approx(0.6)
+    assert result["pareto"][-1]["accuracy_ci95"] is None
+    assert "meval:reference:random_mix" in result["bench_refs"]
+
+
+def test_verify_live_model_eval_random_mix_unknown_model(tmp_path, monkeypatch):
+    # a routed model outside spec.models keeps the mix unevaluable: a
+    # ref:random_mix constraint is then not evaluated (INCONCLUSIVE)
+    tasks_path = tmp_path / "tasks.jsonl"
+    _write_tasks(tasks_path)
+    _, plan = _golden_plan()
+    model_plan = {
+        BASE_ENDPOINT: [STRONG] * N_TASKS,
+        CAND_ENDPOINT: ["mystery-served"] * N_TASKS,
+        STRONG: [STRONG] * N_TASKS,
+        "plain-served": ["plain-served"] * N_TASKS,
+    }
+    fake, _ = _fake_run_arm(plan, model_plan)
+    monkeypatch.setattr("recipe_lab.model_eval_driver.run_arm", fake)
+    spec_dict = _spec_dict()
+    spec_dict["objective"]["constraints"] = [
+        {
+            "name": "beat-mix",
+            "metric": "accuracy",
+            "op": "gte",
+            "bound": "ref:random_mix",
+        }
+    ]
+    spec = ExperimentSpec.from_dict(spec_dict)
+    result = verify_live_model_eval(
+        spec=spec,
+        tasks_path=tasks_path,
+        baseline_endpoint=BASE_ENDPOINT,
+        candidate_endpoint=CAND_ENDPOINT,
+        router_model=ROUTER_MODEL,
+        repetitions=1,
+        measurements=[],
+        model_eval_dir=tmp_path / "scripts",
+        python_bin="python",
+        work_dir=tmp_path / "work",
+    )
+    mix = result["random_mix"]
+    assert mix["evaluable"] is False
+    assert "outside spec.models" in mix["reason"]
+    assert mix["expected_accuracy"] is None
+    assert result["constraints"][0]["status"] == "not_evaluated"
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert not any(row["id"] == "ref:random_mix" for row in result["pareto"])
+    assert "meval:reference:random_mix" not in result["bench_refs"]
 
 
 def test_verify_live_model_eval_input_guards(tmp_path):

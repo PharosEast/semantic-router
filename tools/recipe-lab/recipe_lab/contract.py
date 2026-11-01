@@ -219,7 +219,10 @@ def _check_cross_workload_disjointness(
 CONSTRAINT_OPS = ("gte", "lte")
 # M4: constraint bounds may pin a reference arm instead of the baseline;
 # the roles name the single-model targets declared in `references`.
-REF_BOUNDS = ("ref:strong", "ref:weak")
+# C8: `ref:random_mix` pins the cost-matched random mix the model_eval
+# driver computes from the candidate arm's routing distribution and the
+# reference arms' per-case results (evidence-side, not a declared arm).
+REF_BOUNDS = ("ref:strong", "ref:weak", "ref:random_mix")
 # M4: where the verdict's cost numbers come from (cost_basis.source).
 COST_BASIS_SOURCES = {"provider_pricing", "cost_model"}
 # M5: workload vocabulary. `kind` selects the request shape, `driver` the
@@ -241,7 +244,8 @@ class Constraint:
     constraint is an economic condition (e.g. cost must not regress).
     `bound` is a number, the literal "baseline" (the baseline arm's
     measured value of the same metric), or a reference pin "ref:strong" /
-    "ref:weak" (M4: the named single-model arm's measured value).
+    "ref:weak" / "ref:random_mix" (M4: the named single-model arm's
+    measured value; C8: the model_eval driver's cost-matched random mix).
     `tolerance_pct` relaxes the bound by that percentage in the permissive
     direction; `tolerance_pp` (M4) relaxes it by absolute percentage
     points instead (for 0-1 fraction metrics, e.g. accuracy floors);
@@ -252,7 +256,7 @@ class Constraint:
     name: str
     metric: str
     op: str
-    bound: str | float  # "baseline", "ref:strong"/"ref:weak", or a number
+    bound: str | float  # "baseline", "ref:strong"/"ref:weak"/"ref:random_mix", or a number
     tolerance_pct: float = 0.0
     # M4: absolute pp relaxation / reference multiplier (0 and None stay
     # out of the serialized form for round-trip stability).
@@ -298,7 +302,8 @@ class Constraint:
             _require(factor > 0, f"constraints[{index}].factor must be > 0")
             _require(
                 bound in REF_BOUNDS,
-                f"constraints[{index}].factor is only valid with a ref:strong/ref:weak bound",
+                f"constraints[{index}].factor is only valid with a reference bound "
+                f"(one of {sorted(REF_BOUNDS)})",
             )
         return cls(
             name=name,
@@ -1189,7 +1194,9 @@ class References:
     `strong` is the quality reference (the best candidate model),
     `weak` the cheapest one; constraint bounds may pin either via
     `bound: ref:strong` / `ref:weak`. Both must be registered single-model
-    target ids present in the compared runs.
+    target ids present in the compared runs. C8: `ref:random_mix` is also
+    a valid bound but resolves against computed driver evidence (the
+    cost-matched random mix), not against a declared arm here.
     """
 
     strong: str
