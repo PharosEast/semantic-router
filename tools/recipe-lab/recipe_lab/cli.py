@@ -62,6 +62,7 @@ from .bootstrap import (
     run_bootstrap,
     validate_config,
 )
+from .classification import load_classification_source
 from .contract import (
     RUNNABLE_SPLITS,
     ContractError,
@@ -267,7 +268,13 @@ def cmd_observe_labels(args: argparse.Namespace) -> int:
 
     out_dir = Path(args.out)
     out_dir.mkdir(parents=True, exist_ok=True)
-    seed_config = build_seed_config(backend_endpoint=f"127.0.0.1:{args.backend_port}")
+    # Y2: the seed classifies with the same classification sections every
+    # bootstrap candidate will carry - one explicit source config.
+    classification = load_classification_source(args.classification_config)
+    seed_config = build_seed_config(
+        backend_endpoint=f"127.0.0.1:{args.backend_port}",
+        classification=classification,
+    )
     config_path = write_seed_config(seed_config, out_dir / "seed-config.yaml")
 
     env = RunnerEnv(
@@ -307,6 +314,10 @@ def cmd_observe_labels(args: argparse.Namespace) -> int:
         "cases_sha256": workload.split_hash(split_name),
         "seed_config": str(config_path),
         "seed_config_sha256": seed_config_fingerprint(config_path),
+        "classification_source": str(args.classification_config),
+        "classification_source_sha256": dataset_content_hash(
+            args.classification_config
+        ),
         "join_stats": result["stats"],
         "timings": result["timings"],
     }
@@ -361,9 +372,7 @@ def cmd_profile(args: argparse.Namespace) -> int:
     cases_paths: dict[str, Path] = {}
     cases_hashes: dict[str, str] = {}
     for split in splits:
-        cases_hashes[split] = spec.verify_workload(
-            split=split, workload=workload.name
-        )
+        cases_hashes[split] = spec.verify_workload(split=split, workload=workload.name)
         cases_paths[split] = Path(spec.spec_dir) / workload.split_manifest(split)
 
     # ContractError propagates to main() -> exit 2.
@@ -395,7 +404,10 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
     """C4+C5: per-lambda scaffold via result_to_config, completed to candidates.
 
     Consumes the C3 profile's calib split only (anti-leak); every candidate
-    must pass ``<validate-bin> config validate`` before it is emitted.
+    must pass ``<validate-bin> config validate`` before it is emitted. The Y2
+    label-agreement check then observes the dev split through the seed config
+    and through every candidate: a candidate that disagrees with the seed's
+    labels fails the command.
     """
     spec = _load_spec(args.spec)
     if not spec.models:
@@ -412,6 +424,39 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
             f"profile not found: {profile_dir / 'profile.json'} (bootstrap "
             "consumes the C3 profile directory)"
         )
+    # Y2 ①: one explicit classification source for the observe seed and every
+    # candidate; the classification sections are injected into both.
+    classification = load_classification_source(args.classification_config)
+    # Y2 ②: the label-agreement check observes the dev split (never calib,
+    # which bootstrap consumes, and never frozen_test, which is quarantined).
+    workload = spec.require_tunable_workload(getattr(args, "workload", None))
+    if spec.spec_dir is None:
+        raise ContractError("spec must be loaded from a file to resolve its manifest")
+    if "dev" not in workload.splits:
+        raise ContractError(
+            f"workload {workload.name!r} declares no dev split: the bootstrap "
+            "label-agreement check observes dev (declare it in the spec)"
+        )
+    spec.verify_workload(split="dev", workload=workload.name)
+    cases_path = Path(spec.spec_dir) / workload.split_manifest("dev")
+    try:
+        dev_cases = load_cases(cases_path)
+    except OSError as exc:
+        raise ContractError(f"cannot read dev manifest: {exc}") from exc
+    if not dev_cases:
+        raise ContractError(f"dev split is empty: {cases_path}")
+    env = RunnerEnv(
+        router_bin=args.router_bin,
+        mock_backend_script=args.mock_backend,
+        python_bin=args.python_bin,
+        work_dir=Path(args.out) / "label-check",
+        backend_port=args.backend_port,
+        ready_timeout_s=args.ready_timeout,
+        hf_home=args.hf_home,
+        mock_extra_args=(
+            tuple(args.mock_extra_args.split()) if args.mock_extra_args else ()
+        ),
+    )
     result = run_bootstrap(
         spec=spec,
         profile_dir=profile_dir,
@@ -420,6 +465,11 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         out_dir=Path(args.out),
         python_bin=args.python_bin,
         validate_bin=args.validate_bin,
+        classification=classification,
+        classification_path=args.classification_config,
+        dev_cases=dev_cases,
+        env=env,
+        request_timeout=args.request_timeout,
         listener_port=args.listener_port,
     )
     _print_json(result)
@@ -1629,7 +1679,9 @@ def cmd_verify(args: argparse.Namespace) -> int:
         # sr-bench MoM target ids the router is serving the candidate on: the
         # CLI flag wins; otherwise the candidate file must carry srbench_targets.
         if args.candidate_targets:
-            targets = [t.strip() for t in args.candidate_targets.split(",") if t.strip()]
+            targets = [
+                t.strip() for t in args.candidate_targets.split(",") if t.strip()
+            ]
         else:
             targets = candidate_row.get("srbench_targets")
         if (
@@ -1849,6 +1901,14 @@ def build_parser() -> argparse.ArgumentParser:
         "labels-<split>-summary.json + work/)",
     )
     p_observe.add_argument(
+        "--classification-config",
+        required=True,
+        help="classification source config whose global.model_catalog.modules "
+        "and .embeddings are injected into the seed config (Y2: the observe "
+        "seed and every bootstrap candidate must share one classification "
+        "source; cold-start passes the maintained config/config.yaml)",
+    )
+    p_observe.add_argument(
         "--router-bin", required=True, help="path to the semantic-router binary"
     )
     p_observe.add_argument(
@@ -1965,6 +2025,57 @@ def build_parser() -> argparse.ArgumentParser:
         required=True,
         help="directory holding result_to_config.py; the script runs as a "
         "subprocess and its hash lands in the provenance sidecar",
+    )
+    p_boot.add_argument(
+        "--classification-config",
+        required=True,
+        help="classification source config whose global.model_catalog.modules "
+        "and .embeddings replace the scaffold's copies in every candidate (Y2: "
+        "same source as observe-labels' seed config)",
+    )
+    p_boot.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads whose dev split the label-agreement "
+        "check observes (default: the first workload)",
+    )
+    p_boot.add_argument(
+        "--router-bin",
+        required=True,
+        help="path to the semantic-router binary (boots the Y2 label-agreement "
+        "check: dev observed through the seed config and through every "
+        "candidate)",
+    )
+    p_boot.add_argument(
+        "--mock-backend",
+        required=True,
+        help="path to a mock/real OpenAI backend launcher script for the "
+        "label-agreement check",
+    )
+    p_boot.add_argument(
+        "--backend-port", type=int, default=8000, help="label-check backend port"
+    )
+    p_boot.add_argument(
+        "--ready-timeout",
+        type=int,
+        default=300,
+        help="model-runtime readiness timeout for the label-agreement check",
+    )
+    p_boot.add_argument(
+        "--hf-home",
+        default=None,
+        help="HF_HOME for the label-check router process (model artifacts)",
+    )
+    p_boot.add_argument(
+        "--mock-extra-args",
+        default="",
+        help="extra args passed to the label-check mock backend (split on spaces)",
+    )
+    p_boot.add_argument(
+        "--request-timeout",
+        type=float,
+        default=180.0,
+        help="per-request timeout for the label-agreement observations",
     )
     p_boot.add_argument(
         "--lambdas",
