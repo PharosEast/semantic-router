@@ -101,13 +101,24 @@ def label_for_decision(decision: str) -> str:
 
 
 def build_seed_config(
-    *, backend_endpoint: str = "127.0.0.1:8000", model_name: str = "local/seed-backend"
+    *,
+    backend_endpoint: str = "127.0.0.1:8000",
+    model_name: str = "local/seed-backend",
+    classification: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The cold-start seed config: every decision observes one domain.
 
     All decisions point at the same backend model - the seed observes LABELS,
     not answers - and every decision mounts the router_replay plugin so the
     matched decision name surfaces in the record.
+
+    ``classification`` (Y2) carries the shared classification sections read
+    from the classification source config (``load_classification_source``);
+    they are injected verbatim into ``global.model_catalog`` so the seed
+    classifies exactly like the bootstrap candidates do. Without it the
+    router's defaults apply - which the candidates (scaffold copies of the
+    maintained config) do not, and the observed labels would describe a
+    classifier the final config never runs.
     """
     domain_decisions = [
         {
@@ -124,21 +135,22 @@ def build_seed_config(
         }
         for domain in SUPPORTED_ROUTING_DOMAINS
     ]
+    model_catalog: dict[str, Any] = {
+        "deployments": {
+            "primary": {"provider": "model_runtime", "artifact": "vllm-sr/d3-lite"}
+        },
+        "system": {"decision_model": {"deployment": "primary"}},
+    }
+    if classification:
+        model_catalog.update(classification)
     return {
         "version": "v0.3",
         "listeners": [
             {"name": "http-seed", "address": "0.0.0.0", "port": 8899, "timeout": "300s"}
         ],
         "global": {
-            "stores": {
-                "response_cache": {"enabled": False, "backend_type": "memory"}
-            },
-            "model_catalog": {
-                "deployments": {
-                    "primary": {"provider": "model_runtime", "artifact": "vllm-sr/d3-lite"}
-                },
-                "system": {"decision_model": {"deployment": "primary"}},
-            },
+            "stores": {"response_cache": {"enabled": False, "backend_type": "memory"}},
+            "model_catalog": model_catalog,
         },
         "providers": {
             "defaults": {"model": model_name},
@@ -303,7 +315,9 @@ def observe_split(
     )
     rows, stats = labels_from_records(records, cases)
     label_counts = dict(sorted(Counter(r["router_label"] for r in rows).items()))
-    labeled = sum(count for label, count in label_counts.items() if label != OTHER_LABEL)
+    labeled = sum(
+        count for label, count in label_counts.items() if label != OTHER_LABEL
+    )
     summary = {
         "cases": len(cases),
         "observed": len(rows),

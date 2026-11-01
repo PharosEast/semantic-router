@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 import yaml
 from recipe_lab import API_VERSION
+from recipe_lab.classification import load_classification_source
 from recipe_lab.cli import main
 from recipe_lab.contract import ContractError
 from recipe_lab.observe_labels import (
@@ -36,6 +37,38 @@ from recipe_lab.observe_labels import (
     write_seed_config,
 )
 from recipe_lab.runner import RunnerEnv
+
+# The shared classification source (a minimal stand-in for the maintained
+# config/config.yaml): both sections the Y2 same-source rule requires.
+CLASSIFICATION_SOURCE_YAML = """\
+global:
+  model_catalog:
+    embeddings:
+      semantic:
+        use_cpu: true
+        embedding_config:
+          model_type: mmbert
+    modules:
+      classifier:
+        domain:
+          enabled: true
+          fallback_category: other
+      prompt_guard:
+        enabled: true
+"""
+
+
+def _write_classification_source(tmp_path: Path, *, drop: str = "") -> str:
+    text = CLASSIFICATION_SOURCE_YAML
+    if drop == "embeddings":
+        text = text.replace(
+            "    embeddings:\n      semantic:\n        use_cpu: true\n        embedding_config:\n          model_type: mmbert\n",
+            "",
+        )
+    path = tmp_path / "classification-source.yaml"
+    path.write_text(text, encoding="utf-8")
+    return str(path)
+
 
 # A fake router binary for the restart-mode observe probe: gateway + management
 # on the config's own ports, records driven by a per-case route table in the
@@ -58,8 +91,13 @@ lock = threading.Lock()
 
 
 def _load():
-    with open(STATE, encoding="utf-8") as fh:
-        return json.load(fh)
+    try:
+        with open(STATE, encoding="utf-8") as fh:
+            return json.load(fh)
+    except FileNotFoundError:
+        # a boot without a pre-seeded state observes no routes: every case
+        # records the catch-all label (used by the bootstrap label check)
+        return {"records": [], "routes": {}}
 
 
 def _save(state):
@@ -196,6 +234,43 @@ def test_seed_config_is_byte_deterministic(tmp_path):
     one = write_seed_config(build_seed_config(), tmp_path / "one" / "seed-config.yaml")
     two = write_seed_config(build_seed_config(), tmp_path / "two" / "seed-config.yaml")
     assert one.read_bytes() == two.read_bytes()
+
+
+def test_seed_config_injects_shared_classification_sections(tmp_path):
+    # Y2: the seed classifies with the same modules/embeddings every bootstrap
+    # candidate will carry; the seed's own deployments/system pinning survives.
+    classification = load_classification_source(_write_classification_source(tmp_path))
+    config = build_seed_config(classification=classification)
+    catalog = config["global"]["model_catalog"]
+    assert catalog["embeddings"] == classification["embeddings"]
+    assert catalog["modules"] == classification["modules"]
+    assert catalog["deployments"] == {
+        "primary": {"provider": "model_runtime", "artifact": "vllm-sr/d3-lite"}
+    }
+    assert catalog["system"] == {"decision_model": {"deployment": "primary"}}
+    # without a source the seed would classify with the router's defaults -
+    # exactly the divergence Y2 closes against the scaffold-derived candidates
+    bare = build_seed_config()
+    assert "modules" not in bare["global"]["model_catalog"]
+    assert "embeddings" not in bare["global"]["model_catalog"]
+    # the injected document stays byte-deterministic
+    assert seed_config_yaml(
+        build_seed_config(classification=classification)
+    ) == seed_config_yaml(config)
+
+
+def test_load_classification_source_requires_both_sections(tmp_path):
+    sections = load_classification_source(_write_classification_source(tmp_path))
+    assert set(sections) == {"modules", "embeddings"}
+    assert (
+        sections["embeddings"]["semantic"]["embedding_config"]["model_type"] == "mmbert"
+    )
+    assert sections["modules"]["classifier"]["domain"]["fallback_category"] == "other"
+    # an incomplete source would silently reintroduce the default-vs-scaffold
+    # divergence Y2 closes
+    broken = _write_classification_source(tmp_path, drop="embeddings")
+    with pytest.raises(ContractError, match=r"no global\.model_catalog\.embeddings"):
+        load_classification_source(broken)
 
 
 def test_label_for_decision_maps_domains_and_catch_all():
@@ -423,6 +498,7 @@ def test_observe_labels_cli_writes_labels_and_summary(tmp_path, capsys):
         },
     )
     router, mock = _write_cli_stack(tmp_path, state_path)
+    classification_source = _write_classification_source(tmp_path)
     exit_code = main(
         [
             "observe-labels",
@@ -436,6 +512,8 @@ def test_observe_labels_cli_writes_labels_and_summary(tmp_path, capsys):
             router,
             "--mock-backend",
             mock,
+            "--classification-config",
+            classification_source,
             "--ready-timeout",
             "30",
         ]
@@ -447,7 +525,10 @@ def test_observe_labels_cli_writes_labels_and_summary(tmp_path, capsys):
     assert parsed["label_counts"] == {"math": 1, "other": 1}
     labels_path = Path(parsed["labels"])
     assert labels_path.name == "labels-calib.jsonl"
-    rows = [json.loads(line) for line in labels_path.read_text(encoding="utf-8").splitlines()]
+    rows = [
+        json.loads(line)
+        for line in labels_path.read_text(encoding="utf-8").splitlines()
+    ]
     assert {row["case_id"]: row["router_label"] for row in rows} == {
         "cm": "math",
         "cw": OTHER_LABEL,
@@ -461,6 +542,16 @@ def test_observe_labels_cli_writes_labels_and_summary(tmp_path, capsys):
     assert summary["seed_config_sha256"].startswith("sha256:")
     assert (out / "seed-config.yaml").is_file()
     assert summary["join_stats"]["missing"] == 0
+    # Y2: the summary proves where the seed's classification came from ...
+    assert summary["classification_source"] == classification_source
+    assert summary["classification_source_sha256"].startswith("sha256:")
+    # ... and the written seed config carries the injected sections
+    seeded = yaml.safe_load((out / "seed-config.yaml").read_text(encoding="utf-8"))
+    catalog = seeded["global"]["model_catalog"]
+    assert (
+        catalog["embeddings"]["semantic"]["embedding_config"]["model_type"] == "mmbert"
+    )
+    assert catalog["modules"]["classifier"]["domain"]["fallback_category"] == "other"
 
 
 def test_observe_labels_cli_refuses_frozen_test(tmp_path):
@@ -486,6 +577,8 @@ def test_observe_labels_cli_refuses_frozen_test(tmp_path):
             router,
             "--mock-backend",
             mock,
+            "--classification-config",
+            _write_classification_source(tmp_path),
         ]
     )
     assert exit_code == 2

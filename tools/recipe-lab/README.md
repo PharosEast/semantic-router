@@ -64,9 +64,9 @@ pip install -e '.[dev]'
 | `attribute` | E1/E2/E3 误路由归因（`--split` + 可选 `--cases` 哈希校验） |
 | `attribute-session` | 会话级 agentic 归因：lane_flap / tool_loop_interrupted / selection_failed（sub-6 P2） |
 | `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签（`--unlabeled` 出原始诊断行） |
-| `observe-labels` | C2 冷启动观测：种子配置 + request-id 打标探测 → labels-<split>.jsonl（case_id/router_label/confidence，未命中记 other） |
+| `observe-labels` | C2 冷启动观测：种子配置 + request-id 打标探测 → labels-<split>.jsonl（case_id/router_label/confidence，未命中记 other）；`--classification-config` 指定分类源配置，其 modules/embeddings 注入种子（Y2 同源） |
 | `profile` | C3 模型画像：task 类别改写为 router 标签 + 调用 model_eval 脚本直连各模型 → profile.json（含区间/成本/质量门） |
-| `bootstrap` | C4+C5 冷启动候选：每个 λ 调真实 `result_to_config.py` 出骨架（只吃 calib，Warning 即拒绝），补全成可运行配置（契约端点/按第一名分组的 `route-<模型>` 决策/流量优先级/缓存与 tools 关闭）并逐个过 `config validate` 后才落盘 |
+| `bootstrap` | C4+C5 冷启动候选：每个 λ 调真实 `result_to_config.py` 出骨架（只吃 calib，Warning 即拒绝），补全成可运行配置（契约端点/按第一名分组的 `route-<模型>` 决策/流量优先级/缓存与 tools 关闭）并逐个过 `config validate` 后才落盘；Y2：候选的分类节（modules/embeddings）来自 `--classification-config`（与 observe-labels 的种子同源，骨架副本被丢弃），随后 dev split 经种子与每个候选各观测一次，标签一致率 < 99% 拒绝（exit 2），一致率与分类源哈希写入 provenance 旁车 |
 | `bank` | 构建 / 导入 / 应用 per-case/per-model 答案库（`contains` / `mcq` 判卷，I；`import` 直接转换 C3 画像的 dev judged.jsonl，C6） |
 | `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D） |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
@@ -91,8 +91,10 @@ recipe-lab plan --spec examples/spec.example.yaml
 recipe-lab split --cases labeled.jsonl --output-dir splits/
 
 # C2 冷启动观测：真实 router 自己的域标签（summary 的 label_coverage 写进 provenance）
+# --classification-config：种子与候选共享的分类源（冷启动传维护版 config/config.yaml，Y2）
 recipe-lab observe-labels --spec spec.yaml --split calib --out observe/ \
-  --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py
+  --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py \
+  --classification-config config/config.yaml
 
 # C3 模型画像：调 model_eval 脚本直连各模型，profile.json 含脚本哈希与完整命令行
 recipe-lab profile --spec spec.yaml --labels observe/ --splits calib,dev \
@@ -101,9 +103,13 @@ recipe-lab profile --spec spec.yaml --labels observe/ --splits calib,dev \
 # C4+C5 冷启动候选：每个 λ 一份骨架 + 一份补全后的候选（先过 config validate）
 # 产物：scaffold-lambda-<λ>.yaml、candidate-lambda-<λ>.yaml、
 #       candidate-lambda-<λ>.provenance.json（proposer/λ/逐标签表/哈希/命令）
+# Y2：--classification-config 与 observe-labels 同源；bootstrap 随后对 dev split
+#     跑标签一致率检查（< 99% exit 2），需要 --router-bin/--mock-backend 启动检查栈
 recipe-lab bootstrap --spec spec.yaml --profile profile/ \
   --model-eval-dir src/training/model_eval --lambdas 0,0.1,0.2,0.3 \
-  --out cands/ --validate-bin vllm-sr
+  --out cands/ --validate-bin vllm-sr \
+  --classification-config config/config.yaml \
+  --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py
 
 # C6 答案库：直接转换画像的 dev judged.jsonl（不再打端点），
 # 每条带 case_id/model/answer/answer_ok/tokens
