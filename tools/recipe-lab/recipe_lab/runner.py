@@ -379,7 +379,10 @@ def probe_records(
                 else f"{request_id_prefix}{case['case_id']}"
             )
             statuses[case["case_id"]] = _send_prompt(
-                router_url, router_model, case["prompt"], request_timeout,
+                router_url,
+                router_model,
+                case["prompt"],
+                request_timeout,
                 request_id=request_id,
             )
         timings["request_s"] = time.monotonic() - request_started

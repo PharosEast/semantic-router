@@ -260,7 +260,9 @@ def main() -> None:
         with open(args.answer_plan, encoding="utf-8") as fh:
             plan = json.load(fh)
         if not isinstance(plan, dict):
-            parser.error("--answer-plan must be a JSON object of model -> category -> bool")
+            parser.error(
+                "--answer-plan must be a JSON object of model -> category -> bool"
+            )
         for model, categories in plan.items():
             if not isinstance(categories, dict) or not categories:
                 parser.error(

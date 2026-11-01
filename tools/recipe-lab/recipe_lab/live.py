@@ -451,9 +451,7 @@ def arm_evidence_quality(
         return {
             "truncation_rate": output_limit / planned,
             "missing_result_rate": (planned - result_cases) / planned,
-            "no_answer_rate": (
-                no_answer / planned if no_answer is not None else None
-            ),
+            "no_answer_rate": (no_answer / planned if no_answer is not None else None),
             "finish_reason_length_rate": length_rate,
         }
 
@@ -1080,9 +1078,7 @@ def verify_live(
     # config hash, and all of them must agree - the ledger's candidate then
     # names the exact config the verdict graded. Fail fast, before any run.
     registry = {
-        entry.get("id"): entry
-        for entry in cli.targets()
-        if isinstance(entry, dict)
+        entry.get("id"): entry for entry in cli.targets() if isinstance(entry, dict)
     }
     config_hashes: list[str] = []
     for target_id in targets:

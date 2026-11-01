@@ -174,9 +174,7 @@ def _read_model_eval_task_ids(path: Path) -> set[str]:
                 ) from exc
             task_id = row.get("task_id") if isinstance(row, dict) else None
             if not isinstance(task_id, str) or not task_id:
-                raise ContractError(
-                    f"{path}:{line_no} is missing a non-empty task_id"
-                )
+                raise ContractError(f"{path}:{line_no} is missing a non-empty task_id")
             ids.add(task_id)
     return ids
 
@@ -278,7 +276,9 @@ class Constraint:
     name: str
     metric: str
     op: str
-    bound: str | float  # "baseline", "ref:strong"/"ref:weak"/"ref:random_mix", or a number
+    bound: (
+        str | float
+    )  # "baseline", "ref:strong"/"ref:weak"/"ref:random_mix", or a number
     tolerance_pct: float = 0.0
     # M4: absolute pp relaxation / reference multiplier (0 and None stay
     # out of the serialized form for round-trip stability).
@@ -1438,8 +1438,7 @@ class ModelEntry:
         )
         endpoint = raw.get("endpoint")
         _require(
-            isinstance(endpoint, str)
-            and endpoint.startswith(("http://", "https://")),
+            isinstance(endpoint, str) and endpoint.startswith(("http://", "https://")),
             f"model {name!r} endpoint must be an http(s) URL (got {endpoint!r})",
         )
         served = raw.get("served_name")
@@ -1504,7 +1503,9 @@ class ProfileConfig:
         _require(not unknown, f"profile has unknown keys: {', '.join(unknown)}")
         min_cases = raw.get("min_label_cases", DEFAULT_MIN_LABEL_CASES)
         _require(
-            isinstance(min_cases, int) and not isinstance(min_cases, bool) and min_cases >= 1,
+            isinstance(min_cases, int)
+            and not isinstance(min_cases, bool)
+            and min_cases >= 1,
             "profile.min_label_cases must be an integer >= 1",
         )
         return cls(min_label_cases=min_cases)

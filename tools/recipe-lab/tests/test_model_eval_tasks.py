@@ -78,7 +78,10 @@ def _read_jsonl(path):
 def test_srbench_source_round_trip(tmp_path):
     source = _write_jsonl(tmp_path / "source.jsonl", SRBENCH_SOURCE)
     out = tmp_path / "tasks.jsonl"
-    assert main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)]) == 0
+    assert (
+        main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)])
+        == 0
+    )
     tasks = _read_jsonl(out)
     assert len(tasks) == 2
     first = tasks[0]
@@ -100,7 +103,10 @@ def test_srbench_source_round_trip(tmp_path):
 def test_lowercase_answer_is_normalized(tmp_path):
     source = _write_jsonl(tmp_path / "source.jsonl", SRBENCH_SOURCE)
     out = tmp_path / "tasks.jsonl"
-    assert main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)]) == 0
+    assert (
+        main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)])
+        == 0
+    )
     tasks = _read_jsonl(out)
     # mcq_judge compares against the uppercase extracted letter exactly
     assert tasks[1]["answer"] == "A"
@@ -119,9 +125,10 @@ def test_srbench_source_is_deterministic(tmp_path, capsys):
     assert main(argv(tmp_path / "b.jsonl")) == 0
     capsys.readouterr()
     assert (tmp_path / "a.jsonl").read_bytes() == (tmp_path / "b.jsonl").read_bytes()
-    assert first["tasks_sha256"] == "sha256:" + hashlib.sha256(
-        (tmp_path / "a.jsonl").read_bytes()
-    ).hexdigest()
+    assert (
+        first["tasks_sha256"]
+        == "sha256:" + hashlib.sha256((tmp_path / "a.jsonl").read_bytes()).hexdigest()
+    )
 
 
 # ---- raw MCQ (office) source ----
@@ -130,7 +137,10 @@ def test_srbench_source_is_deterministic(tmp_path, capsys):
 def test_raw_source_round_trip(tmp_path):
     source = _write_jsonl(tmp_path / "office.jsonl", RAW_SOURCE)
     out = tmp_path / "tasks.jsonl"
-    assert main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)]) == 0
+    assert (
+        main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)])
+        == 0
+    )
     tasks = _read_jsonl(out)
     first = tasks[0]
     # options are rendered into prompt_user (model_eval has no options field)
@@ -180,7 +190,14 @@ def test_unknown_source_shape_is_rejected(tmp_path):
     source = _write_jsonl(tmp_path / "bad.jsonl", [{"id": "x", "prompt_user": "q"}])
     assert (
         main(
-            ["cases", "to-model-eval", "--source", str(source), "--out", str(tmp_path / "t.jsonl")]
+            [
+                "cases",
+                "to-model-eval",
+                "--source",
+                str(source),
+                "--out",
+                str(tmp_path / "t.jsonl"),
+            ]
         )
         == 2
     )
@@ -192,7 +209,14 @@ def test_non_letter_answer_is_rejected(tmp_path):
     source = _write_jsonl(tmp_path / "source.jsonl", rows)
     assert (
         main(
-            ["cases", "to-model-eval", "--source", str(source), "--out", str(tmp_path / "t.jsonl")]
+            [
+                "cases",
+                "to-model-eval",
+                "--source",
+                str(source),
+                "--out",
+                str(tmp_path / "t.jsonl"),
+            ]
         )
         == 2
     )
@@ -210,7 +234,14 @@ def test_too_many_options_are_rejected(tmp_path):
     source = _write_jsonl(tmp_path / "wide.jsonl", rows)
     assert (
         main(
-            ["cases", "to-model-eval", "--source", str(source), "--out", str(tmp_path / "t.jsonl")]
+            [
+                "cases",
+                "to-model-eval",
+                "--source",
+                str(source),
+                "--out",
+                str(tmp_path / "t.jsonl"),
+            ]
         )
         == 2
     )
@@ -235,7 +266,10 @@ def _make_tasks(n_tasks, tmp_path):
         )
     source = _write_jsonl(tmp_path / "source.jsonl", rows)
     out = tmp_path / "tasks.jsonl"
-    assert main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)]) == 0
+    assert (
+        main(["cases", "to-model-eval", "--source", str(source), "--out", str(out)])
+        == 0
+    )
     return out
 
 

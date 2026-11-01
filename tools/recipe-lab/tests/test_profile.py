@@ -282,9 +282,7 @@ DEV_CASES = (
 
 
 def test_results_dirname_round_trip():
-    assert (
-        results_dirname("Qwen/Qwen3.5-4B") == "Qwen_Qwen3.5-4B_direct"
-    )
+    assert results_dirname("Qwen/Qwen3.5-4B") == "Qwen_Qwen3.5-4B_direct"
     assert model_from_results_dirname("Qwen_Qwen3.5-4B_direct") == "Qwen/Qwen3.5-4B"
     assert results_dirname("plainmodel") == "plainmodel_direct"
     assert model_from_results_dirname("plainmodel_direct") == "plainmodel"
@@ -331,9 +329,7 @@ def test_rewrite_task_categories_merges_rare_labels(tmp_path):
 
 
 def test_run_profile_stub_end_to_end(tmp_path):
-    spec_path = _write_profile_spec(
-        tmp_path, {"calib": CALIB_CASES, "dev": DEV_CASES}
-    )
+    spec_path = _write_profile_spec(tmp_path, {"calib": CALIB_CASES, "dev": DEV_CASES})
     labels_dir = _write_labels(
         tmp_path / "labels",
         {
@@ -371,14 +367,20 @@ def test_run_profile_stub_end_to_end(tmp_path):
         assert (out_dir / split / "tasks.jsonl").is_file()
         for base in ("Qwen_Qwen3.5-4B_direct", "plainmodel_direct"):
             rdir = out_dir / split / "results" / base
-            for name in ("records.jsonl", "judged.jsonl", "summary.json", "analysis.json"):
+            for name in (
+                "records.jsonl",
+                "judged.jsonl",
+                "summary.json",
+                "analysis.json",
+            ):
                 assert (rdir / name).is_file(), (split, base, name)
         assert (out_dir / split / "token_costs").is_dir()
     # model_eval category rewrite: every calib label has 1 case < the
     # default min_label_cases=20, so all merge into `other`.
     analysis = json.loads(
-        (out_dir / "calib" / "results" / "Qwen_Qwen3.5-4B_direct" / "analysis.json")
-        .read_text(encoding="utf-8")
+        (
+            out_dir / "calib" / "results" / "Qwen_Qwen3.5-4B_direct" / "analysis.json"
+        ).read_text(encoding="utf-8")
     )
     assert set(analysis["category_accuracy"]) == {"other"}
 
@@ -495,9 +497,7 @@ def test_run_profile_no_answer_gate(tmp_path, monkeypatch):
 
 
 def test_profile_cli_end_to_end(tmp_path, capsys):
-    spec_path = _write_profile_spec(
-        tmp_path, {"calib": CALIB_CASES, "dev": DEV_CASES}
-    )
+    spec_path = _write_profile_spec(tmp_path, {"calib": CALIB_CASES, "dev": DEV_CASES})
     labels_dir = _write_labels(
         tmp_path / "labels",
         {
@@ -555,9 +555,7 @@ def test_profile_cli_refuses_frozen_test(tmp_path):
 
 
 def test_profile_cli_refuses_spec_without_models(tmp_path):
-    spec_path = _write_profile_spec(
-        tmp_path, {"calib": CALIB_CASES}, with_models=False
-    )
+    spec_path = _write_profile_spec(tmp_path, {"calib": CALIB_CASES}, with_models=False)
     labels_dir = _write_labels(tmp_path / "labels", {"calib": {"m1": "math"}})
     stub_dir = _write_stub_scripts(tmp_path)
     exit_code = main(

@@ -707,9 +707,10 @@ def test_cases_to_srbench_command_is_deterministic(tmp_path, capsys):
     assert main(argv(tmp_path / "b.jsonl")) == 0
     capsys.readouterr()
     assert (tmp_path / "a.jsonl").read_bytes() == (tmp_path / "b.jsonl").read_bytes()
-    assert first["srbench_sha256"] == "sha256:" + hashlib.sha256(
-        (tmp_path / "a.jsonl").read_bytes()
-    ).hexdigest()
+    assert (
+        first["srbench_sha256"]
+        == "sha256:" + hashlib.sha256((tmp_path / "a.jsonl").read_bytes()).hexdigest()
+    )
     rows = [
         json.loads(line)
         for line in (tmp_path / "a.jsonl").read_text(encoding="utf-8").splitlines()
@@ -947,9 +948,7 @@ def _write_model_eval_spec(tmp_path):
     dev.write_bytes(b'{"case_id":"t1","prompt":"q","truth":"A"}\n')
     tasks = tmp_path / "tasks.jsonl"
     tasks.write_bytes(b'{"task_id":"t1","prompt_user":"q","answer":"A"}\n')
-    (tmp_path / "labels.jsonl").write_bytes(
-        b'{"case_id":"t1","router_label":"math"}\n'
-    )
+    (tmp_path / "labels.jsonl").write_bytes(b'{"case_id":"t1","router_label":"math"}\n')
     spec = copy.deepcopy(VALID_SPEC)
     spec.pop("workload", None)
     spec["workloads"] = [
@@ -1034,7 +1033,9 @@ def test_verify_model_eval_driver_runs_without_srbench(tmp_path, capsys, monkeyp
 
     spec_path = _write_model_eval_spec(tmp_path)
     candidate = tmp_path / "candidate.json"
-    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    candidate.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
+    )
     captured: dict = {}
 
     def fake_verify(**kwargs):
@@ -1042,10 +1043,13 @@ def test_verify_model_eval_driver_runs_without_srbench(tmp_path, capsys, monkeyp
         return dict(_FAKE_MODEL_EVAL_RESULT)
 
     monkeypatch.setattr(cli_module, "verify_live_model_eval", fake_verify)
-    assert main(
-        _model_eval_verify_args(spec_path, tmp_path, candidate)
-        + ["--candidate-management-endpoint", "http://127.0.0.1:8080"]
-    ) == 0
+    assert (
+        main(
+            _model_eval_verify_args(spec_path, tmp_path, candidate)
+            + ["--candidate-management-endpoint", "http://127.0.0.1:8080"]
+        )
+        == 0
+    )
     out = json.loads(capsys.readouterr().out)
     assert out["verdict"] == "PASS"
     assert captured["tasks_path"] == str(tmp_path / "tasks.jsonl")
@@ -1061,7 +1065,9 @@ def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
 
     spec_path = _write_model_eval_spec(tmp_path)
     candidate = tmp_path / "candidate.json"
-    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    candidate.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
+    )
     ledger = tmp_path / "ledger.jsonl"
     monkeypatch.setattr(
         cli_module,
@@ -1098,7 +1104,9 @@ def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
 def test_verify_model_eval_rejects_srbench_baseline(tmp_path, capsys):
     spec_path = _write_model_eval_spec(tmp_path)
     candidate = tmp_path / "candidate.json"
-    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    candidate.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
+    )
     rc = main(
         _model_eval_verify_args(spec_path, tmp_path, candidate)
         + ["--baseline-run-id", "run-b"]
@@ -1110,7 +1118,9 @@ def test_verify_model_eval_rejects_srbench_baseline(tmp_path, capsys):
 def test_verify_model_eval_requires_tasks_and_flags(tmp_path, capsys):
     spec_path = _write_model_eval_spec(tmp_path)
     candidate = tmp_path / "candidate.json"
-    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    candidate.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
+    )
     base = ["verify", "--spec", spec_path, "--candidate", str(candidate)]
     assert main(base + ["--model-eval-dir", str(tmp_path / "s")]) == EXIT_CONTRACT_ERROR
     assert "--tasks" in capsys.readouterr().err
@@ -1150,7 +1160,9 @@ def test_verify_model_eval_rejects_unbound_tasks(tmp_path, capsys):
     # valid tasks JSONL.
     spec_path = _write_model_eval_spec(tmp_path)
     candidate = tmp_path / "candidate.json"
-    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    candidate.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
+    )
     other = tmp_path / "other-tasks.jsonl"
     other.write_bytes(b'{"task_id":"t1","prompt_user":"DIFFERENT","answer":"A"}\n')
     rc = main(
@@ -1200,7 +1212,9 @@ def test_verify_model_eval_requires_declared_rendering(tmp_path, capsys):
     spec_path = tmp_path / "spec.yaml"
     spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
     candidate = tmp_path / "candidate.json"
-    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    candidate.write_text(
+        json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
+    )
     rc = main(
         [
             "verify",

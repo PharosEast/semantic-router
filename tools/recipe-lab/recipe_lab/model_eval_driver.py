@@ -123,9 +123,7 @@ def run_arm(
     analysis format only matters for bootstrap. Returns the judged path.
     """
     model_eval_dir = Path(model_eval_dir)
-    scripts = {
-        name: model_eval_dir / name for name in (_GEN_SCRIPT, _JUDGE_SCRIPT)
-    }
+    scripts = {name: model_eval_dir / name for name in (_GEN_SCRIPT, _JUDGE_SCRIPT)}
     for path in scripts.values():
         if not path.is_file():
             raise ContractError(f"model_eval script not found: {path}")
@@ -410,9 +408,8 @@ def _random_mix_evidence(
         evidence["reason"] = "the spec declares no references section"
         return evidence
     if cand_replay_shares is None:
-        evidence["reason"] = (
-            "candidate routing distribution unknown: "
-            + (cand_replay_note or "no replay evidence")
+        evidence["reason"] = "candidate routing distribution unknown: " + (
+            cand_replay_note or "no replay evidence"
         )
         return evidence
     # a replay's selected model is the routed model: the spec's model
@@ -463,13 +460,10 @@ def _random_mix_evidence(
             "evaluable": True,
             "shares": dict(sorted(shares.items())),
             "expected_accuracy": sum(
-                shares[a] * _arm_accuracy(ref_rows_by_alias[a], planned)
-                for a in needed
+                shares[a] * _arm_accuracy(ref_rows_by_alias[a], planned) for a in needed
             ),
             "expected_cost": (
-                expected_case_cost * planned
-                if expected_case_cost is not None
-                else None
+                expected_case_cost * planned if expected_case_cost is not None else None
             ),
             "cost_note": "assumed" if expected_case_cost is not None else None,
         }
@@ -480,9 +474,9 @@ def _random_mix_evidence(
     return evidence
 
 
-def _latency_percentiles(records_rows: list[dict[str, Any]]) -> tuple[
-    float | None, float | None
-]:
+def _latency_percentiles(
+    records_rows: list[dict[str, Any]],
+) -> tuple[float | None, float | None]:
     values = sorted(
         float(row["latency_s"])
         for row in records_rows
@@ -640,7 +634,9 @@ def verify_live_model_eval(
     try:
         activation = fetch_config_hash(management_endpoint)
     except ReplayFetchError as exc:
-        raise ContractError(f"cannot check the candidate router's config: {exc}") from exc
+        raise ContractError(
+            f"cannot check the candidate router's config: {exc}"
+        ) from exc
     status = activation.get("activation_status")
     if status != "active":
         raise ContractError(
@@ -659,9 +655,7 @@ def verify_live_model_eval(
     # AB/BA pairs: both arms live, alternating execution order per repetition.
     trials: dict[int, dict[str, dict[str, Any]]] = {}
     for label, rep in abba.schedule(repetitions):
-        endpoint = (
-            baseline_endpoint if label == abba.BASELINE else candidate_endpoint
-        )
+        endpoint = baseline_endpoint if label == abba.BASELINE else candidate_endpoint
         arm_dir = work_dir / f"{label}-rep{rep}"
         try:
             judged = run_arm(
@@ -726,7 +720,9 @@ def verify_live_model_eval(
             )
 
     summary = abba.paired_summary(rows, metric_key)
-    baseline_metric = summary[abba.BASELINE]["median"] if summary[abba.BASELINE] else None
+    baseline_metric = (
+        summary[abba.BASELINE]["median"] if summary[abba.BASELINE] else None
+    )
     candidate_metric = (
         summary[abba.CANDIDATE]["median"] if summary[abba.CANDIDATE] else None
     )
@@ -942,9 +938,7 @@ def verify_live_model_eval(
         spec=spec,
         planned=planned,
         cand_judged_rows=(
-            judged_by_arm[(last_rep[0], abba.CANDIDATE)]
-            if last_rep is not None
-            else []
+            judged_by_arm[(last_rep[0], abba.CANDIDATE)] if last_rep is not None else []
         ),
         cand_replay_shares=replay_shares,
         cand_replay_note=replay_note,

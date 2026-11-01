@@ -191,9 +191,7 @@ def load_bank(path: str | Path) -> dict[tuple[str, str], BankEntry]:
                     )
             tokens = raw.get("tokens")
             if tokens is not None and (
-                not isinstance(tokens, int)
-                or isinstance(tokens, bool)
-                or tokens < 0
+                not isinstance(tokens, int) or isinstance(tokens, bool) or tokens < 0
             ):
                 raise ContractError(
                     f"answer bank line {lineno}: tokens must be a non-negative integer"
@@ -238,9 +236,7 @@ def apply_bank(
     return out, stats
 
 
-def import_judged(
-    alias: str, judged_rows: list[dict[str, Any]]
-) -> list[BankEntry]:
+def import_judged(alias: str, judged_rows: list[dict[str, Any]]) -> list[BankEntry]:
     """C6: convert one model's judged.jsonl rows into bank entries.
 
     The cold-start profile (C3) grades every model directly on the dev
@@ -278,7 +274,11 @@ def import_judged(
                 model=alias,
                 answer=completion if isinstance(completion, str) else "",
                 answer_ok=is_correct,
-                tokens=tokens if isinstance(tokens, int) and not isinstance(tokens, bool) else None,
+                tokens=(
+                    tokens
+                    if isinstance(tokens, int) and not isinstance(tokens, bool)
+                    else None
+                ),
             )
         )
     return entries

@@ -461,9 +461,7 @@ def test_model_eval_tasks_split_fields_require_both():
     ):
         ExperimentSpec.from_dict(raw)
     raw2 = copy.deepcopy(VALID_SPLITS_SPEC)
-    raw2["workload"]["splits"]["dev"]["model_eval_tasks_sha256"] = (
-        "sha256:" + "c" * 64
-    )
+    raw2["workload"]["splits"]["dev"]["model_eval_tasks_sha256"] = "sha256:" + "c" * 64
     with pytest.raises(
         ContractError, match="model_eval_tasks and model_eval_tasks_sha256"
     ):
