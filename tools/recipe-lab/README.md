@@ -306,6 +306,31 @@ source hash 与该文件一致的配置——路由器还在跑旧文档时任�
 replay 路由结果、路由到 `spec.models` 之外、参照臂缺失）R 不可评估并
 给出原因，绝不猜值。
 
+### Bundle（C9，成品打包）
+
+`recipe-lab bundle --spec S --ledger L --record rec-... --out bundle/ --config
+FINAL.yaml --skeleton SCAFFOLD.yaml --profile PROFILE.json` 把一条记录的
+验收证据打包成可评审目录。门槛是硬性的：记录必须是 live PASS、必须引用
+final-verify（`split: frozen_test` 或 `role: transfer` 的 workload——只有
+这两类记录契约上强制 `--final` 产出）、全部守卫为 `pass`，且 `--config`
+能通过 `<validate-bin> config validate`（`--validate-bin` 可换，约定同
+bootstrap）；任一不满足即 exit 2，什么都不写。产物对同样输入字节级稳定：
+
+| 文件 | 内容 |
+|---|---|
+| `config.yaml` / `profile.json` | 输入文件的字节级拷贝 |
+| `validate.txt` | `vllm-sr config validate` 的输出（校验失败则整体拒绝） |
+| `config.diff` | 相对 `--skeleton` 骨架的 unified diff |
+| `report.md` | 裁决细节（配对区间、约束、路由分布）、活动台账表、按 workload 计数、证据质量、全部假设、局限，以及关闭缓存和 tools 的说明 |
+| `ledger.jsonl` | 本次活动（同 dataset_hash）的台账摘录 |
+| `provenance.json` | 全部哈希：题集、骨架、配置、画像、台账、run id，外加 `--router-commit`、`--model-revision NAME=REV`、`--model-eval-script`（缺省记为 null，绝不猜值） |
+| `PROMOTION.md` | record-draft 输出（sub-4 的「草稿一例」） |
+| `REVIEW.md` | 空模板，V5 评审时填写 |
+
+写盘前扫描全部产物的私有内容（个人用户目录、非本机 IP 字面量 URL，可用
+`--private-pattern REGEX` 追加），命中即失败且不回显命中内容。验收证据的
+归档目录放在仓库之外，不进公开仓库。
+
 ## 记录格式（归因输入）
 
 每行一个 JSON 对象（router_replay 适配器产出同此形状）：
