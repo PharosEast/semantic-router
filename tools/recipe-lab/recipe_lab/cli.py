@@ -1754,6 +1754,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         router_commit=args.router_commit,
         model_revisions=revisions,
         model_eval_script=args.model_eval_script,
+        candidate_sidecar=args.candidate_sidecar,
         extra_private_patterns=list(args.private_pattern),
     )
     _print_json(result)
@@ -3296,6 +3297,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bundle.add_argument(
         "--profile", required=True, help="C3 profile.json to archive in the bundle"
+    )
+    p_bundle.add_argument(
+        "--candidate-sidecar",
+        required=True,
+        help="bootstrap provenance JSON of the candidate; its scaffold/profile "
+        "sha256 bind --skeleton/--profile to the evidence (Y4)",
     )
     p_bundle.add_argument(
         "--validate-bin",

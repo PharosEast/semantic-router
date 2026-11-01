@@ -99,8 +99,8 @@ fi
 # ---- phase C: live final verdict on frozen_test, then bundle ---------------
 # VERIFY_FLAGS must carry the real endpoints (e.g. --baseline-router-endpoint
 # and --candidate-router-endpoint); the winner is usually picked from
-# `recipe-lab ledger top` first. bundle refuses anything but a live PASS
-# record backed by the final verify.
+# `recipe-lab ledger top` first. bundle refuses anything but a live --final
+# PASS record whose --config/--skeleton/--profile hash-match the evidence.
 if [ -z "${VERIFY_CANDIDATE:-}" ] || [ -z "${BUNDLE_CONFIG:-}" ] || [ -z "${BUNDLE_SKELETON:-}" ]; then
   echo "cold-start: phase B done in $WORK; pick a winner with" \
     "'recipe-lab ledger top --file $WORK/ledger.jsonl --metric-key capability.score'," \
@@ -112,7 +112,10 @@ fi
 
 RECORD_ID=$(tail -n 1 "$WORK/ledger.jsonl" | "$PYBIN" -c "import json,sys; print(json.loads(sys.stdin.readline())['record_id'])")
 echo "RECORD_ID=$RECORD_ID"
+# bootstrap writes the provenance sidecar beside the candidate config
+BUNDLE_SIDECAR="${BUNDLE_SIDECAR:-${BUNDLE_CONFIG%.*}.provenance.json}"
 "$RL/recipe-lab" bundle --spec "$SPEC" --ledger "$WORK/ledger.jsonl" --record "$RECORD_ID" \
   --out "$WORK/bundle" --config "$BUNDLE_CONFIG" --skeleton "$BUNDLE_SKELETON" \
+  --candidate-sidecar "$BUNDLE_SIDECAR" \
   --profile "$WORK/profile/profile.json" || exit 1
 echo "COLD-START-DONE $WORK/bundle"

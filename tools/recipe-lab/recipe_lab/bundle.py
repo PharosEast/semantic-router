@@ -2,15 +2,19 @@
 
 `recipe-lab bundle` packages the acceptance evidence for exactly one ledger
 record into a reviewable directory. It is deliberately hard to run: only a
-live-tier PASS that cites a final-verify workload (split ``frozen_test`` or a
-``role: transfer`` workload) with every declared guard passing is eligible -
-anything else is a contract error (exit 2), never a warning.
+live-tier PASS carrying the ledger's ``final`` promotion flag with every
+declared guard passing is eligible - anything else is a contract error
+(exit 2), never a warning.
 
 Artifacts (a byte-stable pure function of the inputs; no wall-clock content):
 config.yaml / validate.txt / config.diff / report.md / profile.json /
 ledger.jsonl (campaign excerpt) / provenance.json / PROMOTION.md / REVIEW.md.
 
 Honesty rules the bundle enforces:
+- the packaged inputs are bound to the evidence (Y4): --config must hash to
+  the record candidate's config_sha256, and --skeleton/--profile must hash
+  to the scaffold/profile pair the candidate's bootstrap provenance sidecar
+  cites;
 - provenance cites hashes and basenames only - no absolute personal paths;
 - every artifact is scanned for private content (personal user directories,
   non-local literal-IP URLs) plus any --private-pattern regexes before
@@ -74,28 +78,6 @@ _LOCAL_IPS = {"127.0.0.1", "0.0.0.0"}
 
 def _content_hash(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def _record_is_final(spec: ExperimentSpec, record: dict[str, Any]) -> bool:
-    """A record is a final-verify record only if the contract forced --final.
-
-    The frozen_test quarantine and the transfer-workload quarantine are the
-    two contract paths that refuse a non-final verdict, so a record citing
-    either could only have been produced by a --final run. Anything else
-    (a tune workload, a dev split, a legacy record) is not promotion
-    evidence no matter how it was produced.
-    """
-    if record.get("split") == "frozen_test":
-        return True
-    workload_name = record.get("workload")
-    if not workload_name:
-        return False
-    workload = next((w for w in spec.workloads if w.name == workload_name), None)
-    if workload is None:
-        raise ContractError(
-            f"record cites workload {workload_name!r} which the spec does not declare"
-        )
-    return workload.role == "transfer"
 
 
 def _run_config_validate(config_path: Path, validate_bin: str) -> str:
@@ -322,13 +304,17 @@ def build_bundle(
     router_commit: str | None = None,
     model_revisions: dict[str, str] | None = None,
     model_eval_script: str | None = None,
+    candidate_sidecar: str | Path,
     extra_private_patterns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the C9 bundle for one final live PASS record.
 
     Every rejection is a ContractError (exit 2 through the CLI): unknown
-    record, non-live tier, non-PASS verdict, non-final verify, a transfer
-    guard not passing, a failing config validate, or private content in any
+    record, non-live tier, non-PASS verdict, no final flag, a transfer
+    guard not passing, a packaged input that is not the artifact the
+    evidence cites (Y4: --config against the record's candidate
+    config_sha256; --skeleton/--profile against the bootstrap sidecar's
+    recorded hashes), a failing config validate, or private content in any
     artifact. Nothing is written unless every check passes.
     """
     records = Ledger(ledger_path).read()
@@ -343,11 +329,12 @@ def build_bundle(
             f"record {record_id} verdict is {record.get('verdict')!r}; "
             "bundle packages only PASS records"
         )
-    if not _record_is_final(spec, record):
+    if not record.get("final"):
+        # Y4: finality is the ledger's own promotion flag, not something the
+        # bundle reverse-engineers from the contract's split roles.
         raise ContractError(
-            f"record {record_id} is not a final-verify record (needs split "
-            "'frozen_test' or a role 'transfer' workload); bundle packages "
-            "only --final promotion evidence"
+            f"record {record_id} carries no final flag; bundle packages only "
+            "live --final promotion records (the ledger writes final: true)"
         )
     not_passing = sorted(
         f"{name}={value}" for name, value in (record.get("gates") or {}).items()
@@ -362,6 +349,45 @@ def build_bundle(
     config_file = Path(config_path)
     skeleton_file = Path(skeleton_path)
     profile_file = Path(profile_path)
+    # Y4: every packaged input must be the exact artifact the evidence cites.
+    # The config is bound to the ledger's candidate (the sha256 the verdict
+    # recorded); the skeleton and profile are bound to the bootstrap sidecar
+    # the candidate was generated with.
+    recorded_config_hash = (record.get("candidate") or {}).get("config_sha256")
+    if not isinstance(recorded_config_hash, str) or not recorded_config_hash:
+        raise ContractError(
+            f"record {record_id}'s candidate carries no config_sha256; bundle "
+            "packages only verdicts that named the config they graded (Y4)"
+        )
+    packaged_config_hash = _content_hash(config_file)
+    if packaged_config_hash != recorded_config_hash:
+        raise ContractError(
+            f"--config hashes to {packaged_config_hash}, but the record's "
+            f"candidate names {recorded_config_hash}"
+        )
+    sidecar_file = Path(candidate_sidecar)
+    try:
+        sidecar = json.loads(sidecar_file.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContractError(
+            f"cannot read the candidate provenance sidecar {sidecar_file}: {exc}"
+        ) from exc
+    for flag, role, path in (
+        ("--skeleton", "scaffold", skeleton_file),
+        ("--profile", "profile", profile_file),
+    ):
+        cited = (sidecar.get(role) or {}).get("sha256")
+        if not isinstance(cited, str) or not cited:
+            raise ContractError(
+                f"the candidate sidecar cites no {role} sha256; bundle cannot "
+                f"bind {flag} to the evidence"
+            )
+        packaged = _content_hash(path)
+        if packaged != cited:
+            raise ContractError(
+                f"{flag} hashes to {packaged}, but the candidate sidecar "
+                f"cites {cited}"
+            )
     validate_text = _run_config_validate(config_file, validate_bin)
 
     config_bytes = config_file.read_bytes()
