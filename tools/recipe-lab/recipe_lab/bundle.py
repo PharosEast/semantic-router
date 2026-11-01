@@ -15,6 +15,10 @@ Honesty rules the bundle enforces:
   the record candidate's config_sha256, and --skeleton/--profile must hash
   to the scaffold/profile pair the candidate's bootstrap provenance sidecar
   cites;
+- the packaged config must classify like the evaluated one (Y2): its
+  classification projection hash (deployments, system, modules.classifier,
+  modules.prompt_guard, embeddings) must match the projection the bootstrap
+  sidecar recorded for the candidate;
 - provenance cites hashes and basenames only - no absolute personal paths;
 - every artifact is scanned for private content (personal user directories,
   non-local literal-IP URLs) plus any --private-pattern regexes before
@@ -33,6 +37,9 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import yaml
+
+from .classification import classification_projection_hash
 from .contract import ContractError, ExperimentSpec
 from .ledger import Ledger
 from .report import render_promotion_draft
@@ -210,7 +217,9 @@ def render_bundle_report(
     distribution = _routing_distribution(record.get("notes") or "")
     if distribution:
         lines += ["", "### Observed routing distribution (final verify)", ""]
-        lines += [f"- {model}: {count}" for model, count in sorted(distribution.items())]
+        lines += [
+            f"- {model}: {count}" for model, count in sorted(distribution.items())
+        ]
     lines += [
         "",
         "## Campaign evidence (ledger replay)",
@@ -234,7 +243,9 @@ def render_bundle_report(
         counts[name][verdict] = counts[name].get(verdict, 0) + 1
     lines += ["", "### Per-workload verdict counts", ""]
     for name in sorted(counts):
-        detail = ", ".join(f"{count}x {verdict}" for verdict, count in sorted(counts[name].items()))
+        detail = ", ".join(
+            f"{count}x {verdict}" for verdict, count in sorted(counts[name].items())
+        )
         lines.append(f"- {name}: {detail}")
     lines += ["", "## Evidence quality", ""]
     repetitions = _repetitions_from_notes(record.get("notes") or "")
@@ -314,8 +325,10 @@ def build_bundle(
     guard not passing, a packaged input that is not the artifact the
     evidence cites (Y4: --config against the record's candidate
     config_sha256; --skeleton/--profile against the bootstrap sidecar's
-    recorded hashes), a failing config validate, or private content in any
-    artifact. Nothing is written unless every check passes.
+    recorded hashes), a packaged config that does not classify like the
+    evaluated candidate (Y2: projection hash against the sidecar), a
+    failing config validate, or private content in any artifact. Nothing
+    is written unless every check passes.
     """
     records = Ledger(ledger_path).read()
     matches = [row for row in records if row.get("record_id") == record_id]
@@ -337,7 +350,8 @@ def build_bundle(
             "live --final promotion records (the ledger writes final: true)"
         )
     not_passing = sorted(
-        f"{name}={value}" for name, value in (record.get("gates") or {}).items()
+        f"{name}={value}"
+        for name, value in (record.get("gates") or {}).items()
         if value != "pass"
     )
     if not_passing:
@@ -385,9 +399,29 @@ def build_bundle(
         packaged = _content_hash(path)
         if packaged != cited:
             raise ContractError(
-                f"{flag} hashes to {packaged}, but the candidate sidecar "
-                f"cites {cited}"
+                f"{flag} hashes to {packaged}, but the candidate sidecar cites {cited}"
             )
+    # Y2: the packaged config must classify exactly like the config the
+    # evidence was produced with - the bootstrap sidecar cites the
+    # candidate's classification projection hash.
+    sidecar_classification = sidecar.get("classification") or {}
+    sidecar_projection = sidecar_classification.get("projection_sha256")
+    if not isinstance(sidecar_projection, str) or not sidecar_projection:
+        raise ContractError(
+            "the candidate sidecar cites no classification projection_sha256; "
+            "bundle cannot prove the packaged config classifies like the "
+            "evaluated candidate (Y2)"
+        )
+    try:
+        packaged_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise ContractError(f"--config is not valid YAML: {exc}") from exc
+    packaged_projection = classification_projection_hash(packaged_config or {})
+    if packaged_projection != sidecar_projection:
+        raise ContractError(
+            f"--config's classification projection hashes to {packaged_projection}, "
+            f"but the candidate sidecar cites {sidecar_projection}"
+        )
     validate_text = _run_config_validate(config_file, validate_bin)
 
     config_bytes = config_file.read_bytes()
@@ -443,6 +477,12 @@ def build_bundle(
                 "sha256": _content_hash(Path(ledger_path)),
             },
         },
+        # Y2: hashes only - the projection this bundle verified the packaged
+        # config against, plus the classification source's content identity.
+        "classification": {
+            "projection_sha256": sidecar_projection,
+            "source_sha256": sidecar_classification.get("sha256"),
+        },
         "run_ids": {
             "baseline_ref": record.get("baseline_ref"),
             "bench_refs": list(record.get("bench_refs") or []),
@@ -484,8 +524,15 @@ def build_bundle(
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.yaml").write_bytes(config_bytes)
     (out / "profile.json").write_bytes(profile_bytes)
-    for name in ("validate.txt", "config.diff", "report.md", "ledger.jsonl",
-                 "provenance.json", "PROMOTION.md", "REVIEW.md"):
+    for name in (
+        "validate.txt",
+        "config.diff",
+        "report.md",
+        "ledger.jsonl",
+        "provenance.json",
+        "PROMOTION.md",
+        "REVIEW.md",
+    ):
         (out / name).write_text(artifacts[name], encoding="utf-8")
     return {
         "bundle": str(out),

@@ -302,7 +302,10 @@ FINAL.yaml --skeleton SCAFFOLD.yaml --candidate-sidecar PROVENANCE.json
 bundle 直读该字段，不做契约反推）；打包的配置就是被终裁的那份——`--config`
 的 sha256 必须与台账记录 `candidate.config_sha256` 一致，`--skeleton`/
 `--profile` 的 sha256 必须与候选旁车（bootstrap 写的 `<候选>.provenance.json`，
-`--candidate-sidecar` 指定）引用的 scaffold/profile 一致；且 `--config` 能通过
+`--candidate-sidecar` 指定）引用的 scaffold/profile 一致；旁车还必须携带 Y2 的
+`classification.projection_sha256`，与 `--config` 自身的分类投影哈希
+（deployments/system/modules.classifier/modules.prompt_guard/embeddings）一致，
+即打包配置与被评候选的分类行为逐字节同源；且 `--config` 能通过
 `<validate-bin> config validate`（`--validate-bin` 可换，约定同 bootstrap）；
 任一不满足即 exit 2，什么都不写。产物对同样输入字节级稳定：
 
@@ -313,7 +316,7 @@ bundle 直读该字段，不做契约反推）；打包的配置就是被终裁�
 | `config.diff` | 相对 `--skeleton` 骨架的 unified diff |
 | `report.md` | 裁决细节（配对区间、约束、路由分布）、活动台账表、按 workload 计数、证据质量、全部假设、局限，以及关闭缓存和 tools 的说明 |
 | `ledger.jsonl` | 本次活动（同 dataset_hash）的台账摘录 |
-| `provenance.json` | 全部哈希：题集、骨架、配置、画像、台账、run id，外加 `--router-commit`、`--model-revision NAME=REV`、`--model-eval-script`（缺省记为 null，绝不猜值） |
+| `provenance.json` | 全部哈希：题集、骨架、配置、画像、台账、run id，外加 `--router-commit`、`--model-revision NAME=REV`、`--model-eval-script`（缺省记为 null，绝不猜值），以及 Y2 分类绑定（`classification.projection_sha256` + 分类源 `source_sha256`，只记哈希不记路径） |
 | `PROMOTION.md` | record-draft 输出（sub-4 的「草稿一例」） |
 | `REVIEW.md` | 空模板，V5 评审时填写 |
 

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from recipe_lab.classification import classification_projection_hash
 from recipe_lab.cli import main
 from recipe_lab.contract import API_VERSION
 from recipe_lab.ledger import Ledger
@@ -51,6 +52,8 @@ def _sha256(text: str) -> str:
 CONFIG_SHA256 = _sha256(CONFIG_YAML)
 SKELETON_SHA256 = _sha256(SKELETON_YAML)
 PROFILE_SHA256 = _sha256(PROFILE_JSON)
+# the Y2 classification source's content identity (a fake hash for fixtures)
+CLASSIFICATION_SOURCE_SHA256 = "sha256:" + "c" * 64
 
 
 def _write_spec(tmp_path: Path) -> str:
@@ -147,7 +150,7 @@ def _pass_record(**overrides) -> dict:
         "workload": "holdout-transfer",
         "split": "frozen_test",
         "notes": (
-            'baseline=0.81; repetitions=3; routing_distribution='
+            "baseline=0.81; repetitions=3; routing_distribution="
             '{"mock/small": 120, "mock/large": 80}'
         ),
     }
@@ -188,7 +191,8 @@ def _write_inputs(tmp_path: Path) -> dict:
     skeleton.write_text(SKELETON_YAML, encoding="utf-8")
     profile = tmp_path / "profile.json"
     profile.write_text(PROFILE_JSON, encoding="utf-8")
-    # the bootstrap provenance sidecar: cites the skeleton/profile pair
+    # the bootstrap provenance sidecar: cites the skeleton/profile pair plus
+    # the Y2 classification identity of the evaluated candidate
     sidecar = tmp_path / "candidate-lambda-0.30.provenance.json"
     sidecar.write_text(
         json.dumps(
@@ -200,6 +204,13 @@ def _write_inputs(tmp_path: Path) -> dict:
                     "sha256": SKELETON_SHA256,
                 },
                 "profile": {"path": str(profile), "sha256": PROFILE_SHA256},
+                "classification": {
+                    "path": "config/config.yaml",
+                    "sha256": CLASSIFICATION_SOURCE_SHA256,
+                    "projection_sha256": classification_projection_hash(
+                        yaml.safe_load(CONFIG_YAML)
+                    ),
+                },
             },
             ensure_ascii=False,
             sort_keys=True,
@@ -219,22 +230,41 @@ def _write_inputs(tmp_path: Path) -> dict:
     }
 
 
-def _bundle_args(tmp_path: Path, spec_path: str, ledger_path: str, record_id: str,
-                 inputs: dict, out: Path, extra: list[str] | None = None) -> list[str]:
+def _bundle_args(
+    tmp_path: Path,
+    spec_path: str,
+    ledger_path: str,
+    record_id: str,
+    inputs: dict,
+    out: Path,
+    extra: list[str] | None = None,
+) -> list[str]:
     return [
         "bundle",
-        "--spec", spec_path,
-        "--ledger", ledger_path,
-        "--record", record_id,
-        "--out", str(out),
-        "--config", inputs["config"],
-        "--skeleton", inputs["skeleton"],
-        "--profile", inputs["profile"],
-        "--candidate-sidecar", inputs["sidecar"],
-        "--validate-bin", inputs["validate_bin"],
-        "--router-commit", "abc1234",
-        "--model-revision", f"{SMALL}=rev-a",
-        "--model-eval-script", inputs["skeleton"],
+        "--spec",
+        spec_path,
+        "--ledger",
+        ledger_path,
+        "--record",
+        record_id,
+        "--out",
+        str(out),
+        "--config",
+        inputs["config"],
+        "--skeleton",
+        inputs["skeleton"],
+        "--profile",
+        inputs["profile"],
+        "--candidate-sidecar",
+        inputs["sidecar"],
+        "--validate-bin",
+        inputs["validate_bin"],
+        "--router-commit",
+        "abc1234",
+        "--model-revision",
+        f"{SMALL}=rev-a",
+        "--model-eval-script",
+        inputs["skeleton"],
     ] + (extra or [])
 
 
@@ -297,7 +327,15 @@ def test_bundle_happy_path(tmp_path, capsys):
         "sha256:" + hashlib.sha256(Path(inputs["config"]).read_bytes()).hexdigest()
     )
     assert provenance["run_ids"]["bench_refs"] == ["run-base-1", "run-cand-1"]
-    assert provenance["datasets"]["workloads"]["holdout-transfer"]["frozen_test"] == FROZEN_HASH
+    assert (
+        provenance["datasets"]["workloads"]["holdout-transfer"]["frozen_test"]
+        == FROZEN_HASH
+    )
+    # Y2: the provenance carries the classification binding the bundle verified
+    assert provenance["classification"]["projection_sha256"] == (
+        classification_projection_hash(yaml.safe_load(CONFIG_YAML))
+    )
+    assert provenance["classification"]["source_sha256"] == CLASSIFICATION_SOURCE_SHA256
     provenance_text = (out / "provenance.json").read_text(encoding="utf-8")
     # provenance cites basenames and hashes only - no absolute paths leak in
     assert str(Path(ledger_path).parent) not in provenance_text
@@ -320,8 +358,14 @@ def test_bundle_is_byte_stable(tmp_path):
     inputs = _write_inputs(tmp_path)
     out1 = tmp_path / "bundle-1"
     out2 = tmp_path / "bundle-2"
-    assert main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out1)) == 0
-    assert main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out2)) == 0
+    assert (
+        main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out1))
+        == 0
+    )
+    assert (
+        main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out2))
+        == 0
+    )
     files1 = {p.name: p.read_bytes() for p in out1.iterdir()}
     files2 = {p.name: p.read_bytes() for p in out2.iterdir()}
     assert set(files1) == BUNDLE_FILES
@@ -362,7 +406,9 @@ def test_bundle_rejects_unnamed_config(tmp_path, capsys):
     ledger_path, record_id = _write_ledger(tmp_path, _pass_record())
     inputs = _write_inputs(tmp_path)
     tweaked = tmp_path / "tweaked.yaml"
-    tweaked.write_text(CONFIG_YAML + "  # tweaked after the verdict\n", encoding="utf-8")
+    tweaked.write_text(
+        CONFIG_YAML + "  # tweaked after the verdict\n", encoding="utf-8"
+    )
     inputs["config"] = str(tweaked)
     out = tmp_path / "bundle"
     rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
@@ -417,6 +463,51 @@ def test_bundle_rejects_profile_not_matching_sidecar(tmp_path, capsys):
     assert rc == EXIT_CONTRACT_ERROR
     err = capsys.readouterr().err
     assert "--profile hashes to" in err and "sidecar cites" in err
+    assert not out.exists()
+
+
+def test_bundle_rejects_sidecar_without_classification_projection(tmp_path, capsys):
+    # Y2: a pre-Y2 sidecar (no classification block) cannot prove the packaged
+    # config classifies like the evaluated candidate
+    spec_path = _write_spec(tmp_path)
+    ledger_path, record_id = _write_ledger(tmp_path, _pass_record())
+    inputs = _write_inputs(tmp_path)
+    sidecar = json.loads(Path(inputs["sidecar"]).read_text(encoding="utf-8"))
+    del sidecar["classification"]
+    Path(inputs["sidecar"]).write_text(
+        json.dumps(sidecar, sort_keys=True) + "\n", encoding="utf-8"
+    )
+    out = tmp_path / "bundle"
+    rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
+    assert rc == EXIT_CONTRACT_ERROR
+    assert "no classification projection_sha256" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_bundle_rejects_config_with_different_classification(tmp_path, capsys):
+    # Y2: the packaged config must classify like the evaluated candidate -
+    # a swapped embeddings section fails even with a matching config hash
+    spec_path = _write_spec(tmp_path)
+    swapped_text = CONFIG_YAML + (
+        "global:\n"
+        "  model_catalog:\n"
+        "    embeddings:\n"
+        "      semantic:\n"
+        "        embedding_config:\n"
+        "          model_type: swapped-model\n"
+    )
+    record = _pass_record()
+    record["candidate"]["config_sha256"] = _sha256(swapped_text)
+    ledger_path, record_id = _write_ledger(tmp_path, record)
+    inputs = _write_inputs(tmp_path)
+    swapped = tmp_path / "swapped.yaml"
+    swapped.write_text(swapped_text, encoding="utf-8")
+    inputs["config"] = str(swapped)
+    out = tmp_path / "bundle"
+    rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
+    assert rc == EXIT_CONTRACT_ERROR
+    err = capsys.readouterr().err
+    assert "classification projection hashes to" in err and "sidecar cites" in err
     assert not out.exists()
 
 
@@ -508,7 +599,12 @@ def test_bundle_rejects_custom_private_pattern(tmp_path, capsys):
     out = tmp_path / "bundle"
     rc = main(
         _bundle_args(
-            tmp_path, spec_path, ledger_path, record_id, inputs, out,
+            tmp_path,
+            spec_path,
+            ledger_path,
+            record_id,
+            inputs,
+            out,
             extra=["--private-pattern", "vllm-internal"],
         )
     )
