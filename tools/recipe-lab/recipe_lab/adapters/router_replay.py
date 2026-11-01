@@ -173,6 +173,9 @@ class CaseJoin:
     case_id: str
     prompt: str
     truth: str
+    # Router label (category) for category-keyed oracle mappings; empty for
+    # legacy label-truth case lists (F1).
+    category: str = ""
 
 
 def load_cases(path: str | Path) -> list[CaseJoin]:
@@ -197,9 +200,17 @@ def load_cases(path: str | Path) -> list[CaseJoin]:
                     raise ContractError(
                         f"cases line {lineno}: {name} must be a non-empty string"
                     )
+            category = raw.get("category", "")
+            if not isinstance(category, str):
+                raise ContractError(
+                    f"cases line {lineno}: category must be a string when present"
+                )
             cases.append(
                 CaseJoin(
-                    case_id=raw["case_id"], prompt=raw["prompt"], truth=raw["truth"]
+                    case_id=raw["case_id"],
+                    prompt=raw["prompt"],
+                    truth=raw["truth"],
+                    category=category,
                 )
             )
     return cases
@@ -226,6 +237,7 @@ def _case_row(record: dict[str, Any], case: CaseJoin, *, family: str) -> dict[st
     row = {
         "case_id": case.case_id,
         "truth": case.truth,
+        "category": case.category,
         "matched_decision": decision,
         "routed": selected,
         "family": family,

@@ -287,11 +287,30 @@ def labels_from_records(
             stats["duplicate_record"] += 1
             continue
         seen_request_ids.add(request_id)
+        category = str(record.get("category") or record.get("Category") or "").strip()
         decision = str(record.get("decision") or record.get("Decision") or "")
+        if label_of is None:
+            # The record's `category` is the classifier's selected domain -
+            # the router fills it on every request (extproc recorder), and it
+            # is the observation target of C2 and of the Y2 seed-vs-candidate
+            # agreement. Older records may only carry the matched decision
+            # name, whose spelling differs per config (seed decisions are
+            # domain-named while bootstrap candidates name decisions
+            # `route-<model>`), so fall back to the decision spelling.
+            label = (
+                category
+                if category in SUPPORTED_ROUTING_DOMAINS
+                else label_for_decision(decision)
+            )
+        else:
+            # a custom mapper owns the whole projection (the lane observer
+            # passes the identity mapping: in a template config every
+            # decision IS a lane)
+            label = label_of(decision)
         rows.append(
             {
                 "case_id": str(case["case_id"]),
-                "router_label": label_of(decision),
+                "router_label": label,
                 "confidence": extract_confidence(record),
             }
         )

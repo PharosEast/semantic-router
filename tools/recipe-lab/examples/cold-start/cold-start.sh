@@ -59,7 +59,7 @@
 #                   extra flags passed through to the matching step
 set -u
 ASSETS="$(cd "$(dirname "$0")" && pwd)"
-REPO="${REPO:-$(cd "$ASSETS/../../.." && pwd)}"
+REPO="${REPO:-$(cd "$ASSETS/../../../.." && pwd)}"
 RL="${RECIPE_LAB_BIN:-$REPO/.venv/bin}"
 PYBIN="${PYTHON_BIN:-$RL/python}"
 SR_BUILD="${SR_BUILD:-$REPO/build}"

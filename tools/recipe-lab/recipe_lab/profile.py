@@ -81,7 +81,11 @@ from pathlib import Path
 from typing import Any
 
 from .contract import ContractError, ExperimentSpec, dataset_content_hash
-from .model_eval_tasks import load_source_rows, write_tasks
+from .model_eval_tasks import (
+    load_source_rows,
+    rows_to_model_eval_tasks,
+    write_tasks,
+)
 
 PROFILE_SCHEMA = "recipe-lab-profile-v1"
 OTHER_LABEL = "other"
@@ -545,6 +549,18 @@ def run_profile(
             if merge_record:
                 label_merges[split] = merge_record
             uncovered_by_split[split] = uncovered
+        # The rewrite works on case rows; the direct-model eval consumes
+        # model_eval task rows (task_id/prompt_user/answer). Split manifests
+        # may already hold mirrored task lines (from `cases to-model-eval`),
+        # so the conversion is idempotent per row.
+        tasks = [
+            (
+                row
+                if isinstance(row, dict) and "task_id" in row and "prompt_user" in row
+                else rows_to_model_eval_tasks([row])[0]
+            )
+            for row in tasks
+        ]
         tasks_path = write_tasks(tasks, out / split / "tasks.jsonl")
         tasks_hashes[split] = dataset_content_hash(tasks_path)
 

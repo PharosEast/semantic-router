@@ -53,11 +53,13 @@ CASES = [
         "case_id": "c1",
         "prompt": "What is the capital of France?",
         "truth": "local_standard",
+        "category": "",
     },
     {
         "case_id": "c2",
         "prompt": "Analyse quicksort vs mergesort from first principles.",
         "truth": "cloud_frontier_reasoning",
+        "category": "",
     },
 ]
 
