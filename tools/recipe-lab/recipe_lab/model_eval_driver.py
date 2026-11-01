@@ -13,8 +13,14 @@ and drives every arm itself with the same C3 scripts the profile uses:
   paired statistics (via `verdict.compute_paired_stats`, the sr-bench
   compare field shape), M3 evidence quality (the same rate keys and
   ceilings), M4 reference arms with the same run-cache rule (keyed by the
-  tasks hash + alias instead of dataset + manifest hash), and the shared
-  three-state verdict.
+  rewritten tasks hash + alias instead of dataset + manifest hash), and
+  the shared three-state verdict.
+
+Y3 task binding: the arms answer the contract-declared `model_eval_tasks`
+rendering of the split (the caller hash-checks `--tasks` against the
+contract), and the router-label category rewrite happens inside the
+driver from the C2 labels file - an externally rewritten task file can
+never enter the evidence path.
 
 AB/BA alternation follows `abba.schedule` exactly like the sr-bench
 driver. One deliberate difference: an arm whose generation or judging
@@ -69,10 +75,13 @@ from .live import (
     _worst_rates,
     resolve_gates,
 )
+from .model_eval_tasks import write_tasks
 from .profile import (
     _percentile,
     _read_jsonl,
     _run,
+    load_labels,
+    rewrite_task_categories,
     wilson_interval,
 )
 from .verdict import (
@@ -512,6 +521,7 @@ def verify_live_model_eval(
     *,
     spec: ExperimentSpec,
     tasks_path: str | Path,
+    labels_path: str | Path,
     baseline_endpoint: str,
     candidate_endpoint: str,
     management_endpoint: str | None = None,
@@ -532,14 +542,21 @@ def verify_live_model_eval(
     `repetitions` AB/BA pairs (abba.schedule): the baseline arm hits
     `baseline_endpoint`, the candidate arm `candidate_endpoint` - both
     routers serving their respective configs on the same frozen task set
-    (`tasks_path`, the profile's rewritten tasks JSONL for the split).
+    (`tasks_path`, the contract-declared `model_eval_tasks` rendering of
+    the split, hash-checked against the contract by the caller). Y3: the
+    router-label category rewrite the profile used to do externally now
+    happens here - `labels_path` is the C2 labels JSONL for the split,
+    every arm answers the rewritten file written into `work_dir`, and no
+    externally rewritten task file can enter the evidence path. Both
+    rewrite inputs' hashes are recorded with the result.
+
     Per pair, the judged rows feed the M2 paired statistics, the M3
     evidence-quality rates and the per-arm accuracies; the merged stats
     and shared `evaluate_verdict` decide.
 
     M4: `spec.references` arms run once each on the model's direct
-    endpoint (`spec.models` entry), cached by (tasks hash, alias) in
-    `run_cache`; their values anchor `ref:`-bound constraints.
+    endpoint (`spec.models` entry), cached by (rewritten tasks hash,
+    alias) in `run_cache`; their values anchor `ref:`-bound constraints.
 
     C8: the cost-matched random mix R mixes the reference arms' per-case
     accuracy and cost by the candidate arm's routing distribution. The
@@ -553,9 +570,12 @@ def verify_live_model_eval(
     The result dict mirrors the sr-bench driver's shape (verdict/reasons/
     metrics/gates/constraints/bench_refs/trials/abba_summary/paired/
     evidence_quality/references/random_mix/pareto) plus `driver`,
-    `tasks_hash`, `planned_cases` and `distribution` (the alias-keyed
-    routing shares when R is evaluable); `preview` and `baseline_run_id`
-    are None - there is no sr-bench run behind this evidence.
+    `tasks_hash` (the contract-declared rendering's hash),
+    `labeled_tasks_sha256`/`labels_sha256` (the in-driver rewrite's
+    inputs and output), `label_merges`, `uncovered_cases`,
+    `planned_cases` and `distribution` (the alias-keyed routing shares
+    when R is evaluable); `preview` and `baseline_run_id` are None -
+    there is no sr-bench run behind this evidence.
     """
     if repetitions < 1:
         raise ContractError("verify needs at least one repetition")
@@ -581,6 +601,21 @@ def verify_live_model_eval(
     )
     timeout_s = spec.budget.max_minutes_per_trial * 60
     tasks_hash = dataset_content_hash(tasks)
+    # Y3: rewrite the bound tasks' categories to the router's own labels
+    # (the C2 labels file), exactly like the profile does - but here, so
+    # the arms never answer an externally rewritten file. Rare labels merge
+    # into `other` under spec.profile_config.min_label_cases; uncovered
+    # cases join `other` and are counted.
+    labels_file = Path(labels_path)
+    if not labels_file.is_file():
+        raise ContractError(f"labels file not found: {labels_file}")
+    labels = load_labels(labels_file)
+    labeled_rows, label_merges, uncovered = rewrite_task_categories(
+        task_rows, labels, min_label_cases=spec.profile_config.min_label_cases
+    )
+    labeled_tasks_path = write_tasks(labeled_rows, work_dir / "tasks-labeled.jsonl")
+    labeled_tasks_hash = dataset_content_hash(labeled_tasks_path)
+    labels_hash = dataset_content_hash(labels_file)
     metric_key = spec.objective.metric_key
 
     # AB/BA pairs: both arms live, alternating execution order per repetition.
@@ -594,7 +629,7 @@ def verify_live_model_eval(
             judged = run_arm(
                 python_bin=python_bin,
                 model_eval_dir=model_eval_dir,
-                tasks_path=tasks,
+                tasks_path=labeled_tasks_path,
                 out_dir=arm_dir,
                 endpoint=endpoint,
                 model=router_model,
@@ -697,8 +732,8 @@ def verify_live_model_eval(
         )
 
     # M4: reference arms - one direct-model eval per declared alias, cached
-    # by (tasks hash, alias). A failed or missing reference is incomplete
-    # evidence, never a zero.
+    # by (rewritten tasks hash, alias). A failed or missing reference is
+    # incomplete evidence, never a zero.
     references_evidence: dict[str, Any] = {}
     reference_values: dict[str, float | None] = {"strong": None, "weak": None}
     ref_pareto: list[dict[str, Any]] = []
@@ -715,7 +750,7 @@ def verify_live_model_eval(
         for role in ("strong", "weak"):
             alias = getattr(spec.references, role)
             entry: dict[str, Any] = {"alias": alias, "cached": False}
-            key = f"{tasks_hash}:{alias}"
+            key = f"{labeled_tasks_hash}:{alias}"
             judged_str = cache.get(key)
             judged_path = Path(judged_str) if judged_str else None
             if judged_path is None or not judged_path.is_file():
@@ -732,7 +767,7 @@ def verify_live_model_eval(
                     judged_path = run_arm(
                         python_bin=python_bin,
                         model_eval_dir=model_eval_dir,
-                        tasks_path=tasks,
+                        tasks_path=labeled_tasks_path,
                         out_dir=ref_dir,
                         endpoint=model.endpoint,
                         model=model.served_name,
@@ -921,7 +956,11 @@ def verify_live_model_eval(
             "undeclared guard measurements ignored (not declared in spec.gates): "
             + ", ".join(undeclared)
         )
-    bench_refs = [f"meval:tasks:{tasks_hash}"]
+    bench_refs = [
+        f"meval:tasks:{tasks_hash}",
+        f"meval:labeled-tasks:{labeled_tasks_hash}",
+        f"meval:labels:{labels_hash}",
+    ]
     for rep in sorted(trials):
         for label in (abba.BASELINE, abba.CANDIDATE):
             bench_refs.append(f"meval:{label}-rep{rep}")
@@ -959,6 +998,10 @@ def verify_live_model_eval(
         "pareto": pareto,
         "driver": "model_eval",
         "tasks_hash": tasks_hash,
+        "labeled_tasks_sha256": labeled_tasks_hash,
+        "labels_sha256": labels_hash,
+        "label_merges": label_merges,
+        "uncovered_cases": uncovered,
         "planned_cases": planned,
     }
     if not spec.gates:

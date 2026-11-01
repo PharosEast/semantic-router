@@ -159,6 +159,28 @@ def _read_srbench_case_ids(path: Path) -> set[str]:
     return ids
 
 
+def _read_model_eval_task_ids(path: Path) -> set[str]:
+    """The `task_id` set of one model_eval tasks JSONL (Y3 pairing input)."""
+    ids: set[str] = set()
+    with path.open("r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ContractError(
+                    f"{path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
+            task_id = row.get("task_id") if isinstance(row, dict) else None
+            if not isinstance(task_id, str) or not task_id:
+                raise ContractError(
+                    f"{path}:{line_no} is missing a non-empty task_id"
+                )
+            ids.add(task_id)
+    return ids
+
+
 def _check_split_disjointness(base: Path, workload: Workload) -> None:
     """The three-way split must be disjoint: no case_id and no prompt content
     shared between two splits (else calibration data leaks into the frozen
@@ -431,16 +453,21 @@ class SplitSpec:
     recipe-lab cases JSONL (case_id/prompt/truth) that replay reads;
     `srbench_dataset`/`srbench_sha256` optionally declare the sr-bench
     format (id/messages/answer) rendering of the same cases that the live
-    tier binds its evidence to. The two srbench fields are declared
-    together or not at all; `cases to-srbench` generates the dataset
-    deterministically and verify_workload re-hashes it and checks its ids
-    pair 1:1 with the cases manifest.
+    tier binds its evidence to. Y3: `model_eval_tasks`/
+    `model_eval_tasks_sha256` optionally declare the model_eval tasks
+    rendering (task_id/prompt_user/answer, the deterministic `cases
+    to-model-eval` output) that the model_eval driver binds its arms to.
+    Each rendering pair is declared together or not at all; verify_workload
+    re-hashes every declared rendering and checks its ids pair 1:1 with
+    the cases manifest.
     """
 
     manifest: str
     content_hash: str
     srbench_dataset: str | None = None
     srbench_sha256: str | None = None
+    model_eval_tasks: str | None = None
+    model_eval_tasks_sha256: str | None = None
 
     @classmethod
     def from_dict(cls, raw: dict, name: str, prefix: str = "workload") -> SplitSpec:
@@ -470,11 +497,32 @@ class SplitSpec:
                 isinstance(srbench_sha256, str) and srbench_sha256.strip(),
                 f"{prefix}.splits.{name}.srbench_sha256 must be a non-empty string",
             )
+        model_eval_tasks = raw.get("model_eval_tasks")
+        model_eval_tasks_sha256 = raw.get("model_eval_tasks_sha256")
+        _require(
+            (model_eval_tasks is None) == (model_eval_tasks_sha256 is None),
+            f"{prefix}.splits.{name} must declare model_eval_tasks and "
+            "model_eval_tasks_sha256 together (the model_eval tasks rendering "
+            "of the same cases)",
+        )
+        if model_eval_tasks is not None:
+            _require(
+                isinstance(model_eval_tasks, str) and model_eval_tasks.strip(),
+                f"{prefix}.splits.{name}.model_eval_tasks must be a non-empty string",
+            )
+            _require(
+                isinstance(model_eval_tasks_sha256, str)
+                and model_eval_tasks_sha256.strip(),
+                f"{prefix}.splits.{name}.model_eval_tasks_sha256 must be a "
+                "non-empty string",
+            )
         return cls(
             manifest=manifest,
             content_hash=content_hash,
             srbench_dataset=srbench_dataset,
             srbench_sha256=srbench_sha256,
+            model_eval_tasks=model_eval_tasks,
+            model_eval_tasks_sha256=model_eval_tasks_sha256,
         )
 
     def to_dict(self) -> dict:
@@ -482,6 +530,9 @@ class SplitSpec:
         if self.srbench_dataset is not None:
             out["srbench_dataset"] = self.srbench_dataset
             out["srbench_sha256"] = self.srbench_sha256
+        if self.model_eval_tasks is not None:
+            out["model_eval_tasks"] = self.model_eval_tasks
+            out["model_eval_tasks_sha256"] = self.model_eval_tasks_sha256
         return out
 
 
@@ -634,6 +685,23 @@ class Workload:
                 isinstance(srbench_sha256, str) and srbench_sha256.strip(),
                 f"{prefix}.srbench_sha256 must be a non-empty string",
             )
+        model_eval_tasks = raw.get("model_eval_tasks")
+        model_eval_tasks_sha256 = raw.get("model_eval_tasks_sha256")
+        _require(
+            (model_eval_tasks is None) == (model_eval_tasks_sha256 is None),
+            f"{prefix} must declare model_eval_tasks and model_eval_tasks_sha256 "
+            "together (the model_eval tasks rendering of the same cases)",
+        )
+        if model_eval_tasks is not None:
+            _require(
+                isinstance(model_eval_tasks, str) and model_eval_tasks.strip(),
+                f"{prefix}.model_eval_tasks must be a non-empty string",
+            )
+            _require(
+                isinstance(model_eval_tasks_sha256, str)
+                and model_eval_tasks_sha256.strip(),
+                f"{prefix}.model_eval_tasks_sha256 must be a non-empty string",
+            )
         return cls(
             profile=profile,
             split_rule=None,
@@ -643,6 +711,8 @@ class Workload:
                     content_hash=content_hash,
                     srbench_dataset=srbench_dataset,
                     srbench_sha256=srbench_sha256,
+                    model_eval_tasks=model_eval_tasks,
+                    model_eval_tasks_sha256=model_eval_tasks_sha256,
                 )
             },
             legacy=True,
@@ -684,6 +754,22 @@ class Workload:
             )
         return self.splits[name].srbench_sha256
 
+    def split_model_eval_tasks(self, name: str) -> str | None:
+        """The split's model_eval tasks rendering path, or None (Y3)."""
+        if name not in self.splits:
+            raise ContractError(
+                f"unknown workload split {name!r}; declared: {sorted(self.splits)}"
+            )
+        return self.splits[name].model_eval_tasks
+
+    def split_model_eval_tasks_hash(self, name: str) -> str | None:
+        """The split's model_eval tasks rendering hash, or None (Y3)."""
+        if name not in self.splits:
+            raise ContractError(
+                f"unknown workload split {name!r}; declared: {sorted(self.splits)}"
+            )
+        return self.splits[name].model_eval_tasks_sha256
+
     def live_dataset_hash(self, name: str) -> str:
         """X3: the dataset identity live evidence must bind to.
 
@@ -723,6 +809,9 @@ class Workload:
             if split.srbench_dataset is not None:
                 out["srbench_dataset"] = split.srbench_dataset
                 out["srbench_sha256"] = split.srbench_sha256
+            if split.model_eval_tasks is not None:
+                out["model_eval_tasks"] = split.model_eval_tasks
+                out["model_eval_tasks_sha256"] = split.model_eval_tasks_sha256
             return out
         return {
             "profile": self.profile,
@@ -1679,6 +1768,7 @@ class ExperimentSpec:
                     f"dataset hash mismatch for split {name!r}: spec={selected.split_hash(name)} file={actual}"
                 )
             verified[name] = actual
+            case_ids: set[str] | None = None
             # X3: the declared sr-bench rendering is verified against its own
             # hash and paired 1:1 with the cases manifest, so live evidence
             # can never bind to a rendering of a different case set than the
@@ -1706,6 +1796,35 @@ class ExperimentSpec:
                     extra = sorted(srbench_ids - case_ids)
                     raise ContractError(
                         f"srbench dataset for split {name!r} does not pair 1:1 "
+                        f"with the cases manifest (missing: {missing}, extra: {extra})"
+                    )
+            # Y3: the declared model_eval tasks rendering is verified the same
+            # way, so the model_eval driver can never bind its arms to a
+            # rendering of a different case set than the one replay ranked on.
+            tasks_path = selected.split_model_eval_tasks(name)
+            if tasks_path is not None:
+                tasks_file = base / tasks_path
+                if not tasks_file.is_file():
+                    raise ContractError(
+                        f"model_eval tasks file not found: {tasks_file} (workload "
+                        f"{selected.name!r} split {name!r} model_eval_tasks is "
+                        "relative to the spec file)"
+                    )
+                tasks_actual = dataset_content_hash(tasks_file)
+                tasks_expected = selected.split_model_eval_tasks_hash(name)
+                if tasks_actual != tasks_expected:
+                    raise ContractError(
+                        f"model_eval tasks hash mismatch for split {name!r}: "
+                        f"spec={tasks_expected} file={tasks_actual}"
+                    )
+                if case_ids is None:
+                    case_ids, _ = _read_split_ids(manifest, name)
+                task_ids = _read_model_eval_task_ids(tasks_file)
+                if case_ids != task_ids:
+                    missing = sorted(case_ids - task_ids)
+                    extra = sorted(task_ids - case_ids)
+                    raise ContractError(
+                        f"model_eval tasks for split {name!r} do not pair 1:1 "
                         f"with the cases manifest (missing: {missing}, extra: {extra})"
                     )
         if split is None:

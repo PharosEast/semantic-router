@@ -392,6 +392,162 @@ def test_verify_workload_missing_srbench_dataset_is_actionable(tmp_path):
         spec.verify_workload(split="dev")
 
 
+# ---- Y3: dual-format splits (cases + model_eval_tasks) ----
+
+
+def _write_model_eval_splits_tasks(base, mutate_tasks="none"):
+    """Splits dataset (written into the existing dir `base`) whose dev split
+    also declares the model_eval tasks rendering of the same cases.
+
+    mutate_tasks: 'hash' drifts the declared hash, 'ids' swaps a task id so
+    the rendering no longer pairs with the cases manifest.
+    """
+    spec_path = _write_splits_dataset(base)
+    spec = yaml.safe_load(spec_path.read_text(encoding="utf-8"))
+    task_id = "c3" if mutate_tasks != "ids" else "other-id"
+    task_rows = [
+        {
+            "task_id": task_id,
+            "prompt_user": "p3",
+            "category": "math",
+            "answer": "A",
+            "case_id": task_id,
+            "prompt": "p3",
+            "truth": "math",
+        }
+    ]
+    tasks = base / "dev.tasks.jsonl"
+    tasks.write_text(
+        "".join(json.dumps(r, sort_keys=True) + "\n" for r in task_rows),
+        encoding="utf-8",
+    )
+    digest = dataset_content_hash(tasks)
+    if mutate_tasks == "hash":
+        digest = "sha256:" + "f" * 64
+    spec["workload"]["splits"]["dev"]["model_eval_tasks"] = "dev.tasks.jsonl"
+    spec["workload"]["splits"]["dev"]["model_eval_tasks_sha256"] = digest
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return spec_path
+
+
+def test_model_eval_tasks_split_fields_roundtrip_and_default_absent():
+    raw = copy.deepcopy(VALID_SPLITS_SPEC)
+    spec = ExperimentSpec.from_dict(raw)
+    assert spec.workload.split_model_eval_tasks("dev") is None
+    assert spec.workload.split_model_eval_tasks_hash("dev") is None
+    # a split without the rendering round-trips without the new keys
+    assert "model_eval_tasks" not in spec.to_dict()["workload"]["splits"]["dev"]
+
+    declared = copy.deepcopy(VALID_SPLITS_SPEC)
+    declared["workload"]["splits"]["dev"]["model_eval_tasks"] = "dev.tasks.jsonl"
+    declared["workload"]["splits"]["dev"]["model_eval_tasks_sha256"] = (
+        "sha256:" + "c" * 64
+    )
+    spec2 = ExperimentSpec.from_dict(declared)
+    assert spec2.workload.split_model_eval_tasks("dev") == "dev.tasks.jsonl"
+    assert spec2.workload.split_model_eval_tasks_hash("dev") == "sha256:" + "c" * 64
+    out = spec2.to_dict()["workload"]["splits"]["dev"]
+    assert out["model_eval_tasks"] == "dev.tasks.jsonl"
+    assert out["model_eval_tasks_sha256"] == "sha256:" + "c" * 64
+    # the other splits stay clean
+    assert "model_eval_tasks" not in spec2.to_dict()["workload"]["splits"]["calib"]
+
+
+def test_model_eval_tasks_split_fields_require_both():
+    raw = copy.deepcopy(VALID_SPLITS_SPEC)
+    raw["workload"]["splits"]["dev"]["model_eval_tasks"] = "dev.tasks.jsonl"
+    with pytest.raises(
+        ContractError, match="model_eval_tasks and model_eval_tasks_sha256"
+    ):
+        ExperimentSpec.from_dict(raw)
+    raw2 = copy.deepcopy(VALID_SPLITS_SPEC)
+    raw2["workload"]["splits"]["dev"]["model_eval_tasks_sha256"] = (
+        "sha256:" + "c" * 64
+    )
+    with pytest.raises(
+        ContractError, match="model_eval_tasks and model_eval_tasks_sha256"
+    ):
+        ExperimentSpec.from_dict(raw2)
+
+
+def test_legacy_workload_binds_model_eval_tasks(tmp_path):
+    # Y3 on the legacy single-workload form: the workload declares the
+    # model_eval tasks rendering of the same cases and verify_workload
+    # checks its hash and 1:1 pairing.
+    cases = tmp_path / "cases.jsonl"
+    cases.write_text(
+        "".join(
+            json.dumps({"case_id": cid, "prompt": f"p{n}", "truth": "math"}) + "\n"
+            for n, cid in enumerate(("c1", "c2"), 1)
+        ),
+        encoding="utf-8",
+    )
+    rendering = tmp_path / "cases.tasks.jsonl"
+    rendering.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "task_id": cid,
+                    "prompt_user": f"p{n}",
+                    "answer": "A",
+                    "case_id": cid,
+                    "prompt": f"p{n}",
+                    "truth": "math",
+                },
+                sort_keys=True,
+            )
+            + "\n"
+            for n, cid in enumerate(("c1", "c2"), 1)
+        ),
+        encoding="utf-8",
+    )
+    raw = copy.deepcopy(VALID_SPEC)
+    raw["workload"]["manifest"] = "cases.jsonl"
+    raw["workload"]["content_hash"] = dataset_content_hash(cases)
+    raw["workload"]["model_eval_tasks"] = "cases.tasks.jsonl"
+    raw["workload"]["model_eval_tasks_sha256"] = dataset_content_hash(rendering)
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+
+    spec = ExperimentSpec.from_yaml(spec_path)
+    assert spec.workload.split_model_eval_tasks("dev") == "cases.tasks.jsonl"
+    # the declared hash and the 1:1 pairing verify against the real files
+    assert spec.verify_workload(split="dev") == dataset_content_hash(cases)
+    # the round-trip keeps the legacy single-workload shape with the new keys
+    assert spec.to_dict()["workload"] == raw["workload"]
+
+
+def test_verify_workload_checks_model_eval_tasks_hash_and_pairing(tmp_path):
+    # the happy path: the rendering re-hashes to its declared hash and pairs
+    spec_path = _write_model_eval_splits_tasks(tmp_path)
+    spec = ExperimentSpec.from_yaml(spec_path)
+    assert spec.verify_workload(split="dev") == spec.workload.split_hash("dev")
+
+    # a drifted rendering is rejected like any other frozen dataset
+    drift = tmp_path / "drift"
+    drift.mkdir()
+    with pytest.raises(ContractError, match="model_eval tasks hash mismatch"):
+        ExperimentSpec.from_yaml(
+            _write_model_eval_splits_tasks(drift, mutate_tasks="hash")
+        ).verify_workload(split="dev")
+
+    # a rendering of a different case set is rejected even when it hashes fine
+    ids = tmp_path / "ids"
+    ids.mkdir()
+    with pytest.raises(ContractError, match="do not pair 1:1"):
+        ExperimentSpec.from_yaml(
+            _write_model_eval_splits_tasks(ids, mutate_tasks="ids")
+        ).verify_workload(split="dev")
+
+
+def test_verify_workload_missing_model_eval_tasks_file_is_actionable(tmp_path):
+    spec_path = _write_model_eval_splits_tasks(tmp_path)
+    (tmp_path / "dev.tasks.jsonl").unlink()
+    spec = ExperimentSpec.from_yaml(spec_path)
+    with pytest.raises(ContractError, match="model_eval tasks file not found"):
+        spec.verify_workload(split="dev")
+
+
 def test_empty_oracle_policy_rejected():
     raw = copy.deepcopy(VALID_SPEC)
     raw["attribution"]["oracle_policy"] = {}
