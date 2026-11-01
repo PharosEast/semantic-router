@@ -1261,6 +1261,139 @@ class CostBasis:
         return out
 
 
+# Cold start (C3): profile/grouping setting. Labels with fewer observed
+# cases than this merge into `other` before the profile is computed.
+DEFAULT_MIN_LABEL_CASES = 20
+# Cold start (C3): generation params shared by every direct-model eval and
+# the later live arms; keys mirror multi_benchmark_eval.py's load_params.
+GENERATION_KEYS = (
+    "temperature",
+    "top_p",
+    "max_tokens",
+    "chat_template_kwargs",
+    "extra_body",
+)
+
+
+@dataclass(frozen=True)
+class ModelEntry:
+    """Cold start (C3/C5): one candidate model and its direct endpoint.
+
+    `name` is the alias used in result dirnames, token-cost files and the
+    generated decisions. It must round-trip through result_to_config's
+    directory convention (§3.2-1: the first `_` becomes `/`, plus the
+    `_direct`/`_cot` suffix stripping), so it either contains exactly one
+    `/` or no `_` at all - and it must not be `auto` (collect_model_accuracies
+    skips that name).
+    """
+
+    name: str
+    endpoint: str
+    served_name: str
+    api_key_env: str | None = None
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> ModelEntry:
+        unknown = sorted(set(raw) - {"name", "endpoint", "served_name", "api_key_env"})
+        _require(not unknown, f"model entry has unknown keys: {', '.join(unknown)}")
+        name = raw.get("name")
+        _require(
+            isinstance(name, str) and name.strip(),
+            "model name must be a non-empty string",
+        )
+        _require(
+            name != "auto",
+            "model name must not be 'auto' (collect_model_accuracies skips it)",
+        )
+        _require(
+            "/" not in name or name.count("/") == 1,
+            f"model name {name!r} must contain at most one '/' "
+            "(the dirname convention maps it back)",
+        )
+        _require(
+            "/" in name or "_" not in name,
+            f"model name {name!r} cannot round-trip through the result_to_config "
+            "dirname convention: it must contain '/' or no '_' at all",
+        )
+        endpoint = raw.get("endpoint")
+        _require(
+            isinstance(endpoint, str)
+            and endpoint.startswith(("http://", "https://")),
+            f"model {name!r} endpoint must be an http(s) URL (got {endpoint!r})",
+        )
+        served = raw.get("served_name")
+        if served is None:
+            served = name
+        _require(
+            isinstance(served, str) and served.strip(),
+            f"model {name!r} served_name must be a non-empty string",
+        )
+        api_key_env = raw.get("api_key_env")
+        if api_key_env is not None:
+            _require(
+                isinstance(api_key_env, str) and api_key_env.strip(),
+                f"model {name!r} api_key_env must be a non-empty string",
+            )
+        return cls(
+            name=name, endpoint=endpoint, served_name=served, api_key_env=api_key_env
+        )
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {
+            "name": self.name,
+            "endpoint": self.endpoint,
+            "served_name": self.served_name,
+        }
+        if self.api_key_env is not None:
+            out["api_key_env"] = self.api_key_env
+        return out
+
+
+def _check_generation(raw: dict) -> dict[str, Any]:
+    """Validate the shared generation params (multi_benchmark_eval shape)."""
+    unknown = sorted(set(raw) - set(GENERATION_KEYS))
+    _require(not unknown, f"generation has unknown keys: {', '.join(unknown)}")
+    if "temperature" in raw:
+        temp = _require_number(raw["temperature"], "generation.temperature")
+        _require(temp >= 0, "generation.temperature must be >= 0")
+    if "max_tokens" in raw:
+        tokens = raw["max_tokens"]
+        _require(
+            isinstance(tokens, int) and not isinstance(tokens, bool) and tokens >= 1,
+            "generation.max_tokens must be an integer >= 1",
+        )
+    if "top_p" in raw and raw["top_p"] is not None:
+        top_p = _require_number(raw["top_p"], "generation.top_p")
+        _require(0 < top_p <= 1, "generation.top_p must be in (0, 1]")
+    for key in ("chat_template_kwargs", "extra_body"):
+        if key in raw and raw[key] is not None:
+            _require_mapping(raw[key], f"generation.{key}")
+    return dict(raw)
+
+
+@dataclass(frozen=True)
+class ProfileConfig:
+    """Cold start (C3): router-label profile settings."""
+
+    min_label_cases: int = DEFAULT_MIN_LABEL_CASES
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> ProfileConfig:
+        unknown = sorted(set(raw) - {"min_label_cases"})
+        _require(not unknown, f"profile has unknown keys: {', '.join(unknown)}")
+        min_cases = raw.get("min_label_cases", DEFAULT_MIN_LABEL_CASES)
+        _require(
+            isinstance(min_cases, int) and not isinstance(min_cases, bool) and min_cases >= 1,
+            "profile.min_label_cases must be an integer >= 1",
+        )
+        return cls(min_label_cases=min_cases)
+
+    def to_dict(self) -> dict:
+        if self.min_label_cases == DEFAULT_MIN_LABEL_CASES:
+            return {}
+        return {"min_label_cases": self.min_label_cases}
+
+
 @dataclass(frozen=True)
 class ExperimentSpec:
     api_version: str
@@ -1283,6 +1416,11 @@ class ExperimentSpec:
     # may pin, and where the verdict's cost numbers come from.
     references: References | None = None
     cost_basis: CostBasis | None = None
+    # Cold start (C3/C5): the candidate models and their direct endpoints,
+    # the generation params shared by every eval arm, and profile settings.
+    models: tuple[ModelEntry, ...] = field(default=())
+    generation: dict[str, Any] | None = None
+    profile_config: ProfileConfig = field(default_factory=ProfileConfig)
     # directory of the YAML file this spec was loaded from (from_yaml only);
     # workload.manifest resolves against it. Not part of the contract.
     spec_dir: str | None = None
@@ -1334,6 +1472,28 @@ class ExperimentSpec:
             if cost_basis_raw is not None
             else None
         )
+        # Cold start (C3): candidate models, shared generation params and
+        # profile settings.
+        models_raw = raw.get("models", [])
+        _require(isinstance(models_raw, list), "models must be a list")
+        models = tuple(
+            ModelEntry.from_dict(_require_mapping(m, f"models[{i}]"))
+            for i, m in enumerate(models_raw)
+        )
+        names = [model.name for model in models]
+        _require(
+            len(names) == len(set(names)),
+            "models names must be unique: " + ", ".join(sorted(names)),
+        )
+        generation_raw = raw.get("generation")
+        generation = (
+            _check_generation(_require_mapping(generation_raw, "generation"))
+            if generation_raw is not None
+            else None
+        )
+        profile_config = ProfileConfig.from_dict(
+            _require_mapping(raw.get("profile", {}), "profile")
+        )
         # M4: a benefit constraint (cost bounded against a reference arm)
         # is meaningless without a declared cost basis - refuse it; a ref
         # bound also needs the references section to resolve against.
@@ -1368,6 +1528,9 @@ class ExperimentSpec:
             evidence_quality=evidence_quality,
             references=references,
             cost_basis=cost_basis,
+            models=models,
+            generation=generation,
+            profile_config=profile_config,
         )
 
     @property
@@ -1549,6 +1712,12 @@ class ExperimentSpec:
             out["references"] = self.references.to_dict()
         if self.cost_basis is not None:
             out["cost_basis"] = self.cost_basis.to_dict()
+        if self.models:
+            out["models"] = [model.to_dict() for model in self.models]
+        if self.generation is not None:
+            out["generation"] = dict(self.generation)
+        if self.profile_config != ProfileConfig():
+            out["profile"] = self.profile_config.to_dict()
         return out
 
 
