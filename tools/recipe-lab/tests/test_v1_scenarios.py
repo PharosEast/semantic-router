@@ -280,6 +280,7 @@ def test_same_contract_feeds_replay_then_live(monkeypatch, tmp_path, capsys):
     from recipe_lab import cli as cli_module
     from recipe_lab.contract import ContractError, ExperimentSpec
     from recipe_lab.live import live_verdict_from_runs
+
     from tests.fixtures import VALID_SPLITS_SPEC
 
     cases = tmp_path / "dev.jsonl"
@@ -377,7 +378,19 @@ def test_same_contract_feeds_replay_then_live(monkeypatch, tmp_path, capsys):
                 return {
                     "id": run_id,
                     "status": "completed",
-                    "manifest": {"dataset": {"sha256": hexdigest}},
+                    "manifest": {
+                        "dataset": {"sha256": hexdigest},
+                        # Y4: the run's MoM target carries the frozen config
+                        # the verdict binds to
+                        "targets": [
+                            {
+                                "id": "mom-x",
+                                "kind": "mom",
+                                "mode": "live",
+                                "config_hash": "a" * 64,
+                            }
+                        ],
+                    },
                 }
 
             def compare(self, base, cand):
@@ -398,6 +411,8 @@ def test_same_contract_feeds_replay_then_live(monkeypatch, tmp_path, capsys):
         ],
     )
     assert result["verdict"] == "PASS"
+    # Y4: the verdict names the config the run's MoM target froze
+    assert result["config_sha256"] == "sha256:" + "a" * 64
 
     # a run that scored the cases file itself cannot bind on this contract
     with pytest.raises(ContractError, match="scored dataset"):

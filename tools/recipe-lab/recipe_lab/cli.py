@@ -1409,6 +1409,9 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
         _fail(f"live verdict error: {exc}")
 
     if args.ledger:
+        # Y4: the ledger's candidate names the config the verdict graded -
+        # the frozen config_hash of the MoM target that served the run.
+        candidate_row["config_sha256"] = result["config_sha256"]
         record = LedgerRecord(
             round=args.round,
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1432,6 +1435,8 @@ def cmd_live_verdict(args: argparse.Namespace) -> int:
             attribution_delta=None,
             attribution_ref=args.attribution_ref,
             coverage_warning=False,
+            # Y4: --final marks the promotion record the bundle reads.
+            final=bool(args.final),
             notes=f"baseline={result['metrics']['baseline']}",
         )
         ledger.append(record)
@@ -1588,6 +1593,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             for flag, value in (
                 ("--baseline-router-endpoint", args.baseline_router_endpoint),
                 ("--candidate-router-endpoint", args.candidate_router_endpoint),
+                # Y4: the verdict must name the config it graded.
+                ("--candidate-config", args.candidate_config),
                 ("--model-eval-dir", args.model_eval_dir),
             )
             if not value
@@ -1601,6 +1608,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 spec=spec,
                 tasks_path=args.tasks,
                 labels_path=args.labels,
+                candidate_config=args.candidate_config,
                 baseline_endpoint=args.baseline_router_endpoint,
                 candidate_endpoint=args.candidate_router_endpoint,
                 management_endpoint=args.candidate_management_endpoint,
@@ -1672,6 +1680,10 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 "routing_distribution="
                 + json.dumps(distribution, sort_keys=True, ensure_ascii=False)
             )
+        # Y4: the ledger's candidate names the config the verdict graded -
+        # sr-bench driver: the frozen config_hash of the MoM targets;
+        # model_eval driver: the sha256 the management API acknowledged.
+        candidate_row["config_sha256"] = result["config_sha256"]
         record = LedgerRecord(
             round=args.round,
             ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1697,6 +1709,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             attribution_delta=None,
             attribution_ref=args.attribution_ref,
             coverage_warning=False,
+            # Y4: --final marks the promotion record the bundle reads.
+            final=bool(args.final),
             notes="; ".join(notes_parts),
         )
         ledger.append(record)
@@ -2613,6 +2627,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="model_eval driver: the C2 labels-<split>.jsonl the driver "
         "rewrites the task categories from (required for that driver)",
+    )
+    p_verify.add_argument(
+        "--candidate-config",
+        default=None,
+        help="model_eval driver: the candidate config file the candidate "
+        "router must have loaded; its sha256 is checked against the router's "
+        "GET /api/v1/config/hash and recorded in the ledger (required for "
+        "that driver)",
     )
     p_verify.add_argument(
         "--baseline-router-endpoint",

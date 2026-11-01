@@ -89,6 +89,23 @@ def test_bool_round_rejected(tmp_path):
         ledger.append(base_record(round=True))
 
 
+def test_final_flag_roundtrip_and_live_only(tmp_path):
+    # Y4: `final` marks the promotion record the bundle reads - absent by
+    # default, bool-validated, and a live-tier-only claim
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    stored = ledger.append(live_record(final=True))
+    assert stored["final"] is True
+    assert Ledger(path).read()[0]["final"] is True
+    # default: no final key on an ordinary record
+    assert "final" not in ledger.append(live_record())
+    # a replay record can never be the promotion record
+    with pytest.raises(ContractError, match="final is a live-tier promotion flag"):
+        ledger.append(base_record(final=True))
+    with pytest.raises(ContractError, match="final must be a boolean"):
+        ledger.append(live_record(final="yes"))
+
+
 def test_filter_and_top_replay(tmp_path):
     path = tmp_path / "ledger.jsonl"
     ledger = Ledger(path)

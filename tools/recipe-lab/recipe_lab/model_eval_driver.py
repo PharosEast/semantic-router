@@ -63,6 +63,7 @@ from typing import Any
 from . import abba
 from .adapters.router_replay import (
     ReplayFetchError,
+    fetch_config_hash,
     fetch_replays,
     routing_shares_from_replays,
 )
@@ -522,6 +523,7 @@ def verify_live_model_eval(
     spec: ExperimentSpec,
     tasks_path: str | Path,
     labels_path: str | Path,
+    candidate_config: str | Path,
     baseline_endpoint: str,
     candidate_endpoint: str,
     management_endpoint: str | None = None,
@@ -564,8 +566,9 @@ def verify_live_model_eval(
     (`management_endpoint`, the router management base URL) and joined by
     prompt - the candidate arm is the only traffic that sends the task
     prompts on that router. It anchors `ref:random_mix` constraint bounds
-    and the Pareto row; without the endpoint or without matching replays
-    R stays unevaluable with a reason.
+    and the Pareto row; without matching replays R stays unevaluable with
+    a reason. (The endpoint itself is mandatory: the Y4 config binding
+    refuses to run the driver without it.)
 
     The result dict mirrors the sr-bench driver's shape (verdict/reasons/
     metrics/gates/constraints/bench_refs/trials/abba_summary/paired/
@@ -573,9 +576,11 @@ def verify_live_model_eval(
     `tasks_hash` (the contract-declared rendering's hash),
     `labeled_tasks_sha256`/`labels_sha256` (the in-driver rewrite's
     inputs and output), `label_merges`, `uncovered_cases`,
-    `planned_cases` and `distribution` (the alias-keyed routing shares
-    when R is evaluable); `preview` and `baseline_run_id` are None -
-    there is no sr-bench run behind this evidence.
+    `config_sha256` (the candidate config the router's management API
+    acknowledged as active - Y4), `planned_cases` and `distribution`
+    (the alias-keyed routing shares when R is evaluable); `preview` and
+    `baseline_run_id` are None - there is no sr-bench run behind this
+    evidence.
     """
     if repetitions < 1:
         raise ContractError("verify needs at least one repetition")
@@ -616,6 +621,39 @@ def verify_live_model_eval(
     labeled_tasks_path = write_tasks(labeled_rows, work_dir / "tasks-labeled.jsonl")
     labeled_tasks_hash = dataset_content_hash(labeled_tasks_path)
     labels_hash = dataset_content_hash(labels_file)
+    # Y4: the candidate arm's verdict must name the config it ran. The
+    # candidate config is bound two ways before any arm is dispatched: the
+    # local file's sha256 is recorded, and the router's management API
+    # (GET /api/v1/config/hash) must acknowledge an ACTIVE config whose
+    # source hash is that same file - a router still serving an older
+    # document fails here instead of grading the wrong recipe.
+    config_file = Path(candidate_config)
+    if not config_file.is_file():
+        raise ContractError(f"candidate config file not found: {config_file}")
+    config_sha256 = dataset_content_hash(config_file)
+    if management_endpoint is None:
+        raise ContractError(
+            "--candidate-management-endpoint is required: the driver must "
+            "check GET /api/v1/config/hash to confirm the candidate router "
+            "has loaded --candidate-config"
+        )
+    try:
+        activation = fetch_config_hash(management_endpoint)
+    except ReplayFetchError as exc:
+        raise ContractError(f"cannot check the candidate router's config: {exc}") from exc
+    status = activation.get("activation_status")
+    if status != "active":
+        raise ContractError(
+            f"the candidate router's config activation is {status!r}, not "
+            "active; load the candidate config before verifying"
+        )
+    served = activation.get("source_config_hash")
+    if not isinstance(served, str) or "sha256:" + served != config_sha256:
+        raise ContractError(
+            "the candidate router serves config "
+            f"{('sha256:' + served) if isinstance(served, str) else '<unknown>'}, "
+            f"but --candidate-config hashes to {config_sha256}"
+        )
     metric_key = spec.objective.metric_key
 
     # AB/BA pairs: both arms live, alternating execution order per repetition.
@@ -868,43 +906,38 @@ def verify_live_model_eval(
     # routing shares come from the candidate router's replay store (the
     # generation records carry no responding model), joined by prompt -
     # the candidate arm is the only traffic that sends the task prompts,
-    # and failed records are no routing decision. Any gap - no endpoint,
-    # a failed fetch, no matching record - keeps R unevaluable with a
-    # reason, never guessed.
+    # and failed records are no routing decision. Any gap - a failed
+    # fetch, no matching record - keeps R unevaluable with a reason,
+    # never guessed. The endpoint itself is mandatory upstream: the Y4
+    # config binding already refused to run without it.
     replay_shares: dict[str, float] | None = None
     replay_note: str | None = None
     if spec.references is not None:
-        if management_endpoint is None:
-            replay_note = (
-                "no --candidate-management-endpoint: the candidate router's "
-                "replay store was not queried"
-            )
+        task_prompts = {
+            row["prompt_user"]
+            for row in task_rows
+            if isinstance(row.get("prompt_user"), str) and row["prompt_user"]
+        }
+        if not task_prompts:
+            replay_note = "the tasks file declares no prompt_user values"
         else:
-            task_prompts = {
-                row["prompt_user"]
-                for row in task_rows
-                if isinstance(row.get("prompt_user"), str) and row["prompt_user"]
-            }
-            if not task_prompts:
-                replay_note = "the tasks file declares no prompt_user values"
+            try:
+                replay_records = fetch_replays(management_endpoint)
+            except ReplayFetchError as exc:
+                replay_note = f"replay fetch failed: {exc}"
             else:
-                try:
-                    replay_records = fetch_replays(management_endpoint)
-                except ReplayFetchError as exc:
-                    replay_note = f"replay fetch failed: {exc}"
-                else:
-                    replay_shares, replay_stats = routing_shares_from_replays(
-                        replay_records, task_prompts
+                replay_shares, replay_stats = routing_shares_from_replays(
+                    replay_records, task_prompts
+                )
+                if replay_shares is None:
+                    replay_note = (
+                        "no replay record with a selected model matches "
+                        "the task prompts "
+                        f"(matched={replay_stats['matched']} of "
+                        f"{replay_stats['total']} records, "
+                        f"{replay_stats['failed']} failed, "
+                        f"{replay_stats['no_model']} without a model)"
                     )
-                    if replay_shares is None:
-                        replay_note = (
-                            "no replay record with a selected model matches "
-                            "the task prompts "
-                            f"(matched={replay_stats['matched']} of "
-                            f"{replay_stats['total']} records, "
-                            f"{replay_stats['failed']} failed, "
-                            f"{replay_stats['no_model']} without a model)"
-                        )
     random_mix = _random_mix_evidence(
         spec=spec,
         planned=planned,
@@ -1002,6 +1035,8 @@ def verify_live_model_eval(
         "labels_sha256": labels_hash,
         "label_merges": label_merges,
         "uncovered_cases": uncovered,
+        # Y4: the candidate config identity the management API acknowledged.
+        "config_sha256": config_sha256,
         "planned_cases": planned,
     }
     if not spec.gates:
