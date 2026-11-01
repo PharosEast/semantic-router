@@ -2,10 +2,9 @@
 
 All commands print a single structured JSON document on stdout
 (allow_nan=False, UTF-8); progress and logs go to stderr; no command reads
-stdin. Exit codes: `0` success (for `live-verdict`: PASS; `verify` always
-exits 0 - read `verdict` from the JSON), `1` FAIL verdict (`live-verdict`
-only), `2` usage, contract or tool error, and INCONCLUSIVE for
-`live-verdict`.
+stdin. Exit codes: `0` success, `1` FAIL verdict (`live-verdict` and
+`verify` follow the verdict), `2` usage, contract or tool error (also
+INCONCLUSIVE for `live-verdict`).
 
 ## Contract
 
@@ -251,23 +250,40 @@ proposals.
 ## Live tier
 
 - `recipe-lab verify --spec S [--split calib|dev|frozen_test] [--final]
-  --baseline-run-id A --candidate J [--candidate-targets T1,T2]
-  [--repetitions N] [--work-dir D] [--guard-measurements M]
-  [--insight-refs R] [--attribution-ref REF] [--ledger L]
-  [--srbench-bin vllm-sr] [--srbench-url U] [--srbench-store P]
-  [--timeout S] [--round N]`
+  [--workload W] (--baseline-run-id A | --baseline-manifest M)
+  --candidate J [--candidate-targets T1,T2] [--repetitions N] [--work-dir D]
+  [--guard-measurements M] [--insight-refs R] [--attribution-ref REF]
+  [--ledger L] [--run-cache P] [--srbench-bin vllm-sr] [--srbench-url U]
+  [--srbench-store P] [--timeout S] [--round N]`
   Drives sr-bench end to end instead of comparing two ready-made runs (I):
   extracts the baseline manifest from the terminal-completed baseline run
-  (`benchmark show`), runs one preview candidate-plan, then `--repetitions`
-  AB/BA pairs - every pair re-runs the frozen baseline manifest and a fresh
-  candidate-plan, then compares the pair. Pair metrics become
-  medians/ranges; any incomplete pair forces INCONCLUSIVE. The preview is
-  diagnostic only: its routing distribution lands in the record notes, and
-  a preview failure is recorded as a diagnostic reason, never a veto.
-  Prints the same JSON shape as `live-verdict` and always exits 0 - read
-  `verdict` from the JSON. `--candidate-targets` names the sr-bench MoM
-  targets serving the candidate; it falls back to the candidate JSON's
-  `srbench_targets`.
+  (`benchmark show`; `--baseline-manifest` submits one instead), runs one
+  preview candidate-plan, then `--repetitions` AB/BA pairs - every pair
+  re-runs the frozen baseline manifest and a fresh candidate-plan, then
+  compares the pair. Pair metrics become medians/ranges; any incomplete
+  pair forces INCONCLUSIVE. The preview is diagnostic only: its routing
+  distribution lands in the record notes, and a preview failure is
+  recorded as a diagnostic reason, never a veto. Prints the same JSON
+  shape as `live-verdict` and follows the verdict for its exit code.
+  `--candidate-targets` names the sr-bench MoM targets serving the
+  candidate; it falls back to the candidate JSON's `srbench_targets`.
+  - Driver `model_eval` (C7): when the workload declares
+    `driver: model_eval`, sr-bench is replaced end to end - every arm is a
+    `multi_benchmark_eval.py` + `mcq_judge.py` pass over one rewritten task
+    set: the baseline and candidate arms hit the router endpoints serving
+    their configs, the S/W reference arms hit the spec models' direct
+    endpoints. Per-case correctness feeds the same M2/M3/M4 machinery as
+    the sr-bench driver (paired stats in the sr-bench compare shape, the
+    evidence-quality ceilings, reference arms cached by tasks hash +
+    alias). Accuracy is the planned denominator (missing or unanswered
+    counts as wrong). A crashed arm exits 2 (the scripts resume completed
+    records); an arm without judged rows is INCONCLUSIVE evidence.
+    Required flags: `--tasks T` (the profile's rewritten
+    `<split>/tasks.jsonl`), `--baseline-router-endpoint U`,
+    `--candidate-router-endpoint U` and `--model-eval-dir M`; optional
+    `--router-model vllm-sr/auto`, `--python-bin B`, `--concurrency N`,
+    `--request-timeout S`, `--force`. sr-bench flags are ignored and
+    `--baseline-run-id` / `--baseline-manifest` are rejected in this mode.
 - `recipe-lab live-verdict --spec S [--split dev|calib|frozen_test] --final?
   --baseline-run-id A --candidate-run-id B [--guard-measurements M]
   [--candidate J] [--insight-refs R]
