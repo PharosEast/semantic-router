@@ -934,3 +934,170 @@ def test_every_documented_invocation_exists():
                 if action not in sub_names:
                     unknown.append(f"{doc}: recipe-lab {name} {action}")
     assert not unknown, "documented but nonexistent invocations: " + ", ".join(unknown)
+
+
+# ---- C7: the verify model_eval driver ----
+
+
+def _write_model_eval_spec(tmp_path):
+    """Spec with one model_eval-driver workload whose dev split is a real file."""
+    dev = tmp_path / "dev.jsonl"
+    dev.write_bytes(b'{"task_id":"t1","prompt_user":"q","answer":"A"}\n')
+    spec = copy.deepcopy(VALID_SPEC)
+    spec.pop("workload", None)
+    spec["workloads"] = [
+        {
+            "name": "cold",
+            "profile": "quick",
+            "driver": "model_eval",
+            "splits": {
+                "dev": {
+                    "manifest": "dev.jsonl",
+                    "content_hash": "sha256:"
+                    + hashlib.sha256(dev.read_bytes()).hexdigest(),
+                }
+            },
+        }
+    ]
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return str(spec_path)
+
+
+_FAKE_MODEL_EVAL_RESULT = {
+    "verdict": "PASS",
+    "reasons": [],
+    "improvement_pct": 100.0,
+    "metrics": {"baseline": 0.5, "candidate": 1.0},
+    "gates": {},
+    "constraints": [],
+    "undeclared_measurements": [],
+    "bench_refs": ["meval:tasks:sha256:ab", "meval:baseline-rep0"],
+    "baseline_run_id": None,
+    "trials": {},
+    "abba_summary": {},
+    "preview": None,
+    "paired": None,
+    "evidence_quality": {},
+    "references": {},
+    "pareto": [],
+    "driver": "model_eval",
+    "tasks_hash": "sha256:ab",
+    "planned_cases": 1,
+}
+
+
+def _model_eval_verify_args(spec_path, tmp_path, candidate):
+    return [
+        "verify",
+        "--spec",
+        spec_path,
+        "--candidate",
+        str(candidate),
+        "--tasks",
+        str(tmp_path / "tasks.jsonl"),
+        "--baseline-router-endpoint",
+        "http://127.0.0.1:9001/v1",
+        "--candidate-router-endpoint",
+        "http://127.0.0.1:9002/v1",
+        "--model-eval-dir",
+        str(tmp_path / "scripts"),
+        "--repetitions",
+        "1",
+        "--work-dir",
+        str(tmp_path / "work"),
+    ]
+
+
+def test_verify_model_eval_driver_runs_without_srbench(tmp_path, capsys, monkeypatch):
+    # C7: the driver branch skips the sr-bench targets entirely - the
+    # candidate JSON needs no srbench_targets and SrbenchCli is never built.
+    import recipe_lab.cli as cli_module
+
+    spec_path = _write_model_eval_spec(tmp_path)
+    (tmp_path / "tasks.jsonl").write_text('{"task_id":"t1"}\n', encoding="utf-8")
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    captured: dict = {}
+
+    def fake_verify(**kwargs):
+        captured.update(kwargs)
+        return dict(_FAKE_MODEL_EVAL_RESULT)
+
+    monkeypatch.setattr(cli_module, "verify_live_model_eval", fake_verify)
+    assert main(_model_eval_verify_args(spec_path, tmp_path, candidate)) == 0
+    out = json.loads(capsys.readouterr().out)
+    assert out["verdict"] == "PASS"
+    assert captured["tasks_path"] == str(tmp_path / "tasks.jsonl")
+    assert captured["baseline_endpoint"] == "http://127.0.0.1:9001/v1"
+    assert captured["candidate_endpoint"] == "http://127.0.0.1:9002/v1"
+    assert captured["router_model"] == "vllm-sr/auto"
+
+
+def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
+    import recipe_lab.cli as cli_module
+
+    spec_path = _write_model_eval_spec(tmp_path)
+    (tmp_path / "tasks.jsonl").write_text('{"task_id":"t1"}\n', encoding="utf-8")
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    ledger = tmp_path / "ledger.jsonl"
+    monkeypatch.setattr(
+        cli_module,
+        "verify_live_model_eval",
+        lambda **kwargs: dict(_FAKE_MODEL_EVAL_RESULT),
+    )
+    assert (
+        main(
+            _model_eval_verify_args(spec_path, tmp_path, candidate)
+            + ["--ledger", str(ledger), "--round", "2"]
+        )
+        == 0
+    )
+    records = [
+        json.loads(line)
+        for line in ledger.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(records) == 1
+    record = records[0]
+    assert record["tier"] == "live"
+    assert record["verdict"] == "PASS"
+    assert record["round"] == 2
+    assert record["baseline_ref"] is None  # no sr-bench run behind this evidence
+    assert "repetitions=1" in record["notes"]
+
+
+def test_verify_model_eval_rejects_srbench_baseline(tmp_path, capsys):
+    spec_path = _write_model_eval_spec(tmp_path)
+    (tmp_path / "tasks.jsonl").write_text('{"task_id":"t1"}\n', encoding="utf-8")
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    rc = main(
+        _model_eval_verify_args(spec_path, tmp_path, candidate)
+        + ["--baseline-run-id", "run-b"]
+    )
+    assert rc == EXIT_CONTRACT_ERROR
+    assert "takes no sr-bench baseline" in capsys.readouterr().err
+
+
+def test_verify_model_eval_requires_tasks_and_flags(tmp_path, capsys):
+    spec_path = _write_model_eval_spec(tmp_path)
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8")
+    base = ["verify", "--spec", spec_path, "--candidate", str(candidate)]
+    assert main(base + ["--model-eval-dir", str(tmp_path / "s")]) == EXIT_CONTRACT_ERROR
+    assert "--tasks" in capsys.readouterr().err
+    err = main(
+        base
+        + [
+            "--tasks",
+            str(tmp_path / "tasks.jsonl"),
+            "--baseline-router-endpoint",
+            "http://ep1/v1",
+            "--candidate-router-endpoint",
+            "http://ep2/v1",
+        ]
+    )
+    assert err == EXIT_CONTRACT_ERROR
+    assert "--model-eval-dir" in capsys.readouterr().err
