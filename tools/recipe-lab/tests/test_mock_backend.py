@@ -42,9 +42,7 @@ def test_wrong_letter_is_deterministic_and_never_correct(mock):
 
 
 def test_plan_answer_returns_planned_letters(mock):
-    mock._ANSWER_PLAN.update(
-        {"local/private-qwen": {"math": True, "history": False}}
-    )
+    mock._ANSWER_PLAN.update({"local/private-qwen": {"math": True, "history": False}})
     good = {"expected": "B", "category": "math"}
     bad = {"expected": "B", "category": "history"}
     assert mock._plan_answer("local/private-qwen", good) == "Answer: B."
@@ -53,7 +51,10 @@ def test_plan_answer_returns_planned_letters(mock):
 
 def test_plan_answer_star_fallback_and_misses(mock):
     mock._ANSWER_PLAN.update({"m-a": {"*": True}})
-    assert mock._plan_answer("m-a", {"expected": "A", "category": "anything"}) == "Answer: A."
+    assert (
+        mock._plan_answer("m-a", {"expected": "A", "category": "anything"})
+        == "Answer: A."
+    )
     # explicit category beats the star: unlisted categories fall through
     mock._ANSWER_PLAN.clear()
     mock._ANSWER_PLAN.update({"m-a": {"math": True}})
@@ -86,4 +87,6 @@ def test_answer_for_unplanned_behavior_unchanged(mock):
     mock._CAPABILITY_TABLE.clear()
     mock._ANSWER_PLAN.update({"local/private-qwen": {"math": True}})
     # no capability entry: the fixed ANSWER_TABLE path still applies
-    assert "Paris" in mock._answer_for("local/private-qwen", "What is the capital of france?")
+    assert "Paris" in mock._answer_for(
+        "local/private-qwen", "What is the capital of france?"
+    )

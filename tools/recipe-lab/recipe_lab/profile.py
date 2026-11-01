@@ -118,7 +118,9 @@ def load_labels(path: str | Path) -> dict[str, str]:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"{path}:{line_no} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"{path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
             case_id = row.get("case_id")
             label = row.get("router_label")
             if not isinstance(case_id, str) or not case_id:
@@ -241,8 +243,7 @@ def _run(argv: list[str], *, timeout_s: float, what: str) -> None:
         )
     except subprocess.TimeoutExpired as exc:
         raise ContractError(
-            f"{what} exceeded the trial budget "
-            f"({timeout_s:.0f}s): {exc}"
+            f"{what} exceeded the trial budget " f"({timeout_s:.0f}s): {exc}"
         ) from exc
     if proc.returncode != 0:
         tail = (proc.stdout or "")[-4000:]
@@ -343,12 +344,16 @@ def summarize_judged(
                 if isinstance(value, (int, float)):
                     sink.append(float(value))
             cost = _question_cost(
-                record.get("prompt_tokens")
-                if isinstance(record.get("prompt_tokens"), (int, float))
-                else None,
-                row.get("completion_tokens")
-                if isinstance(row.get("completion_tokens"), (int, float))
-                else None,
+                (
+                    record.get("prompt_tokens")
+                    if isinstance(record.get("prompt_tokens"), (int, float))
+                    else None
+                ),
+                (
+                    row.get("completion_tokens")
+                    if isinstance(row.get("completion_tokens"), (int, float))
+                    else None
+                ),
                 pricing,
             )
             if cost is not None:
@@ -396,10 +401,7 @@ def run_profile(
     out.mkdir(parents=True, exist_ok=True)
     labels_dir = Path(labels_dir)
     model_eval_dir = Path(model_eval_dir)
-    scripts = {
-        name: model_eval_dir / name
-        for name in MODEL_EVAL_SCRIPTS
-    }
+    scripts = {name: model_eval_dir / name for name in MODEL_EVAL_SCRIPTS}
     for path in scripts.values():
         if not path.is_file():
             raise ContractError(f"model_eval script not found: {path}")
@@ -413,7 +415,8 @@ def run_profile(
     # One params file shared by every model here and the later live arms (C7).
     params_path = out / "generation.json"
     params_path.write_text(
-        json.dumps(spec.generation, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+        json.dumps(spec.generation, ensure_ascii=False, sort_keys=True, indent=2)
+        + "\n",
         encoding="utf-8",
     )
 
@@ -560,7 +563,9 @@ def run_profile(
     }
     profile_path = out / "profile.json"
     profile_path.write_text(
-        json.dumps(profile, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+        json.dumps(
+            profile, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -576,7 +581,9 @@ def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"{path}:{line_no} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"{path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
             if not isinstance(row, dict):
                 raise ContractError(f"{path}:{line_no} must be a JSON object")
             rows.append(row)

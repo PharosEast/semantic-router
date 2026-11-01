@@ -1719,8 +1719,7 @@ def test_live_verdict_missing_results_over_ceiling_is_inconclusive():
     )
     assert result["verdict"] == "INCONCLUSIVE"
     assert (
-        "candidate missing-result rate 13.33% exceeds max 2.00%"
-        in result["reasons"][0]
+        "candidate missing-result rate 13.33% exceeds max 2.00%" in result["reasons"][0]
     )
     assert result["evidence_quality"]["candidate"] == {
         "truncation_rate": 0.0,
@@ -2403,9 +2402,7 @@ def test_verify_rejects_ambiguous_baseline_source(tmp_path):
         )
     # neither source: same contract error
     with pytest.raises(ContractError, match="exactly one"):
-        verify_live(
-            baseline_run_id=None, baseline_manifest=None, **base_kwargs
-        )
+        verify_live(baseline_run_id=None, baseline_manifest=None, **base_kwargs)
     # the ambiguity check precedes the Y4 registry check: nothing ran
     assert stub.events == []
 

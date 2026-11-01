@@ -53,20 +53,14 @@ def normalize_answer_letter(raw: Any, where: str) -> str:
         raise ContractError(f"{where}: answer must be a letter string, got {raw!r}")
     letter = raw.strip().upper()
     if not ANSWER_LETTER_RE.match(letter):
-        raise ContractError(
-            f"{where}: answer must be a single letter A-J, got {raw!r}"
-        )
+        raise ContractError(f"{where}: answer must be a single letter A-J, got {raw!r}")
     return letter
 
 
 def render_mcq_prompt(question: str, options: list[str]) -> str:
     """Render question + options like sr-bench's _mcq (source_records.py)."""
-    rendered = "\n".join(
-        f"{chr(65 + i)}. {option}" for i, option in enumerate(options)
-    )
-    return (
-        f"{question}\n\n{rendered}\n\nReturn only the letter of the correct answer."
-    )
+    rendered = "\n".join(f"{chr(65 + i)}. {option}" for i, option in enumerate(options))
+    return f"{question}\n\n{rendered}\n\nReturn only the letter of the correct answer."
 
 
 def last_user_message(messages: Any) -> str:
@@ -108,7 +102,9 @@ def _task_row_from_srbench(row: dict[str, Any]) -> dict[str, Any]:
     return task
 
 
-def _task_row_from_raw(row: dict[str, Any], default_dataset: str | None) -> dict[str, Any]:
+def _task_row_from_raw(
+    row: dict[str, Any], default_dataset: str | None
+) -> dict[str, Any]:
     task_id = row.get("id")
     if not isinstance(task_id, str) or not task_id.strip():
         raise ContractError("raw MCQ row is missing a non-empty id")
@@ -188,7 +184,9 @@ def load_source_rows(path: str | Path) -> list[dict[str, Any]]:
             try:
                 row = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ContractError(f"{path}:{line_no} is not valid JSON: {exc}") from exc
+                raise ContractError(
+                    f"{path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
             if not isinstance(row, dict):
                 raise ContractError(f"{path}:{line_no} must be a JSON object")
             rows.append(row)

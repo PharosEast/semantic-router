@@ -150,7 +150,10 @@ def test_import_judged_converts_rows():
         },
     ]
     entries = import_judged("mock/small", judged)
-    assert [(e.case_id, e.model) for e in entries] == [("q1", "mock/small"), ("q2", "mock/small")]
+    assert [(e.case_id, e.model) for e in entries] == [
+        ("q1", "mock/small"),
+        ("q2", "mock/small"),
+    ]
     assert entries[0].answer_ok is True and entries[0].tokens == 42
     assert entries[1].answer_ok is False and entries[1].tokens is None
     # entries round-trip through the bank format with the token evidence
@@ -204,7 +207,13 @@ def test_bank_tokens_roundtrip_and_legacy_rows(tmp_path):
     bad = tmp_path / "bad.jsonl"
     bad.write_text(
         json.dumps(
-            {"case_id": "c1", "model": "m-a", "answer": "x", "answer_ok": True, "tokens": -3}
+            {
+                "case_id": "c1",
+                "model": "m-a",
+                "answer": "x",
+                "answer_ok": True,
+                "tokens": -3,
+            }
         ),
         encoding="utf-8",
     )
@@ -221,7 +230,9 @@ def test_apply_bank_carries_tokens():
             case_id="c1", model="m-b", answer="bad", answer_ok=False
         ),
     }
-    merged, _stats = apply_bank([{"case_id": "c1", "routed": "m-a"}, {"case_id": "c1", "routed": "m-b"}], bank)
+    merged, _stats = apply_bank(
+        [{"case_id": "c1", "routed": "m-a"}, {"case_id": "c1", "routed": "m-b"}], bank
+    )
     assert merged[0]["tokens"] == 33
     assert "tokens" not in merged[1]
 
@@ -259,12 +270,32 @@ def _write_profile_dev(tmp_path: Path) -> Path:
     profile_dir = tmp_path / "profile"
     fixtures = {
         "mock/small": [
-            {"task_id": "q1", "is_correct": True, "completion": "Answer: B.", "completion_tokens": 42},
-            {"task_id": "q2", "is_correct": False, "completion": "Answer: A.", "completion_tokens": 40},
+            {
+                "task_id": "q1",
+                "is_correct": True,
+                "completion": "Answer: B.",
+                "completion_tokens": 42,
+            },
+            {
+                "task_id": "q2",
+                "is_correct": False,
+                "completion": "Answer: A.",
+                "completion_tokens": 40,
+            },
         ],
         "mock/large": [
-            {"task_id": "q1", "is_correct": True, "completion": "Answer: B.", "completion_tokens": 400},
-            {"task_id": "q2", "is_correct": True, "completion": "Answer: B.", "completion_tokens": 410},
+            {
+                "task_id": "q1",
+                "is_correct": True,
+                "completion": "Answer: B.",
+                "completion_tokens": 400,
+            },
+            {
+                "task_id": "q2",
+                "is_correct": True,
+                "completion": "Answer: B.",
+                "completion_tokens": 410,
+            },
         ],
     }
     for alias, rows in fixtures.items():

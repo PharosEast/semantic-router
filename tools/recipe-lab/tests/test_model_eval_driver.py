@@ -274,7 +274,9 @@ def test_paired_stats_from_judged_partial_overlap_and_disjoint():
     assert stats is not None
     assert stats.paired_cases == 1  # only "b" is common
     assert (stats.wins, stats.losses, stats.ties) == (0, 1, 0)
-    assert paired_stats_from_judged(base, [{"task_id": "z", "is_correct": True}]) is None
+    assert (
+        paired_stats_from_judged(base, [{"task_id": "z", "is_correct": True}]) is None
+    )
 
 
 def test_arm_quality_rates_rates_and_missing():
@@ -364,9 +366,7 @@ def test_random_mix_paired_stats_edges():
     assert stats["bootstrap_mean"] == pytest.approx(0.5 - 1.0, abs=0.01)
     # no common cases between the arms -> no paired evidence
     stranger = [{"task_id": "zz", "is_correct": True}]
-    assert (
-        random_mix_paired_stats(stranger, {STRONG: strong}, {STRONG: 1.0}) is None
-    )
+    assert random_mix_paired_stats(stranger, {STRONG: strong}, {STRONG: 1.0}) is None
     # no positively-weighted model -> nothing to mix
     assert random_mix_paired_stats(cand, {STRONG: strong}, {STRONG: 0.0}) is None
 
@@ -487,9 +487,11 @@ def test_verify_live_model_eval_end_to_end(tmp_path, monkeypatch):
     assert result["driver"] == "model_eval"
     assert result["planned_cases"] == N_TASKS
     # Y4: the config the management API acknowledged is the fixture's file
-    assert result["config_sha256"] == "sha256:" + hashlib.sha256(
-        (tmp_path / "candidate-config.yaml").read_bytes()
-    ).hexdigest()
+    assert (
+        result["config_sha256"]
+        == "sha256:"
+        + hashlib.sha256((tmp_path / "candidate-config.yaml").read_bytes()).hexdigest()
+    )
     assert result["tasks_hash"].startswith("sha256:")
     assert result["labels_sha256"].startswith("sha256:")
     assert result["labeled_tasks_sha256"].startswith("sha256:")
@@ -861,9 +863,7 @@ def test_verify_live_model_eval_rewrites_categories_from_labels(tmp_path, monkey
     _write_tasks(tasks_path)
     labels_path = tmp_path / "labels.jsonl"
     # labels cover only every other case; the rest is uncovered
-    rows = [
-        {"case_id": f"t{i}", "router_label": "code"} for i in range(0, N_TASKS, 2)
-    ]
+    rows = [{"case_id": f"t{i}", "router_label": "code"} for i in range(0, N_TASKS, 2)]
     labels_path.write_text(
         "".join(json.dumps(r, sort_keys=True) + "\n" for r in rows), encoding="utf-8"
     )
