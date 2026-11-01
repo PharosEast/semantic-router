@@ -1045,8 +1045,11 @@ def test_verify_model_eval_driver_runs_without_srbench(tmp_path, capsys, monkeyp
     monkeypatch.setattr(cli_module, "verify_live_model_eval", fake_verify)
     assert (
         main(
-            _model_eval_verify_args(spec_path, tmp_path, candidate)
-            + ["--candidate-management-endpoint", "http://127.0.0.1:8080"]
+            [
+                *_model_eval_verify_args(spec_path, tmp_path, candidate),
+                "--candidate-management-endpoint",
+                "http://127.0.0.1:8080",
+            ]
         )
         == 0
     )
@@ -1076,8 +1079,13 @@ def test_verify_model_eval_driver_appends_ledger(tmp_path, capsys, monkeypatch):
     )
     assert (
         main(
-            _model_eval_verify_args(spec_path, tmp_path, candidate)
-            + ["--ledger", str(ledger), "--round", "2"]
+            [
+                *_model_eval_verify_args(spec_path, tmp_path, candidate),
+                "--ledger",
+                str(ledger),
+                "--round",
+                "2",
+            ]
         )
         == 0
     )
@@ -1108,8 +1116,11 @@ def test_verify_model_eval_rejects_srbench_baseline(tmp_path, capsys):
         json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
     )
     rc = main(
-        _model_eval_verify_args(spec_path, tmp_path, candidate)
-        + ["--baseline-run-id", "run-b"]
+        [
+            *_model_eval_verify_args(spec_path, tmp_path, candidate),
+            "--baseline-run-id",
+            "run-b",
+        ]
     )
     assert rc == EXIT_CONTRACT_ERROR
     assert "takes no sr-bench baseline" in capsys.readouterr().err
@@ -1122,11 +1133,11 @@ def test_verify_model_eval_requires_tasks_and_flags(tmp_path, capsys):
         json.dumps({"kind": "config", "ref": "cand-1"}), encoding="utf-8"
     )
     base = ["verify", "--spec", spec_path, "--candidate", str(candidate)]
-    assert main(base + ["--model-eval-dir", str(tmp_path / "s")]) == EXIT_CONTRACT_ERROR
+    assert main([*base, "--model-eval-dir", str(tmp_path / "s")]) == EXIT_CONTRACT_ERROR
     assert "--tasks" in capsys.readouterr().err
     err = main(
-        base
-        + [
+        [
+            *base,
             "--tasks",
             str(tmp_path / "tasks.jsonl"),
             "--baseline-router-endpoint",
@@ -1138,8 +1149,8 @@ def test_verify_model_eval_requires_tasks_and_flags(tmp_path, capsys):
     assert err == EXIT_CONTRACT_ERROR
     assert "--labels" in capsys.readouterr().err
     err = main(
-        base
-        + [
+        [
+            *base,
             "--tasks",
             str(tmp_path / "tasks.jsonl"),
             "--labels",

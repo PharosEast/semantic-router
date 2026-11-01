@@ -486,7 +486,7 @@ def _evidence_entry(
     percentage ceilings and land in `incomplete_reasons` (INCONCLUSIVE).
     `finish_reason_length_rate` is reference only and never gated.
     """
-    entry: dict[str, float | None] = {key: None for key in _EVIDENCE_RATE_KEYS}
+    entry: dict[str, float | None] = dict.fromkeys(_EVIDENCE_RATE_KEYS, None)
     if rates is not None:
         entry.update({key: rates.get(key) for key in _EVIDENCE_RATE_KEYS})
     incomplete.extend(

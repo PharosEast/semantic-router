@@ -733,7 +733,7 @@ def verify_live_model_eval(
     for constraint in spec.objective.constraints:
         if constraint.metric == metric_key:
             per_arm: dict[str, list[float]] = {abba.BASELINE: [], abba.CANDIDATE: []}
-            for (rep, label), judged_rows in judged_by_arm.items():
+            for (_rep, label), judged_rows in judged_by_arm.items():
                 per_arm[label].append(_arm_accuracy(judged_rows, planned))
             baseline_c = (
                 statistics.median(per_arm[abba.BASELINE])

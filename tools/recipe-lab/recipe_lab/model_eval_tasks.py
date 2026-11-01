@@ -46,6 +46,9 @@ from .contract import ContractError
 # mcq_judge.py's extractor recognizes uppercase A-J only.
 ANSWER_LETTER_RE = re.compile(r"^[A-J]$")
 
+# mcq_judge grades letters A-J, so a row can carry at most ten options.
+MAX_MCQ_OPTIONS = 10
+
 
 def normalize_answer_letter(raw: Any, where: str) -> str:
     """Validate and normalize one ground-truth letter to uppercase A-J."""
@@ -119,7 +122,7 @@ def _task_row_from_raw(
         or not all(isinstance(option, str) and option for option in options)
     ):
         raise ContractError(f"{where}: options must be a non-empty string list")
-    if len(options) > 10:
+    if len(options) > MAX_MCQ_OPTIONS:
         raise ContractError(
             f"{where}: {len(options)} options exceed the judge's A-J range"
         )
