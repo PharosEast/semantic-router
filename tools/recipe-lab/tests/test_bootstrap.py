@@ -175,7 +175,7 @@ def _write_profile(tmp_path: Path, *, with_tokens: bool = True) -> Path:
             token_dir = profile_dir / "calib" / "token_costs"
             token_dir.mkdir(parents=True, exist_ok=True)
             (token_dir / f"{quote(alias, safe='')}.json").write_text(
-                json.dumps({label: TOKENS[alias] for label in ACCURACY[alias]}),
+                json.dumps(dict.fromkeys(ACCURACY[alias], TOKENS[alias])),
                 encoding="utf-8",
             )
     stats = {

@@ -118,8 +118,8 @@ def parse_lambdas(raw: str) -> list[float]:
     """Parse the comma-separated lambda list (deduped, order kept)."""
     values: list[float] = []
     seen: set[str] = set()
-    for chunk in raw.split(","):
-        chunk = chunk.strip()
+    for part in raw.split(","):
+        chunk = part.strip()
         if not chunk:
             continue
         try:
@@ -463,11 +463,8 @@ def complete_candidate(
         ],
         "providers": {
             "defaults": {
-                key: value
-                for key, value in {
-                    **((scaffold.get("providers") or {}).get("defaults") or {}),
-                    "model": default_model,
-                }.items()
+                **((scaffold.get("providers") or {}).get("defaults") or {}),
+                "model": default_model,
             },
             "models": _provider_models(scaffold, spec),
         },

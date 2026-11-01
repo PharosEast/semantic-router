@@ -106,7 +106,7 @@ TRUNCATION_MAX_TOKENS = 16
 # Per-completion artificial latency (seconds): keeps sr-bench arms in
 # flight long enough for fault-injection polls to observe them, standing
 # in for duplicating the case set many times over.
-_DELAY_SECONDS = 0.0
+_DELAY_STATE: dict[str, float] = {"seconds": 0.0}
 
 
 def _completion(model: str, content: str, finish_reason: str = "stop") -> bytes:
@@ -165,8 +165,9 @@ class Handler(BaseHTTPRequestHandler):
                 max_tokens = payload.get("max_tokens")
             except (json.JSONDecodeError, AttributeError):
                 model, prompt, stream, max_tokens = "unknown", "", False, None
-            if _DELAY_SECONDS > 0:
-                time.sleep(_DELAY_SECONDS)
+            delay = _DELAY_STATE["seconds"]
+            if delay > 0:
+                time.sleep(delay)
             finish_reason = (
                 "length"
                 if isinstance(max_tokens, int) and max_tokens < TRUNCATION_MAX_TOKENS
@@ -242,8 +243,7 @@ def main() -> None:
         "for fault-injection polls (env: RECIPE_LAB_MOCK_DELAY_MS)",
     )
     args = parser.parse_args()
-    global _DELAY_SECONDS
-    _DELAY_SECONDS = args.delay_ms / 1000.0
+    _DELAY_STATE["seconds"] = args.delay_ms / 1000.0
     if args.cases:
         _CAPABILITY_TABLE.clear()
         _CATEGORIES.clear()

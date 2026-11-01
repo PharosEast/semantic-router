@@ -153,7 +153,7 @@ def compute_paired_stats(
         raise ValueError("compute_paired_stats needs at least one paired diff")
     for d in diffs:
         if isinstance(d, bool) or not isinstance(d, (int, float)):
-            raise ValueError("paired diffs must be numbers")  # noqa: TRY004
+            raise ValueError("paired diffs must be numbers")
     if groups is not None:
         if weights is None:
             raise ValueError("groups and weights must be provided together")

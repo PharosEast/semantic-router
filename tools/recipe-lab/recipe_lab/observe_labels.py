@@ -93,6 +93,9 @@ REPLAY_PLUGIN = {
 }
 
 
+_HTTP_OK = 200
+
+
 def label_for_decision(decision: str) -> str:
     """The router label of one record: the matched decision name when it is a
     routing domain, `other` for the catch-all (or anything else)."""
@@ -328,7 +331,9 @@ def observe_split(
         # with a real domain (not other, not lost).
         "label_coverage": round(labeled / len(cases), 6) if cases else 0.0,
         "label_counts": label_counts,
-        "non_200_requests": sum(1 for status in statuses.values() if status != 200),
+        "non_200_requests": sum(
+            1 for status in statuses.values() if status != _HTTP_OK
+        ),
     }
     return {
         "rows": rows,
