@@ -64,6 +64,7 @@ pip install -e '.[dev]'
 | `attribute` | E1/E2/E3 误路由归因（`--split` + 可选 `--cases` 哈希校验） |
 | `attribute-session` | 会话级 agentic 归因：lane_flap / tool_loop_interrupted / selection_failed（sub-6 P2） |
 | `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签（`--unlabeled` 出原始诊断行） |
+| `observe-labels` | C2 冷启动观测：种子配置 + request-id 打标探测 → labels-<split>.jsonl（case_id/router_label/confidence，未命中记 other） |
 | `bank` | 构建 / 应用 per-case/per-model 答案库（`contains` / `mcq` 判卷，I） |
 | `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D） |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
@@ -86,6 +87,10 @@ recipe-lab plan --spec examples/spec.example.yaml
 
 # 三分题集（同题集 + 同参数 => 字节级一致输出）
 recipe-lab split --cases labeled.jsonl --output-dir splits/
+
+# C2 冷启动观测：真实 router 自己的域标签（summary 的 label_coverage 写进 provenance）
+recipe-lab observe-labels --spec spec.yaml --split calib --out observe/ \
+  --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py
 
 # 诊断：不需要标准答案，从无标签 replay 流量里发现死决策、压缩量程与不可达阈值
 recipe-lab diagnose --records rows.jsonl --config config.yaml --output-dir diag/ \
