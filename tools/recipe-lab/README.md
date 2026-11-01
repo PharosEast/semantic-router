@@ -79,7 +79,7 @@ pip install -e '.[dev]'
 | `report` | 只从台账重放的运行报告（G1） |
 | `provenance` | recipe-lab-run-v1 manifest（记录 ID、台账哈希、bench_refs） |
 | `record-draft` | 从最近一条 PASS live 记录生成晋升草稿 |
-| `bundle` | 成品打包：live PASS + final-verify 的记录 → 可评审目录（C9，见下） |
+| `bundle` | 成品打包：live PASS + `final: true` 的记录 → 可评审目录（C9，见下） |
 | `next` | 导出下一轮 agent 上下文（G3；不可信材料头 + 可引用 ID） |
 
 常用示例：
@@ -296,12 +296,15 @@ replay 路由结果、路由到 `spec.models` 之外、参照臂缺失）R 不�
 ### Bundle（C9，成品打包）
 
 `recipe-lab bundle --spec S --ledger L --record rec-... --out bundle/ --config
-FINAL.yaml --skeleton SCAFFOLD.yaml --profile PROFILE.json` 把一条记录的
-验收证据打包成可评审目录。门槛是硬性的：记录必须是 live PASS、必须引用
-final-verify（`split: frozen_test` 或 `role: transfer` 的 workload——只有
-这两类记录契约上强制 `--final` 产出）、全部守卫为 `pass`，且 `--config`
-能通过 `<validate-bin> config validate`（`--validate-bin` 可换，约定同
-bootstrap）；任一不满足即 exit 2，什么都不写。产物对同样输入字节级稳定：
+FINAL.yaml --skeleton SCAFFOLD.yaml --candidate-sidecar PROVENANCE.json
+--profile PROFILE.json` 把一条记录的验收证据打包成可评审目录。门槛是硬性的：
+记录必须是 live PASS 且携带 `final: true` 晋升标记（`verify --final` 写入，
+bundle 直读该字段，不做契约反推）；打包的配置就是被终裁的那份——`--config`
+的 sha256 必须与台账记录 `candidate.config_sha256` 一致，`--skeleton`/
+`--profile` 的 sha256 必须与候选旁车（bootstrap 写的 `<候选>.provenance.json`，
+`--candidate-sidecar` 指定）引用的 scaffold/profile 一致；且 `--config` 能通过
+`<validate-bin> config validate`（`--validate-bin` 可换，约定同 bootstrap）；
+任一不满足即 exit 2，什么都不写。产物对同样输入字节级稳定：
 
 | 文件 | 内容 |
 |---|---|
@@ -335,11 +338,13 @@ recipe-lab bundle ...            # 成品打包
 ```
 
 脚本参数全部来自环境变量（`CASES`/`SPEC`/`VERIFY_CANDIDATE`/
-`BUNDLE_CONFIG`/`BUNDLE_SKELETON`，外加各步 `*_FLAGS` 透传，见脚本头注释），
+`BUNDLE_CONFIG`/`BUNDLE_SKELETON`，旁车默认取 `<BUNDLE_CONFIG%.*>.provenance.json`
+可用 `BUNDLE_SIDECAR` 覆盖，外加各步 `*_FLAGS` 透传，见脚本头注释），
 不含任何私有路径；阶段按输入齐备情况依次执行，缺什么就提示下一步设置什么。
 失败行为：profile 校验模型别名可往返、bootstrap 的 Warning 即拒绝、候选先过
 `config validate` 才落盘，任一步失败即退出且不产出后续产物；verify 需要真实
-端点（`VERIFY_FLAGS` 携带），bundle 拒绝非 live PASS 记录（见上节）。
+端点（`VERIFY_FLAGS` 携带），bundle 拒绝非 live PASS、无 `final` 标记或哈希
+不绑定的记录（见上节）。
 frozen_test 只被 `verify --final` 触碰一次，调参与排序永远只看 calib/dev。
 
 ## 记录格式（归因输入）

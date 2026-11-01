@@ -41,6 +41,18 @@ providers:
 PROFILE_JSON = '{"schema": "test-profile", "n": 3}\n'
 
 
+def _sha256(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+# Y4: the packaged inputs are bound to the evidence - the ledger's candidate
+# names the config's sha256, and the bootstrap sidecar cites the
+# skeleton/profile pair the candidate was generated with.
+CONFIG_SHA256 = _sha256(CONFIG_YAML)
+SKELETON_SHA256 = _sha256(SKELETON_YAML)
+PROFILE_SHA256 = _sha256(PROFILE_JSON)
+
+
 def _write_spec(tmp_path: Path) -> str:
     spec = {
         "api_version": API_VERSION,
@@ -100,7 +112,9 @@ def _pass_record(**overrides) -> dict:
             "ref": "candidate-lambda-0.30.yaml",
             "change_summary": "bootstrap lambda 0.30",
             "provenance": {"proposer": "bootstrap", "insight_refs": []},
+            "config_sha256": CONFIG_SHA256,
         },
+        "final": True,
         "tier": "live",
         "baseline_ref": "run-base-1",
         "metrics": {"capability.score": 0.83},
@@ -174,6 +188,25 @@ def _write_inputs(tmp_path: Path) -> dict:
     skeleton.write_text(SKELETON_YAML, encoding="utf-8")
     profile = tmp_path / "profile.json"
     profile.write_text(PROFILE_JSON, encoding="utf-8")
+    # the bootstrap provenance sidecar: cites the skeleton/profile pair
+    sidecar = tmp_path / "candidate-lambda-0.30.provenance.json"
+    sidecar.write_text(
+        json.dumps(
+            {
+                "schema": "recipe-lab-bootstrap-v1",
+                "proposer": "bootstrap",
+                "scaffold": {
+                    "path": str(skeleton),
+                    "sha256": SKELETON_SHA256,
+                },
+                "profile": {"path": str(profile), "sha256": PROFILE_SHA256},
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     validate_bin = tmp_path / "fake-vllm-sr"
     validate_bin.write_text("#!/bin/sh\necho 'config ok'\n", encoding="utf-8")
     validate_bin.chmod(0o755)
@@ -181,6 +214,7 @@ def _write_inputs(tmp_path: Path) -> dict:
         "config": str(config),
         "skeleton": str(skeleton),
         "profile": str(profile),
+        "sidecar": str(sidecar),
         "validate_bin": str(validate_bin),
     }
 
@@ -196,6 +230,7 @@ def _bundle_args(tmp_path: Path, spec_path: str, ledger_path: str, record_id: st
         "--config", inputs["config"],
         "--skeleton", inputs["skeleton"],
         "--profile", inputs["profile"],
+        "--candidate-sidecar", inputs["sidecar"],
         "--validate-bin", inputs["validate_bin"],
         "--router-commit", "abc1234",
         "--model-revision", f"{SMALL}=rev-a",
@@ -310,14 +345,78 @@ def test_bundle_rejects_guard_not_passing(tmp_path, capsys, gate_value):
 def test_bundle_rejects_non_final_record(tmp_path, capsys):
     spec_path = _write_spec(tmp_path)
     record = _pass_record()
-    record.pop("workload")
-    record["split"] = "dev"
+    record.pop("final")
     ledger_path, record_id = _write_ledger(tmp_path, record)
     inputs = _write_inputs(tmp_path)
     out = tmp_path / "bundle"
     rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
     assert rc == EXIT_CONTRACT_ERROR
-    assert "not a final-verify record" in capsys.readouterr().err
+    assert "carries no final flag" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_bundle_rejects_unnamed_config(tmp_path, capsys):
+    # Y4: the packaged config must be the config the verdict graded - the
+    # ledger's candidate names its sha256
+    spec_path = _write_spec(tmp_path)
+    ledger_path, record_id = _write_ledger(tmp_path, _pass_record())
+    inputs = _write_inputs(tmp_path)
+    tweaked = tmp_path / "tweaked.yaml"
+    tweaked.write_text(CONFIG_YAML + "  # tweaked after the verdict\n", encoding="utf-8")
+    inputs["config"] = str(tweaked)
+    out = tmp_path / "bundle"
+    rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
+    assert rc == EXIT_CONTRACT_ERROR
+    err = capsys.readouterr().err
+    assert "hashes to" in err and "candidate names" in err
+    assert not out.exists()
+
+
+def test_bundle_rejects_record_without_config_hash(tmp_path, capsys):
+    # Y4: a record whose candidate names no config cannot be packaged
+    spec_path = _write_spec(tmp_path)
+    record = _pass_record()
+    del record["candidate"]["config_sha256"]
+    ledger_path, record_id = _write_ledger(tmp_path, record)
+    inputs = _write_inputs(tmp_path)
+    out = tmp_path / "bundle"
+    rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
+    assert rc == EXIT_CONTRACT_ERROR
+    assert "carries no config_sha256" in capsys.readouterr().err
+    assert not out.exists()
+
+
+def test_bundle_rejects_skeleton_not_matching_sidecar(tmp_path, capsys):
+    # Y4: the skeleton must be the scaffold the bootstrap sidecar cites
+    spec_path = _write_spec(tmp_path)
+    ledger_path, record_id = _write_ledger(tmp_path, _pass_record())
+    inputs = _write_inputs(tmp_path)
+    other_skeleton = tmp_path / "other-scaffold.yaml"
+    other_skeleton.write_text(
+        SKELETON_YAML + "routing:\n  default_model: mock/large\n", encoding="utf-8"
+    )
+    inputs["skeleton"] = str(other_skeleton)
+    out = tmp_path / "bundle"
+    rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
+    assert rc == EXIT_CONTRACT_ERROR
+    err = capsys.readouterr().err
+    assert "--skeleton hashes to" in err and "sidecar cites" in err
+    assert not out.exists()
+
+
+def test_bundle_rejects_profile_not_matching_sidecar(tmp_path, capsys):
+    # Y4: the profile must be the C3 profile the bootstrap sidecar cites
+    spec_path = _write_spec(tmp_path)
+    ledger_path, record_id = _write_ledger(tmp_path, _pass_record())
+    inputs = _write_inputs(tmp_path)
+    other_profile = tmp_path / "other-profile.json"
+    other_profile.write_text('{"schema": "test-profile", "n": 4}\n', encoding="utf-8")
+    inputs["profile"] = str(other_profile)
+    out = tmp_path / "bundle"
+    rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
+    assert rc == EXIT_CONTRACT_ERROR
+    err = capsys.readouterr().err
+    assert "--profile hashes to" in err and "sidecar cites" in err
     assert not out.exists()
 
 
@@ -376,13 +475,15 @@ def test_bundle_rejects_failing_validate(tmp_path, capsys):
 
 def test_bundle_rejects_private_path_in_config(tmp_path, capsys):
     spec_path = _write_spec(tmp_path)
-    ledger_path, record_id = _write_ledger(tmp_path, _pass_record())
+    # hash binding only proves the config is the one that was evaluated; the
+    # private scan still has to catch a leaked candidate that carries it
+    leaked_text = CONFIG_YAML + "  # reviewed against C:\\Users\\alice\\notes.md\n"
+    record = _pass_record()
+    record["candidate"]["config_sha256"] = _sha256(leaked_text)
+    ledger_path, record_id = _write_ledger(tmp_path, record)
     inputs = _write_inputs(tmp_path)
     leaked = tmp_path / "leaked.yaml"
-    leaked.write_text(
-        CONFIG_YAML + "  # reviewed against C:\\Users\\alice\\notes.md\n",
-        encoding="utf-8",
-    )
+    leaked.write_text(leaked_text, encoding="utf-8")
     inputs["config"] = str(leaked)
     out = tmp_path / "bundle"
     rc = main(_bundle_args(tmp_path, spec_path, ledger_path, record_id, inputs, out))
@@ -396,12 +497,13 @@ def test_bundle_rejects_private_path_in_config(tmp_path, capsys):
 
 def test_bundle_rejects_custom_private_pattern(tmp_path, capsys):
     spec_path = _write_spec(tmp_path)
-    ledger_path, record_id = _write_ledger(tmp_path, _pass_record())
+    leaked_text = CONFIG_YAML + "  # endpoint vllm-internal.example:8000\n"
+    record = _pass_record()
+    record["candidate"]["config_sha256"] = _sha256(leaked_text)
+    ledger_path, record_id = _write_ledger(tmp_path, record)
     inputs = _write_inputs(tmp_path)
     leaked = tmp_path / "leaked.yaml"
-    leaked.write_text(
-        CONFIG_YAML + "  # endpoint vllm-internal.example:8000\n", encoding="utf-8"
-    )
+    leaked.write_text(leaked_text, encoding="utf-8")
     inputs["config"] = str(leaked)
     out = tmp_path / "bundle"
     rc = main(
