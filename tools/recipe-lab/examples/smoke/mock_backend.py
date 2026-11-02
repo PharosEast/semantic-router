@@ -8,11 +8,20 @@ C6 cold-start fixtures: `--cases` rows may declare `expected` (option
 letter) and `category`, and `--answer-plan` pins served model x category
 pairs to correct/wrong completions ("Answer: <letter>."), so replay-tier
 routing and direct-model evals observe the same per-question correctness.
+
+AG8 scripted-agent fixtures: `--agent-fixtures` loads the shared
+agentic_fixtures.json. When the first user message matches a task script,
+the completion is scripted: the model emits `tool_calls` on the fixture's
+configured assistant steps and a final answer otherwise, with per-model
+completion rates and per-step token budgets, and usage that carries the
+cache-read field (prompt_tokens_details.cached_tokens). Everything is
+deterministic so the same fixture replays the same conversation twice.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -75,6 +84,102 @@ def _plan_answer(model: str, case: dict) -> str | None:
         return None
     letter = str(expected).strip().upper()
     return f"Answer: {letter}." if ok else f"Answer: {_wrong_letter(letter)}."
+
+
+# --- AG8 scripted-agent engine -------------------------------------------------
+# Keyed by the first user message (the task prompt), so the probe's mid-loop
+# requests (which replay the whole conversation) resolve to the same script.
+_AGENT_TASKS: dict[str, dict] = {}
+_AGENT_MODELS: dict[str, dict] = {}
+
+_MODEL_PROFILE_DEFAULTS = {
+    "completion_rate": 1.0,
+    "prompt_tokens_per_message": 8,
+    "completion_tokens_per_step": 2,
+    "cached_tokens_per_step": 1,
+}
+
+
+def _model_profile(model: str) -> dict:
+    profile = _MODEL_PROFILE_DEFAULTS.copy()
+    profile.update(_AGENT_MODELS.get(model, {}))
+    return profile
+
+
+def _model_completes(model: str, task_prompt: str, profile: dict) -> bool:
+    """Deterministic stand-in for sampling a per-model completion rate.
+
+    The task prompt hashes into [0, 1); a model completes the task when the
+    draw lands under its completion_rate. Same inputs always agree, so two
+    runs of the same fixture see the same completions.
+    """
+    rate = float(profile["completion_rate"])
+    if rate >= 1.0:
+        return True
+    if rate <= 0.0:
+        return False
+    draw = hashlib.md5(f"{model}\x00{task_prompt}".encode()).digest()
+    return int.from_bytes(draw[:4], "big") % 10_000 / 10_000 < rate
+
+
+def _scripted_completion(model: str, messages: list) -> tuple[dict, str, dict] | None:
+    """Scripted agent turn for `messages`, or None when no script matches.
+
+    The step index is the number of assistant messages already in the
+    history: steps listed in `tool_call_steps` get a deterministic
+    `tool_calls` response, every other step gets the final content.
+    """
+    task_prompt = next(
+        (str(m.get("content") or "") for m in messages if m.get("role") == "user"),
+        None,
+    )
+    script = _AGENT_TASKS.get(task_prompt or "")
+    if script is None:
+        return None
+    profile = _model_profile(model)
+    steps = [int(s) for s in script.get("tool_call_steps") or []]
+    names = list(script.get("tool_names") or [])
+    assistant_steps = sum(1 for m in messages if m.get("role") == "assistant")
+    if assistant_steps in steps:
+        idx = steps.index(assistant_steps)
+        name = names[idx % len(names)] if names else "read_file"
+        args = (script.get("tool_args") or {}).get(name, {})
+        message = {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": f"call-{assistant_steps}",
+                    "type": "function",
+                    "function": {"name": name, "arguments": json.dumps(args)},
+                }
+            ],
+        }
+        finish_reason = "tool_calls"
+    else:
+        complete = bool(script.get("complete", True)) and _model_completes(
+            model, task_prompt or "", profile
+        )
+        if complete:
+            content = str(script.get("final_content", "mock answer"))
+        else:
+            content = str(
+                script.get("abandon_content", "I could not complete this task.")
+            )
+        message = {"role": "assistant", "content": content}
+        finish_reason = "stop"
+    prompt_tokens = 8 + profile["prompt_tokens_per_message"] * len(messages)
+    cached_tokens = min(
+        prompt_tokens, profile["cached_tokens_per_step"] * assistant_steps
+    )
+    completion_tokens = profile["completion_tokens_per_step"]
+    usage = {
+        "prompt_tokens": prompt_tokens,
+        "completion_tokens": completion_tokens,
+        "total_tokens": prompt_tokens + completion_tokens,
+        "prompt_tokens_details": {"cached_tokens": cached_tokens},
+    }
+    return message, finish_reason, usage
 
 
 def _answer_for(model: str, prompt: str) -> str:
@@ -183,9 +288,37 @@ class Handler(BaseHTTPRequestHandler):
                 max_tokens = payload.get("max_tokens")
             except (json.JSONDecodeError, AttributeError):
                 model, prompt, stream, max_tokens = "unknown", "", False, None
+                payload = None
             delay = _DELAY_STATE["seconds"]
             if delay > 0:
                 time.sleep(delay)
+            # AG8 scripted-agent path: a matching task script decides the turn
+            # (tool call vs final answer) instead of the fixed answer table.
+            if not stream and payload is not None and _AGENT_TASKS:
+                messages = payload.get("messages")
+                if isinstance(messages, list):
+                    scripted = _scripted_completion(model, messages)
+                    if scripted is not None:
+                        message, finish_reason, usage = scripted
+                        self._send(
+                            200,
+                            json.dumps(
+                                {
+                                    "id": "chatcmpl-mock",
+                                    "object": "chat.completion",
+                                    "model": model,
+                                    "choices": [
+                                        {
+                                            "index": 0,
+                                            "message": message,
+                                            "finish_reason": finish_reason,
+                                        }
+                                    ],
+                                    "usage": usage,
+                                }
+                            ).encode("utf-8"),
+                        )
+                        return
             finish_reason = (
                 "length"
                 if isinstance(max_tokens, int) and max_tokens < TRUNCATION_MAX_TOKENS
@@ -260,6 +393,14 @@ def main() -> None:
         help="artificial per-completion latency; keeps sr-bench arms in flight "
         "for fault-injection polls (env: RECIPE_LAB_MOCK_DELAY_MS)",
     )
+    parser.add_argument(
+        "--agent-fixtures",
+        default=None,
+        help="agentic_fixtures.json (AG8): enables the scripted-agent engine - "
+        "tasks keyed by first user message get tool-call steps and final "
+        "completions from the fixture, with per-model completion rates and "
+        "token budgets from its `models` section",
+    )
     args = parser.parse_args()
     _DELAY_STATE["seconds"] = args.delay_ms / 1000.0
     if args.cases:
@@ -298,6 +439,25 @@ def main() -> None:
                     )
         _ANSWER_PLAN.clear()
         _ANSWER_PLAN.update(plan)
+    if args.agent_fixtures:
+        with open(args.agent_fixtures, encoding="utf-8") as fh:
+            fixture = json.load(fh)
+        tasks = fixture.get("tasks") or {}
+        if not isinstance(tasks, dict) or not tasks:
+            parser.error("--agent-fixtures must define a non-empty `tasks` object")
+        for task_id, script in tasks.items():
+            if not isinstance(script, dict) or "task_prompt" not in script:
+                parser.error(f"tasks[{task_id!r}] must be an object with `task_prompt`")
+        _AGENT_TASKS.clear()
+        _AGENT_TASKS.update({str(s["task_prompt"]): s for s in tasks.values()})
+        models = fixture.get("models") or {}
+        if not isinstance(models, dict):
+            parser.error("--agent-fixtures `models` must be an object")
+        for model, profile in models.items():
+            if not isinstance(profile, dict):
+                parser.error(f"models[{model!r}] must be an object")
+        _AGENT_MODELS.clear()
+        _AGENT_MODELS.update(models)
     server = ThreadingHTTPServer((args.host, args.port), Handler)
     print(f"mock backend listening on {args.host}:{args.port}", flush=True)
     server.serve_forever()
