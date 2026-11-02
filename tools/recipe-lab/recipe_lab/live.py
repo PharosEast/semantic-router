@@ -80,6 +80,7 @@ from pathlib import Path
 from typing import Any
 
 from . import abba
+from .agentic import agentic_cost_summary, agentic_gate_results
 from .contract import (
     Constraint,
     ContractError,
@@ -91,6 +92,7 @@ from .contract import (
     Workload,
 )
 from .srbench import SrbenchCli, extract_metric_values
+from .session_attribution import analyze_sessions
 from .verdict import (
     GuardResult,
     PairedStats,
@@ -150,6 +152,42 @@ def _continuity_rows(comparison: Any, rep: int) -> list[dict[str, Any]]:
                 }
             )
     return rows
+
+
+def _arm_continuity(
+    targets: Any, *, routing_arm: bool, selected_id: str | None = None
+) -> dict[str, Any] | None:
+    """AG7: one arm's continuity section from its target summaries.
+
+    Same arm pinning as `_arm_accuracy`: the baseline arm is the target
+    compare named, the candidate arm is the `mom` target (else the last
+    target carrying a continuity section).
+    """
+    if not isinstance(targets, list):
+        return None
+    entries = [t for t in targets if isinstance(t, dict)]
+
+    def _section(entry: dict) -> dict[str, Any] | None:
+        continuity = entry.get("continuity")
+        return continuity if isinstance(continuity, dict) else None
+
+    if isinstance(selected_id, str):
+        for entry in entries:
+            if entry.get("id") == selected_id:
+                section = _section(entry)
+                if section is not None:
+                    return section
+    if routing_arm:
+        for entry in entries:
+            if entry.get("kind") == "mom":
+                section = _section(entry)
+                if section is not None:
+                    return section
+    for entry in reversed(entries):
+        section = _section(entry)
+        if section is not None:
+            return section
+    return None
 
 
 def measurements_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1091,6 +1129,8 @@ def verify_live(
     run_cache: str | Path | None = None,
     baseline_manifest: str | Path | None = None,
     workload: Workload | None = None,
+    replay_rows: Sequence[dict[str, Any]] | None = None,
+    baseline_replay_rows: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Drive sr-bench for one candidate and decide the live verdict (I).
 
@@ -1132,6 +1172,15 @@ def verify_live(
     required. A manifest without a single-model target gets the spec's
     strong reference injected as the S arm before submission, so a plain
     MoM router manifest can seed the AB/BA protocol directly.
+
+    AG7: an agentic workload also carries the stability hard gates. Switch
+    evidence comes from the pairs' continuity sections; the rejected /
+    interrupted evidence needs router replay records - `replay_rows` /
+    `baseline_replay_rows` carry them (session attribution's
+    attribute-session judgment runs over them verbatim), and gates without
+    their evidence stay unevaluated (INCONCLUSIVE, never a pass). The
+    result's `agentic` block records the gate outcomes and the pairs'
+    actual-vs-cache-neutral cost side by side.
     """
     if repetitions < 1:
         raise ContractError("verify needs at least one repetition")
@@ -1287,6 +1336,10 @@ def verify_live(
     ] = []
     # M4: the last completed pair's target sections feed the Pareto table.
     last_sections: tuple[Any, Any] | None = None
+    # AG7: the completed pairs' raw compare payloads (cost summary) and the
+    # last pair's baseline pin (continuity arm selection).
+    pair_comparisons: list[Any] = []
+    last_selected: str | None = None
     constraint_values: dict[str, list[tuple[float | None, float | None]]] = {
         constraint.name: [] for constraint in spec.objective.constraints
     }
@@ -1325,6 +1378,8 @@ def verify_live(
             if isinstance(comparison, dict)
             else None
         )
+        pair_comparisons.append(comparison)
+        last_selected = selected if isinstance(selected, str) else None
         pair_evidence.append(
             (
                 arm_evidence_quality(
@@ -1524,6 +1579,44 @@ def verify_live(
     pareto.extend(ref_rows)
 
     guards, undeclared = resolve_gates(spec.gates, measurements)
+    # AG7: agentic stability ceilings. Switch evidence comes from the last
+    # completed pair's continuity sections; rejected/interrupted evidence
+    # from session attribution over the provided router replay records
+    # (None = not provided, those gates stay unevaluated - missing
+    # evidence is never a pass).
+    agentic_gates: list[Any] = []
+    if agentic:
+        candidate_continuity = (
+            _arm_continuity(last_sections[1], routing_arm=True)
+            if last_sections is not None
+            else None
+        )
+        baseline_continuity = (
+            _arm_continuity(
+                last_sections[0],
+                routing_arm=False,
+                selected_id=last_selected,
+            )
+            if last_sections is not None
+            else None
+        )
+        candidate_events = (
+            analyze_sessions(list(replay_rows or [])).get("event_counts")
+            if replay_rows is not None
+            else None
+        )
+        baseline_events = (
+            analyze_sessions(list(baseline_replay_rows or [])).get("event_counts")
+            if baseline_replay_rows is not None
+            else None
+        )
+        agentic_gates = agentic_gate_results(
+            workload.resolved_agentic_gates(),
+            candidate_continuity=candidate_continuity,
+            baseline_continuity=baseline_continuity,
+            candidate_events=candidate_events,
+            baseline_events=baseline_events,
+        )
     # M2: the pairs' statistics merge conservatively and drive the paired
     # decision (min_cases reads the distinct-case count, not the sum over
     # repeated runs - see _merge_paired_stats).
@@ -1540,6 +1633,7 @@ def verify_live(
         min_cases=spec.objective.min_cases,
         min_improvement_pp=spec.objective.min_improvement_pp,
         references=reference_values,
+        agentic_gates=agentic_gates,
     )
     reasons = list(verdict.reasons)
     reasons.extend(diagnostics)
@@ -1582,11 +1676,23 @@ def verify_live(
     if agentic:
         # AG1: the candidate arm's continuity evidence (switch counts,
         # per-phase switches, switched/unswitched accuracy) rides the
-        # result and the ledger's `agentic` field.
+        # result and the ledger's `agentic` field. AG7 adds the stability
+        # gate outcomes and the side-by-side cost summary (actual vs
+        # cache-neutral spend, from the pairs' compare payloads).
         result["agentic"] = {
             "workload": workload.name,
             "benchmark": workload.benchmark,
             "continuity": continuity_rows,
+            "gates": {
+                g.name: (
+                    "pass"
+                    if g.passed
+                    else ("incomplete" if not g.evaluated else "fail")
+                )
+                for g in agentic_gates
+            },
+            "gates_detail": [g.to_dict() for g in agentic_gates],
+            "cost": agentic_cost_summary(pair_comparisons),
         }
     if not spec.gates:
         result["gates_note"] = "no guard declared"
