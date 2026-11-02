@@ -251,6 +251,23 @@ WORKLOAD_KINDS = {"mcq", "open", "agentic"}
 WORKLOAD_DRIVERS = {"srbench", "model_eval"}
 # AG1: agentic workloads name the sr-bench adapter that grades them.
 AGENTIC_BENCHMARKS = {"terminal-bench-2.1", "tau3"}
+# AG7: agentic stability hard gates. Every agentic workload carries the
+# full set (defaults below); a workload may override values, not the set.
+# An exceeded ceiling vetoes the live verdict with FAIL; `baseline` as a
+# value (only valid for max_tool_loop_interrupted) pins the baseline arm's
+# measured interruption count.
+AGENTIC_GATE_NAMES = (
+    "max_tool_loop_switches",
+    "max_selection_rejected",
+    "max_tool_loop_interrupted",
+    "max_mean_switches_per_task",
+)
+DEFAULT_AGENTIC_GATES: dict[str, float | str] = {
+    "max_tool_loop_switches": 0,
+    "max_selection_rejected": 0,
+    "max_tool_loop_interrupted": "baseline",
+    "max_mean_switches_per_task": 1.0,
+}
 WORKLOAD_ROLES = {"tune", "transfer"}
 # M5: default auto "not worse" guard per workload - the workload's paired
 # quality-delta CI lower bound must not fall below -guard_pp percentage
@@ -570,6 +587,15 @@ class Workload:
     # is too small; `profile` doubles as the sr-bench task profile.
     benchmark: str | None = None
     repetitions: int = 1
+    # AG7: declared overrides for the stability hard gates (defaults apply
+    # to every agentic workload; see DEFAULT_AGENTIC_GATES). None keeps the
+    # defaults and round-trips nothing.
+    agentic_gates: dict[str, float | str] | None = None
+
+    def resolved_agentic_gates(self) -> dict[str, float | str]:
+        """AG7: the workload's stability ceilings - defaults under the
+        declared overrides. Only meaningful for kind: agentic workloads."""
+        return {**DEFAULT_AGENTIC_GATES, **(self.agentic_gates or {})}
 
     @classmethod
     def from_dict(
@@ -631,6 +657,36 @@ class Workload:
             role in WORKLOAD_ROLES,
             f"{prefix}.role must be one of {sorted(WORKLOAD_ROLES)}",
         )
+        agentic_gates = raw.get("agentic_gates")
+        if agentic_gates is not None:
+            _require(
+                kind == "agentic",
+                f"{prefix}.agentic_gates is only valid for kind: agentic workloads",
+            )
+            _require(
+                isinstance(agentic_gates, dict) and bool(agentic_gates),
+                f"{prefix}.agentic_gates must be a non-empty mapping",
+            )
+            unknown = sorted(set(agentic_gates) - set(AGENTIC_GATE_NAMES))
+            _require(
+                not unknown,
+                f"{prefix}.agentic_gates has unknown gates: {', '.join(unknown)}",
+            )
+            for gate_name, gate_value in agentic_gates.items():
+                if gate_value == "baseline":
+                    _require(
+                        gate_name == "max_tool_loop_interrupted",
+                        f'{prefix}.agentic_gates.{gate_name} may pin "baseline" '
+                        "only when it is max_tool_loop_interrupted",
+                    )
+                else:
+                    gate_number = _require_number(
+                        gate_value, f"{prefix}.agentic_gates.{gate_name}"
+                    )
+                    _require(
+                        gate_number >= 0,
+                        f"{prefix}.agentic_gates.{gate_name} must be >= 0",
+                    )
         guard_pp = _require_number(
             raw.get("guard_pp", DEFAULT_GUARD_PP), f"{prefix}.guard_pp"
         )
@@ -680,6 +736,7 @@ class Workload:
                 guard_pp=guard_pp,
                 benchmark=benchmark,
                 repetitions=repetitions,
+                agentic_gates=agentic_gates,
             )
         # legacy single-dataset form: treated as a dev-only workload
         _require(
@@ -752,6 +809,7 @@ class Workload:
             guard_pp=guard_pp,
             benchmark=benchmark,
             repetitions=repetitions,
+            agentic_gates=agentic_gates,
         )
 
     def split_hash(self, name: str) -> str:
@@ -832,6 +890,8 @@ class Workload:
             extra["benchmark"] = self.benchmark
         if self.repetitions != 1:
             extra["repetitions"] = self.repetitions
+        if self.agentic_gates is not None:
+            extra["agentic_gates"] = dict(self.agentic_gates)
         if self.legacy:
             split = self.splits["dev"]
             out = {

@@ -418,6 +418,7 @@ def evaluate_verdict(
     min_cases: int = 1,
     min_improvement_pp: float | None = None,
     references: dict[str, float | None] | None = None,
+    agentic_gates: list[Any] | None = None,
 ) -> VerdictResult:
     """Decide PASS / FAIL / INCONCLUSIVE from live-tier evidence.
 
@@ -428,6 +429,13 @@ def evaluate_verdict(
 
     Guards are safety vetoes and outrank constraints (E): when both a guard
     and a constraint are violated the guard reasons are listed first.
+
+    AG7: `agentic_gates` carries the agentic stability ceilings as
+    duck-typed `AgenticGateResult` values (`name` / `evaluated` / `passed`,
+    ceiling semantics: a measured value above the bound is a violation).
+    They rank with the guards: an exceeded ceiling fails the verdict, an
+    unevaluated one keeps it INCONCLUSIVE (missing evidence is never a
+    pass).
 
     M2: when paired statistics are available they replace the point-estimate
     comparison entirely - PASS needs the CI lower bound at or above the
@@ -447,6 +455,13 @@ def evaluate_verdict(
     unevaluated = [g.name for g in guards if not g.evaluated]
     if unevaluated:
         reasons.append("guard evaluation incomplete: " + ", ".join(unevaluated))
+    agentic_gate_list = list(agentic_gates or [])
+    unevaluated_agentic = [g.name for g in agentic_gate_list if not g.evaluated]
+    if unevaluated_agentic:
+        reasons.append(
+            "agentic stability gate evaluation incomplete: "
+            + ", ".join(unevaluated_agentic)
+        )
     resolved_constraints = [
         resolve_constraint(c, references) for c in (constraints or [])
     ]
@@ -480,18 +495,28 @@ def evaluate_verdict(
 
     improvement = _improvement_pct(baseline_metric, candidate_metric, direction)
     failed_guards = [g for g in guards if not g.passed]
+    failed_agentic = [g for g in agentic_gate_list if not g.passed]
     violated_constraints = [
         c for c in resolved_constraints if c["status"] == "violated"
     ]
-    if failed_guards:
-        details = "; ".join(
+    if failed_guards or failed_agentic:
+        guard_details = "; ".join(
             f"{g.name}: {g.value:.4f} < floor {g.floor:.4f}" for g in failed_guards
         )
-        # safety veto first; any simultaneously violated constraint is still listed
+        agentic_details = "; ".join(
+            f"{g.name}: {g.value:g} > bound {g.bound:g}" for g in failed_agentic
+        )
+        veto_reasons = []
+        if guard_details:
+            veto_reasons.append(f"guard floor violated ({guard_details})")
+        if agentic_details:
+            veto_reasons.append(
+                f"agentic stability gate exceeded ({agentic_details})"
+            )
+        # safety vetoes first; any simultaneously violated constraint is still listed
         return VerdictResult(
             VERDICT_FAIL,
-            [f"guard floor violated ({details})"]
-            + [c["reason"] for c in violated_constraints],
+            veto_reasons + [c["reason"] for c in violated_constraints],
             improvement_pct=round(improvement, 6),
             constraints=resolved_constraints,
         )

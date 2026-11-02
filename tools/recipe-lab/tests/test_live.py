@@ -2675,6 +2675,7 @@ def test_verify_live_agentic_pass_flow_records_continuity(tmp_path):
         "model_switches": 0,
         "switched_tasks": 0,
         "unswitched_tasks": 2,
+        "mean_switches_per_task": 0.0,
         "model_switches_by_phase": {},
     }
     stub = VerifyStub(
@@ -2712,16 +2713,207 @@ def test_verify_live_agentic_pass_flow_records_continuity(tmp_path):
         ],
         work_dir=tmp_path,
         workload=_agentic_workload(),
+        # AG7: empty replay record sets mean the replay-sourced stability
+        # gates evaluate over zero recorded sessions (both pass at 0)
+        replay_rows=[],
+        baseline_replay_rows=[],
     )
     assert result["verdict"] == "PASS"
     # AG1: the candidate arm's continuity sections ride the result verbatim
-    assert result["agentic"] == {
-        "workload": "agentic",
-        "benchmark": "terminal-bench-2.1",
-        "continuity": [
-            {"repetition": 0, "target_id": "mom-router", "continuity": continuity}
-        ],
+    # AG7: the stability gates and the cost side ride beside them
+    assert result["agentic"]["workload"] == "agentic"
+    assert result["agentic"]["benchmark"] == "terminal-bench-2.1"
+    assert result["agentic"]["continuity"] == [
+        {"repetition": 0, "target_id": "mom-router", "continuity": continuity}
+    ]
+    assert result["agentic"]["gates"] == {
+        "max_mean_switches_per_task": "pass",
+        "max_selection_rejected": "pass",
+        "max_tool_loop_interrupted": "pass",
+        "max_tool_loop_switches": "pass",
     }
+    assert result["agentic"]["cost"]["complete"] is False
+
+
+def test_verify_live_agentic_tool_loop_switch_fails_the_verdict(tmp_path):
+    continuity = {
+        "session_mode": "session_aware",
+        "multi_request_tasks": 2,
+        "model_switches": 2,
+        "switched_tasks": 1,
+        "unswitched_tasks": 1,
+        "mean_switches_per_task": 1.0,
+        "model_switches_by_phase": {"tool_loop": 2},
+    }
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+        compare_values={
+            **_compare_values(0.80, 0.90),
+            "candidate_targets": [{"id": "mom-router", "continuity": continuity}],
+        },
+    )
+    stub.setup_response = _SETUP_READY
+    stub.baseline_doc["manifest"]["targets"] = [
+        {
+            "id": "mom-router",
+            "kind": "mom",
+            "config_hash": _MOM_CONFIG_HEX,
+            "session_mode": "session_aware",
+        }
+    ]
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+        replay_rows=[],
+        baseline_replay_rows=[],
+    )
+    # the stability veto outranks the paired improvement (0.80 -> 0.90)
+    assert result["verdict"] == "FAIL"
+    assert result["agentic"]["gates"]["max_tool_loop_switches"] == "fail"
+    assert any(
+        "agentic stability gate exceeded" in reason for reason in result["reasons"]
+    )
+
+
+def test_verify_live_agentic_gates_without_replay_records_stay_incomplete(
+    tmp_path,
+):
+    continuity = {
+        "session_mode": "session_aware",
+        "multi_request_tasks": 2,
+        "model_switches": 0,
+        "mean_switches_per_task": 0.0,
+        "model_switches_by_phase": {},
+    }
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+        compare_values={
+            **_compare_values(0.80, 0.86),
+            "candidate_targets": [{"id": "mom-router", "continuity": continuity}],
+        },
+    )
+    stub.setup_response = _SETUP_READY
+    stub.baseline_doc["manifest"]["targets"] = [
+        {
+            "id": "mom-router",
+            "kind": "mom",
+            "config_hash": _MOM_CONFIG_HEX,
+            "session_mode": "session_aware",
+        }
+    ]
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+    )
+    # AG7: replay-sourced gates without replay records are unevaluated -
+    # missing evidence is INCONCLUSIVE, never a pass
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert result["agentic"]["gates"]["max_selection_rejected"] == "incomplete"
+    assert result["agentic"]["gates"]["max_tool_loop_interrupted"] == "incomplete"
+    assert any(
+        "agentic stability gate evaluation incomplete" in reason
+        for reason in result["reasons"]
+    )
+
+
+def test_verify_live_agentic_cost_side_by_side(tmp_path):
+    comparison_entry = {
+        "baseline_total_cost_usd": 5.0,
+        "candidate_total_cost_usd": 4.0,
+        "cache_neutral_baseline_cost_usd": 5.0,
+        "cache_neutral_candidate_cost_usd": 5.5,
+        "total_cost_comparison_reason": "both arms measured",
+        "cache_neutral_cost_basis": "counterfactual",
+    }
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+        compare_values={
+            **_compare_values(0.80, 0.86),
+            "candidate_targets": [
+                {
+                    "id": "mom-router",
+                    "continuity": {
+                        "session_mode": "session_aware",
+                        "multi_request_tasks": 1,
+                        "model_switches": 0,
+                        "mean_switches_per_task": 0.0,
+                        "model_switches_by_phase": {},
+                    },
+                }
+            ],
+            "comparisons": [comparison_entry],
+        },
+    )
+    stub.setup_response = _SETUP_READY
+    stub.baseline_doc["manifest"]["targets"] = [
+        {
+            "id": "mom-router",
+            "kind": "mom",
+            "config_hash": _MOM_CONFIG_HEX,
+            "session_mode": "session_aware",
+        }
+    ]
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+        replay_rows=[],
+        baseline_replay_rows=[],
+    )
+    cost = result["agentic"]["cost"]
+    assert cost["complete"] is True
+    assert cost["actual_cost_usd"] == {"baseline": 5.0, "candidate": 4.0}
+    assert cost["cache_neutral_cost_usd"] == {
+        "baseline": 5.0,
+        "candidate": 5.5,
+    }
+    # actual spend improved 20%, the cache-neutral counterfactual regressed
+    assert cost["saving_percent"]["total"] == pytest.approx(20.0)
+    assert cost["saving_percent"]["cache_neutral"] == pytest.approx(-10.0)
+    assert cost["notes"]["total_cost_reason"] == "both arms measured"
 
 
 def test_verify_live_agentic_baseline_manifest_injects_session_mode(tmp_path):
@@ -2766,4 +2958,9 @@ def test_verify_live_agentic_baseline_manifest_injects_session_mode(tmp_path):
     assert all(
         entry.get("session_mode") == "session_aware" for entry in submitted["targets"]
     )
-    assert result["verdict"] == "PASS"
+    # AG7: the flat compare carries no continuity and no replay records were
+    # provided, so the stability gates are unevaluated - the verdict cannot
+    # be a PASS, but the manifest-injection behavior this test exercises
+    # still ran end to end
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert set(result["agentic"]["gates"].values()) == {"incomplete"}
