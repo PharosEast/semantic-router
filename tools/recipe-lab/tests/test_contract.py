@@ -1153,6 +1153,45 @@ def test_workloads_validate_enums_weight_and_tune_presence():
     raw["workloads"][0]["guard_pp"] = -0.5
     with pytest.raises(ContractError, match="guard_pp must be >= 0"):
         ExperimentSpec.from_dict(raw)
+
+
+def test_agentic_workload_declares_benchmark_and_repetitions():
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["kind"] = "agentic"
+    raw["workloads"][0]["benchmark"] = "terminal-bench-2.1"
+    raw["workloads"][0]["repetitions"] = 3
+    spec = ExperimentSpec.from_dict(raw)
+    workload = spec.workloads[0]
+    assert workload.kind == "agentic"
+    assert workload.benchmark == "terminal-bench-2.1"
+    assert workload.repetitions == 3
+    # round-trip: agentic fields serialize only when they differ
+    spec2 = ExperimentSpec.from_dict(spec.to_dict())
+    assert spec2.to_dict() == spec.to_dict()
+
+
+def test_agentic_workload_requires_known_benchmark():
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["kind"] = "agentic"
+    with pytest.raises(ContractError, match="benchmark must be one of"):
+        ExperimentSpec.from_dict(raw)
+    raw["workloads"][0]["benchmark"] = "swe-bench"
+    with pytest.raises(ContractError, match="benchmark must be one of"):
+        ExperimentSpec.from_dict(raw)
+    raw["workloads"][0]["repetitions"] = 0
+    raw["workloads"][0]["benchmark"] = "tau3"
+    with pytest.raises(ContractError, match="repetitions must be an integer >= 1"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_benchmark_field_is_agentic_only():
+    raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
+    raw["workloads"][0]["benchmark"] = "tau3"
+    with pytest.raises(ContractError, match="only valid for kind: agentic"):
+        ExperimentSpec.from_dict(raw)
+
+
+def test_workloads_reject_transfer_only_and_splitless_entries():
     # a single transfer workload has nothing to tune on
     raw = copy.deepcopy(VALID_WORKLOADS_SPEC)
     raw["workloads"] = raw["workloads"][2:]

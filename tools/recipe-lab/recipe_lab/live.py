@@ -88,6 +88,7 @@ from .contract import (
     ExperimentSpec,
     Gate,
     References,
+    Workload,
 )
 from .srbench import SrbenchCli, extract_metric_values
 from .verdict import (
@@ -98,6 +99,57 @@ from .verdict import (
 )
 
 _MEASUREMENT_KEYS = ("name", "candidate", "baseline")
+# AG1: conversation-scoped Router protection engages for session-aware
+# targets; an agentic workload runs every arm in this mode.
+SESSION_AWARE_MODE = "session_aware"
+
+
+def _agentic_harness_ready(cli: SrbenchCli, workload: Workload) -> None:
+    """AG1: an agentic workload needs its benchmark harness installed.
+
+    `vllm-sr benchmark setup --benchmark <name>` (without --install)
+    inspects prerequisites without touching the environment; a missing
+    harness is a contract error naming the install command, never a
+    silent mid-run failure.
+    """
+    response = cli.run_command(["setup", "--benchmark", workload.benchmark])
+    benchmarks = response.get("benchmarks") if isinstance(response, dict) else None
+    entry = next(
+        (
+            item
+            for item in benchmarks or []
+            if isinstance(item, dict) and item.get("benchmark") == workload.benchmark
+        ),
+        None,
+    )
+    if entry is None or entry.get("installed") is not True:
+        raise ContractError(
+            f"benchmark harness {workload.benchmark!r} is not installed; run "
+            f"`vllm-sr benchmark setup --benchmark {workload.benchmark} --install` first"
+        )
+
+
+def _continuity_rows(comparison: Any, rep: int) -> list[dict[str, Any]]:
+    """AG1: the candidate arm's per-target continuity from a compare payload.
+
+    The compare payload's `candidate_targets` entries mirror the run
+    report's per-target summary sections, `continuity` included - read
+    verbatim, never recomputed.
+    """
+    sections = (
+        comparison.get("candidate_targets") if isinstance(comparison, dict) else None
+    )
+    rows: list[dict[str, Any]] = []
+    for entry in sections or []:
+        if isinstance(entry, dict) and isinstance(entry.get("continuity"), dict):
+            rows.append(
+                {
+                    "repetition": rep,
+                    "target_id": entry.get("id"),
+                    "continuity": entry["continuity"],
+                }
+            )
+    return rows
 
 
 def measurements_from_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -942,6 +994,7 @@ def _submit_baseline_manifest(
     manifest_source: str | Path,
     work_dir: Path,
     workload_split: str,
+    agentic: bool = False,
 ) -> str:
     """R2: turn a caller manifest into the completed AB/BA baseline run.
 
@@ -984,6 +1037,17 @@ def _submit_baseline_manifest(
                 "cannot construct the single-model baseline arm"
             )
         raw["targets"] = [match, *targets]
+    if agentic:
+        # AG1: every subject arm (MoM router target and single-model arm
+        # alike) runs session-aware so the agentic comparison is fair.
+        raw["targets"] = [
+            (
+                {**entry, "session_mode": SESSION_AWARE_MODE}
+                if isinstance(entry, dict)
+                else entry
+            )
+            for entry in raw["targets"]
+        ]
     dataset = raw.get("dataset")
     if isinstance(dataset, dict) and dataset.get("sha256"):
         # X3: bound via the split's srbench_dataset hash when declared,
@@ -1026,6 +1090,7 @@ def verify_live(
     workload_split: str = "dev",
     run_cache: str | Path | None = None,
     baseline_manifest: str | Path | None = None,
+    workload: Workload | None = None,
 ) -> dict[str, Any]:
     """Drive sr-bench for one candidate and decide the live verdict (I).
 
@@ -1074,6 +1139,14 @@ def verify_live(
         raise ContractError(
             "verify needs exactly one of baseline_run_id or baseline_manifest"
         )
+    # AG1: an agentic workload runs every arm session-aware. The harness
+    # check comes first (nothing is spent on an uninstalled benchmark);
+    # then the MoM candidate targets must already be registered with
+    # session_mode: session_aware - candidate plans inherit their targets
+    # from the sr-bench registry, so a late manifest patch cannot fix them.
+    agentic = workload is not None and workload.kind == "agentic"
+    if agentic:
+        _agentic_harness_ready(cli, workload)
     # Y4: the candidate arms' MoM targets must be registered with a frozen
     # config hash, and all of them must agree - the ledger's candidate then
     # names the exact config the verdict graded. Fail fast, before any run.
@@ -1102,11 +1175,25 @@ def verify_live(
             "the candidate arm must be one config"
         )
     config_sha256 = config_hashes[0]
+    if agentic:
+        # AG1: candidate plans inherit their targets from the sr-bench
+        # registry, so a late manifest patch cannot make them session-aware -
+        # the registered MoM targets must already carry session_mode.
+        for target_id in targets:
+            if (registry.get(target_id) or {}).get(
+                "session_mode"
+            ) != SESSION_AWARE_MODE:
+                raise ContractError(
+                    f"agentic verify needs session-aware arms: candidate target "
+                    f"{target_id!r} is registered without session_mode: "
+                    f"{SESSION_AWARE_MODE}; re-register it so conversation-scoped "
+                    "protection engages during evaluation"
+                )
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
     if baseline_manifest is not None:
         baseline_run_id = _submit_baseline_manifest(
-            spec, cli, baseline_manifest, work_dir, workload_split
+            spec, cli, baseline_manifest, work_dir, workload_split, agentic=agentic
         )
 
     baseline_doc = cli.show(baseline_run_id)
@@ -1123,6 +1210,16 @@ def verify_live(
     if not isinstance(manifest, dict):
         raise ContractError(
             f"baseline run {baseline_run_id} does not expose its frozen manifest"
+        )
+    if agentic and not all(
+        entry.get("session_mode") == SESSION_AWARE_MODE
+        for entry in manifest.get("targets", [])
+        if isinstance(entry, dict)
+    ):
+        raise ContractError(
+            f"agentic verify needs session-aware arms: baseline run "
+            f"{baseline_run_id} carries targets without session_mode: "
+            f"{SESSION_AWARE_MODE}; submit a session-aware baseline manifest"
         )
     manifest_path = work_dir / "baseline-manifest.json"
     manifest_path.write_text(
@@ -1182,6 +1279,9 @@ def verify_live(
     metric_key = spec.objective.metric_key
     rows: list[dict[str, Any]] = []
     pair_stats: list[PairedStats] = []
+    # AG1: the candidate arm's per-target continuity, one row per
+    # completed pair and target.
+    continuity_rows: list[dict[str, Any]] = []
     pair_evidence: list[
         tuple[tuple[float | None, float | None], tuple[float | None, float | None]]
     ] = []
@@ -1236,6 +1336,7 @@ def verify_live(
             )
         )
         last_sections = (base_sec, cand_sec)
+        continuity_rows.extend(_continuity_rows(comparison, rep))
         baseline_value, candidate_value = _pair_metrics(
             comparison, metric_key, incomplete
         )
@@ -1478,6 +1579,15 @@ def verify_live(
         "references": references_evidence,
         "pareto": pareto,
     }
+    if agentic:
+        # AG1: the candidate arm's continuity evidence (switch counts,
+        # per-phase switches, switched/unswitched accuracy) rides the
+        # result and the ledger's `agentic` field.
+        result["agentic"] = {
+            "workload": workload.name,
+            "benchmark": workload.benchmark,
+            "continuity": continuity_rows,
+        }
     if not spec.gates:
         result["gates_note"] = "no guard declared"
     return result

@@ -106,6 +106,30 @@ def test_final_flag_roundtrip_and_live_only(tmp_path):
         ledger.append(live_record(final="yes"))
 
 
+def test_agentic_continuity_roundtrip_and_mapping_validation(tmp_path):
+    # AG1: agentic workloads record the candidate arm's continuity sections
+    # in the `agentic` field; absent by default, mapping-validated
+    path = tmp_path / "ledger.jsonl"
+    ledger = Ledger(path)
+    agentic = {
+        "workload": "agentic",
+        "benchmark": "terminal-bench-2.1",
+        "continuity": [
+            {
+                "repetition": 0,
+                "target_id": "mom-router",
+                "continuity": {"session_mode": "session_aware", "model_switches": 0},
+            }
+        ],
+    }
+    stored = ledger.append(live_record(agentic=agentic))
+    assert stored["agentic"] == agentic
+    assert Ledger(path).read()[0]["agentic"] == agentic
+    assert "agentic" not in ledger.append(live_record())
+    with pytest.raises(ContractError, match="agentic must be a mapping"):
+        ledger.append(live_record(agentic=[1, 2]))
+
+
 def test_filter_and_top_replay(tmp_path):
     path = tmp_path / "ledger.jsonl"
     ledger = Ledger(path)

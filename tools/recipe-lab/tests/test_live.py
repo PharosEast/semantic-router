@@ -449,6 +449,15 @@ class VerifyStub:
         self.manifest_runs = 0
         self.compares: list[tuple] = []
         self._cand = 0
+        # AG1: scripted `benchmark setup` response (None = not expected).
+        self.setup_response: dict | None = None
+        self.submitted_manifests: list[dict] = []
+
+    def run_command(self, args):
+        self.events.append(tuple(args))
+        if self.setup_response is None:
+            raise AssertionError(f"unexpected run_command {args!r}")
+        return self.setup_response
 
     def show(self, run_id):
         self.events.append(("show", run_id))
@@ -483,6 +492,7 @@ class VerifyStub:
         # M4: a reference arm submits the frozen baseline manifest with a
         # single registry target; recognize it by its lone target alias
         raw = json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        self.submitted_manifests.append(raw)
         submitted = raw.get("targets") if isinstance(raw, dict) else None
         if (
             isinstance(submitted, list)
@@ -2562,3 +2572,198 @@ def test_verify_manifest_check_binds_srbench_rendering(tmp_path):
             measurements=[],
             work_dir=tmp_path,
         )
+
+
+# ---- AG1: verify x sr-bench agentic workloads ----
+
+
+def _agentic_workload():
+    from recipe_lab.contract import Workload
+
+    return Workload(
+        profile="quick",
+        split_rule=None,
+        splits={},
+        legacy=False,
+        name="agentic",
+        kind="agentic",
+        benchmark="terminal-bench-2.1",
+        repetitions=1,
+    )
+
+
+_SETUP_READY = {
+    "version": "sr-bench-1.0",
+    "benchmarks": [{"benchmark": "terminal-bench-2.1", "installed": True}],
+}
+
+
+def test_agentic_harness_check_names_install_command():
+    from recipe_lab.live import _agentic_harness_ready
+
+    workload = _agentic_workload()
+    missing = VerifyStub()
+    missing.setup_response = {
+        "benchmarks": [{"benchmark": "terminal-bench-2.1", "installed": False}]
+    }
+    with pytest.raises(ContractError, match="--install"):
+        _agentic_harness_ready(missing, workload)
+    unknown = VerifyStub()
+    unknown.setup_response = {"benchmarks": []}
+    with pytest.raises(ContractError, match="not installed"):
+        _agentic_harness_ready(unknown, workload)
+    ready = VerifyStub()
+    ready.setup_response = _SETUP_READY
+    _agentic_harness_ready(ready, workload)
+    assert ready.events == [("setup", "--benchmark", "terminal-bench-2.1")]
+
+
+def test_verify_live_agentic_requires_session_aware_target(tmp_path):
+    stub = VerifyStub()
+    stub.setup_response = _SETUP_READY
+    with pytest.raises(ContractError, match="session-aware arms"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+            workload=_agentic_workload(),
+        )
+    # the harness check ran before anything was spent on runs
+    assert ("setup", "--benchmark", "terminal-bench-2.1") in stub.events
+    assert not any(event[0] == "show" for event in stub.events)
+
+
+def test_verify_live_agentic_baseline_run_requires_session_mode(tmp_path):
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ]
+    )
+    stub.setup_response = _SETUP_READY
+    # the registered target is session-aware but the completed baseline run's
+    # frozen manifest is not - the AB/BA pairs would inherit it verbatim
+    stub.baseline_doc["manifest"]["targets"] = [
+        {"id": "mom-router", "kind": "mom", "config_hash": _MOM_CONFIG_HEX}
+    ]
+    with pytest.raises(ContractError, match="session-aware baseline manifest"):
+        verify_live(
+            spec=_verify_spec(),
+            cli=stub,
+            baseline_run_id="run-base",
+            targets=["mom-router"],
+            repetitions=1,
+            measurements=[],
+            work_dir=tmp_path,
+            workload=_agentic_workload(),
+        )
+
+
+def test_verify_live_agentic_pass_flow_records_continuity(tmp_path):
+    continuity = {
+        "session_mode": "session_aware",
+        "multi_request_tasks": 2,
+        "model_switches": 0,
+        "switched_tasks": 0,
+        "unswitched_tasks": 2,
+        "model_switches_by_phase": {},
+    }
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+        compare_values={
+            **_compare_values(0.80, 0.86),
+            "candidate_targets": [{"id": "mom-router", "continuity": continuity}],
+        },
+    )
+    stub.setup_response = _SETUP_READY
+    stub.baseline_doc["manifest"]["targets"] = [
+        {
+            "id": "mom-router",
+            "kind": "mom",
+            "config_hash": _MOM_CONFIG_HEX,
+            "session_mode": "session_aware",
+        }
+    ]
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+    )
+    assert result["verdict"] == "PASS"
+    # AG1: the candidate arm's continuity sections ride the result verbatim
+    assert result["agentic"] == {
+        "workload": "agentic",
+        "benchmark": "terminal-bench-2.1",
+        "continuity": [
+            {"repetition": 0, "target_id": "mom-router", "continuity": continuity}
+        ],
+    }
+
+
+def test_verify_live_agentic_baseline_manifest_injects_session_mode(tmp_path):
+    single = {
+        "id": "local-strong",
+        "kind": "single",
+        "model": "local/strong",
+        "base_url": "http://127.0.0.1:9000",
+    }
+    manifest = _mom_manifest(tmp_path, [single, dict(_MOM_TARGET)])
+    stub = VerifyStub(
+        candidate_statuses=["completed"],
+        baseline_statuses=["completed", "completed"],
+        compare_values=_compare_values(0.80, 0.86),
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+    )
+    stub.setup_response = _SETUP_READY
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id=None,
+        baseline_manifest=str(manifest),
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+    )
+    # AG1: every subject arm in the submitted baseline manifest runs
+    # session-aware, the caller's single-model arm included
+    submitted = stub.submitted_manifests[0]
+    assert all(
+        entry.get("session_mode") == "session_aware" for entry in submitted["targets"]
+    )
+    assert result["verdict"] == "PASS"

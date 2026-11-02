@@ -1955,6 +1955,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 work_dir=work_dir,
                 workload_split=args.split,
                 run_cache=run_cache,
+                workload=workload,
             )
         except (ContractError, RuntimeError) as exc:
             raise SystemExit(f"verify error: {exc}") from exc
@@ -2001,6 +2002,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
             bench_refs=result["bench_refs"],
             # M2: the pairs' merged paired statistics, verbatim.
             paired=result.get("paired"),
+            # AG1: agentic continuity evidence for agentic workloads.
+            agentic=result.get("agentic"),
             attribution_delta=None,
             attribution_ref=args.attribution_ref,
             coverage_warning=False,
