@@ -249,6 +249,8 @@ COST_BASIS_SOURCES = {"provider_pricing", "cost_model"}
 # evaluation harness (C7), `role` the quarantine (tune vs frozen_test rule).
 WORKLOAD_KINDS = {"mcq", "open", "agentic"}
 WORKLOAD_DRIVERS = {"srbench", "model_eval"}
+# AG1: agentic workloads name the sr-bench adapter that grades them.
+AGENTIC_BENCHMARKS = {"terminal-bench-2.1", "tau3"}
 WORKLOAD_ROLES = {"tune", "transfer"}
 # M5: default auto "not worse" guard per workload - the workload's paired
 # quality-delta CI lower bound must not fall below -guard_pp percentage
@@ -563,6 +565,11 @@ class Workload:
     driver: str = "srbench"
     role: str = "tune"
     guard_pp: float = DEFAULT_GUARD_PP
+    # AG1: agentic workloads declare the sr-bench benchmark adapter and the
+    # per-run task repetitions used to enlarge the sample when a task tier
+    # is too small; `profile` doubles as the sr-bench task profile.
+    benchmark: str | None = None
+    repetitions: int = 1
 
     @classmethod
     def from_dict(
@@ -600,6 +607,25 @@ class Workload:
             driver in WORKLOAD_DRIVERS,
             f"{prefix}.driver must be one of {sorted(WORKLOAD_DRIVERS)}",
         )
+        benchmark = raw.get("benchmark")
+        repetitions = raw.get("repetitions", 1)
+        _require(
+            isinstance(repetitions, int)
+            and not isinstance(repetitions, bool)
+            and repetitions >= 1,
+            f"{prefix}.repetitions must be an integer >= 1",
+        )
+        if kind == "agentic":
+            _require(
+                benchmark in AGENTIC_BENCHMARKS,
+                f"{prefix}.benchmark must be one of {sorted(AGENTIC_BENCHMARKS)} "
+                "for kind: agentic workloads",
+            )
+        else:
+            _require(
+                benchmark is None,
+                f"{prefix}.benchmark is only valid for kind: agentic workloads",
+            )
         role = raw.get("role", "tune")
         _require(
             role in WORKLOAD_ROLES,
@@ -652,6 +678,8 @@ class Workload:
                 driver=driver,
                 role=role,
                 guard_pp=guard_pp,
+                benchmark=benchmark,
+                repetitions=repetitions,
             )
         # legacy single-dataset form: treated as a dev-only workload
         _require(
@@ -722,6 +750,8 @@ class Workload:
             driver=driver,
             role=role,
             guard_pp=guard_pp,
+            benchmark=benchmark,
+            repetitions=repetitions,
         )
 
     def split_hash(self, name: str) -> str:
@@ -798,6 +828,10 @@ class Workload:
             extra["role"] = self.role
         if self.guard_pp != DEFAULT_GUARD_PP:
             extra["guard_pp"] = self.guard_pp
+        if self.benchmark is not None:
+            extra["benchmark"] = self.benchmark
+        if self.repetitions != 1:
+            extra["repetitions"] = self.repetitions
         if self.legacy:
             split = self.splits["dev"]
             out = {

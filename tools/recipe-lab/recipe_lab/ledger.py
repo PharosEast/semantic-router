@@ -82,6 +82,10 @@ class LedgerRecord:
     # / quality_delta_bootstrap_ci95 / wins / losses / ties), recorded
     # verbatim for report replay; None when the payload carried none.
     paired: dict | None = None
+    # AG1: agentic continuity evidence - the candidate arm's per-target
+    # `continuity` sections (switch counts, per-phase switches, switched /
+    # unswitched task accuracy) read from the run reports; None otherwise.
+    agentic: dict | None = None
     # Y4: the promotion flag - a record produced by a --final verdict. The
     # bundle reads this instead of reverse-engineering finality from the
     # contract's split roles; only live-tier records may carry it.
@@ -125,6 +129,8 @@ class LedgerRecord:
             out["constraint_warning"] = True
         if self.paired is not None:
             out["paired"] = dict(self.paired)
+        if self.agentic is not None:
+            out["agentic"] = dict(self.agentic)
         if self.final:
             out["final"] = True
         return out
@@ -161,6 +167,7 @@ class LedgerRecord:
             ),
             constraint_warning=bool(raw.get("constraint_warning", False)),
             paired=dict(raw["paired"]) if raw.get("paired") is not None else None,
+            agentic=dict(raw["agentic"]) if raw.get("agentic") is not None else None,
             final=bool(raw.get("final", False)),
         )
 
@@ -231,6 +238,8 @@ def validate_record(raw: dict) -> None:
         raise ContractError("constraint_warning must be a boolean")
     if raw.get("paired") is not None and not isinstance(raw["paired"], dict):
         raise ContractError("paired must be a mapping")
+    if raw.get("agentic") is not None and not isinstance(raw["agentic"], dict):
+        raise ContractError("agentic must be a mapping")
     # Y4: final is a live-tier promotion flag; nothing else may claim it.
     if "final" in raw and not isinstance(raw["final"], bool):
         raise ContractError("final must be a boolean")
