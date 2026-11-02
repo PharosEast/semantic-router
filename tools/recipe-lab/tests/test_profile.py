@@ -13,11 +13,13 @@ from pathlib import Path
 
 import pytest
 import yaml
+from recipe_lab.bundle import _BASE_PRIVATE_PATTERNS
 from recipe_lab.cli import main
 from recipe_lab.contract import API_VERSION, ContractError
 from recipe_lab.model_eval_tasks import load_source_rows
 from recipe_lab.profile import (
     PROFILE_SCHEMA,
+    _portable_path,
     model_from_results_dirname,
     results_dirname,
     rewrite_task_categories,
@@ -406,14 +408,22 @@ def test_run_profile_stub_end_to_end(tmp_path):
     plain = profile["model_split_stats"]["calib"]["plainmodel"]["total"]
     assert plain["cost_per_question"] is None
     assert "cost_basis" not in plain
-    # Provenance: script hashes + full command lines.
+    # Provenance: script hashes + full command lines. Recorded paths are
+    # portable (a $HOME prefix renders as '~'), so the bundle's C9 private
+    # content scan passes on real deployments.
     scripts = profile["inputs"]["scripts"]
     assert scripts["multi_benchmark_eval.py"]["sha256"].startswith("sha256:")
     assert scripts["multi_benchmark_eval.py"]["git_blob"]
     gen_cmd = profile["inputs"]["commands"]["calib"]["Qwen/Qwen3.5-4B/generate"]
-    assert gen_cmd[0] == sys.executable
+    assert gen_cmd[0] == _portable_path(sys.executable)
     assert "--endpoint" in gen_cmd and "http://127.0.0.1:8001/v1" in gen_cmd
     assert "--model" in gen_cmd and "Qwen/Qwen3.5-4B" in gen_cmd
+
+    # C9: the packaged profile artifact carries no absolute personal user
+    # path (real deployments live under /home/<user> or C:\\Users\\<user>).
+    profile_text = profile_path.read_text(encoding="utf-8")
+    for pattern_name, pattern in _BASE_PRIVATE_PATTERNS:
+        assert not pattern.search(profile_text), f"leaked {pattern_name}"
 
     # Byte stability: rerunning the same inputs into the same directory
     # rewrites profile.json with identical bytes.

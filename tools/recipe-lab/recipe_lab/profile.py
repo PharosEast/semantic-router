@@ -58,6 +58,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import subprocess
 import tempfile
 from collections import Counter
@@ -184,11 +185,37 @@ def rewrite_task_categories(
     return out, merge_record, uncovered
 
 
+def _portable_path(text: str) -> str:
+    """Render a recorded path with the $HOME prefix as '~'.
+
+    The C9 bundle scan rejects absolute personal user paths, so provenance
+    records the portable form; content identity stays in the sha256 and
+    git-blob hashes.
+    """
+    home = str(Path.home())
+    if home and (
+        text == home or text.startswith(home + os.sep) or text.startswith(home + "/")
+    ):
+        return "~" + text[len(home) :]
+    return text
+
+
+def _portable_commands(commands: dict[str, Any]) -> dict[str, Any]:
+    """Apply _portable_path to every recorded argv element."""
+    return {
+        split: {
+            key: [_portable_path(str(arg)) for arg in argv]
+            for key, argv in entries.items()
+        }
+        for split, entries in commands.items()
+    }
+
+
 def script_provenance(path: Path) -> dict[str, Any]:
     """Path + content sha256 + git blob hash for one invoked script."""
     data = path.read_bytes()
     entry: dict[str, Any] = {
-        "path": str(path),
+        "path": _portable_path(str(path)),
         "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
     }
     # git hash-object is repo-independent (the blob hash is content-only),
@@ -574,7 +601,7 @@ def run_profile(
             "generation": dict(spec.generation),
             "generation_sha256": dataset_content_hash(params_path),
             "scripts": script_prov,
-            "commands": commands,
+            "commands": _portable_commands(commands),
         },
     }
     profile_path = out / "profile.json"
