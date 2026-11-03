@@ -82,9 +82,7 @@ LANE_DECISIONS: dict[str, str] = {
 
 _LANE_RULE_TEXT = {
     "complex": "highest task success rate",
-    "medium": (
-        "cheapest within medium_tolerance_pp of the best success rate"
-    ),
+    "medium": ("cheapest within medium_tolerance_pp of the best success rate"),
     "cheap": "cheapest model",
     "local": "contract-declared local model (privacy/security bypass)",
     "stem": "MCQ picture order when available, else the medium lane",
@@ -126,9 +124,7 @@ def profile_from_reports(reports: Sequence[Any]) -> dict[str, Any]:
         accuracy = _number(target.get("accuracy"))
         diagnostics = target.get("output_diagnostics")
         planned = (
-            diagnostics.get("planned_cases")
-            if isinstance(diagnostics, dict)
-            else None
+            diagnostics.get("planned_cases") if isinstance(diagnostics, dict) else None
         )
         output_limit = (
             diagnostics.get("output_limit_cases")
@@ -147,15 +143,11 @@ def profile_from_reports(reports: Sequence[Any]) -> dict[str, Any]:
         cost_per_task = spend / total if spend is not None and total else None
         if cost_per_task is None:
             missing.append("cost_per_task_usd")
-        neutral_per_task = (
-            neutral / total if neutral is not None and total else None
-        )
+        neutral_per_task = neutral / total if neutral is not None and total else None
         if neutral_per_task is None:
             missing.append("cache_neutral_cost_per_task_usd")
         mean_calls = (
-            call_total / total
-            if isinstance(call_total, int) and total
-            else None
+            call_total / total if isinstance(call_total, int) and total else None
         )
         if mean_calls is None:
             missing.append("mean_calls_per_task")
@@ -253,11 +245,7 @@ def select_models(
         <= medium_tolerance_pp / 100.0
     ]
     priced_eligible = sorted(
-        (
-            m
-            for m in eligible
-            if _number(m.get("cost_per_task_usd")) is not None
-        ),
+        (m for m in eligible if _number(m.get("cost_per_task_usd")) is not None),
         key=lambda m: (
             _number(m.get("cost_per_task_usd")),
             -(_number(m.get("success_rate")) or 0.0),
@@ -279,9 +267,7 @@ def select_models(
         cheap_note = None
     else:
         cheap_model = complex_model
-        cheap_note = (
-            "no model carries a cost; falling back to the strongest model"
-        )
+        cheap_note = "no model carries a cost; falling back to the strongest model"
 
     local_models = [model for model in local_models if str(model).strip()]
     local_model = str(local_models[0]) if local_models else None
@@ -433,8 +419,7 @@ def bootstrap_agentic_config(
         "scope": identity["scope"],
         "identity_headers": headers,
         "lanes": [
-            {"decision": name, **reason}
-            for name, reason in sorted(reasons.items())
+            {"decision": name, **reason} for name, reason in sorted(reasons.items())
         ],
         "medium_tolerance_pp": medium_tolerance_pp,
         "local_models": [str(m) for m in local_models],

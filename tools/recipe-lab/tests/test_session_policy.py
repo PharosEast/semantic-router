@@ -69,9 +69,7 @@ def test_no_evidence_proposes_nothing():
 
 
 def test_tool_loop_switches_raise_stability_weight():
-    candidates = propose_session_policy(
-        BASE_CONFIG, replay_summary=HIGH_SWITCH_SUMMARY
-    )
+    candidates = propose_session_policy(BASE_CONFIG, replay_summary=HIGH_SWITCH_SUMMARY)
     variables = _variables_of(candidates)
     assert "stability_weight" in variables
     candidate = next(c for c in candidates if c.variable == "stability_weight")
@@ -94,16 +92,17 @@ def test_model_flips_raise_switch_margin():
 
 
 def test_not_separate_separation_adds_the_agent_header():
-    candidates = propose_session_policy(
-        BASE_CONFIG, diagnosis=NOT_SEPARATE_DIAGNOSIS
-    )
+    candidates = propose_session_policy(BASE_CONFIG, diagnosis=NOT_SEPARATE_DIAGNOSIS)
     assert "identity.headers.agent" in _variables_of(candidates)
     candidate = next(c for c in candidates if c.variable == "identity.headers.agent")
     protection = candidate.config["global"]["router"]["learning"]["protection"]
     assert protection["identity"]["headers"]["agent"] == "x-claude-code-agent-id"
-    assert "agent" not in BASE_CONFIG["global"]["router"]["learning"]["protection"][
-        "identity"
-    ]["headers"]
+    assert (
+        "agent"
+        not in BASE_CONFIG["global"]["router"]["learning"]["protection"]["identity"][
+            "headers"
+        ]
+    )
 
 
 def test_rejected_selections_raise_min_turns():
@@ -115,9 +114,7 @@ def test_rejected_selections_raise_min_turns():
 
 
 def test_exhausted_knobs_produce_no_candidate():
-    raised = yaml.safe_load(
-        yaml.safe_dump(BASE_CONFIG)
-    )  # deep copy
+    raised = yaml.safe_load(yaml.safe_dump(BASE_CONFIG))  # deep copy
     raised["global"]["router"]["learning"]["protection"]["tuning"][
         "stability_weight"
     ] = 2.0
@@ -173,9 +170,7 @@ def test_high_switch_diagnosis_candidate_switches_less_on_replay(tmp_path):
     candidates = propose_session_policy(
         base_spec, replay_summary=base_result["summary"]
     )
-    stability = next(
-        c for c in candidates if c.variable == "stability_weight"
-    )
+    stability = next(c for c in candidates if c.variable == "stability_weight")
     assert stability.new == 2.0
 
     # the raised candidate holds the lane through the tool loop

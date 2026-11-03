@@ -494,9 +494,9 @@ def _post_messages(
     protection's conversation identity resolves missing and the protection
     skips the request entirely).
     """
-    body = json.dumps(
-        {"model": model, "max_tokens": 64, "messages": messages}
-    ).encode("utf-8")
+    body = json.dumps({"model": model, "max_tokens": 64, "messages": messages}).encode(
+        "utf-8"
+    )
     headers = {"Content-Type": "application/json"}
     if request_id:
         headers["x-request-id"] = request_id

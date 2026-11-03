@@ -459,12 +459,9 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     for record in records:
         prompt = _record_field(record, "prompt", "Prompt")
         row = {
-            "request_id": str(
-                _record_field(record, "request_id", "RequestID") or ""
-            ),
+            "request_id": str(_record_field(record, "request_id", "RequestID") or ""),
             "matched_decision": _record_field(record, "decision", "Decision") or "",
-            "routed": _record_field(record, "selected_model", "SelectedModel")
-            or "",
+            "routed": _record_field(record, "selected_model", "SelectedModel") or "",
             "prompt": prompt if isinstance(prompt, str) else "",
             "signal_values": _record_field(record, "signal_values", "SignalValues")
             or {},
@@ -484,7 +481,9 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         if terminal_reason:
             row["terminal_reason"] = str(terminal_reason)
         session_evidence = {
-            "conversation_id": _record_field(record, "conversation_id", "ConversationID"),
+            "conversation_id": _record_field(
+                record, "conversation_id", "ConversationID"
+            ),
             "session_id": _record_field(record, "session_id", "SessionID"),
             "turn_index": _record_field(record, "turn_index", "TurnIndex"),
             "session_action": _record_field(record, "session_action", "SessionAction"),
@@ -493,7 +492,9 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
             ),
         }
         if any(value is not None for value in session_evidence.values()):
-            row["session"] = {k: v for k, v in session_evidence.items() if v is not None}
+            row["session"] = {
+                k: v for k, v in session_evidence.items() if v is not None
+            }
         row.update(_row_extras(record))
         rows.append(row)
     return rows

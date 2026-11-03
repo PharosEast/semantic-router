@@ -884,7 +884,9 @@ def test_every_subcommand_is_documented():
     # (SKILL.md steps, evidence/red-line notes) legitimately mention only the
     # commands their flow uses, so they join the reverse check below only
     docs = {
-        k: v for k, v in _doc_texts().items() if k in ("README", "references/command-reference.md")
+        k: v
+        for k, v in _doc_texts().items()
+        if k in ("README", "references/command-reference.md")
     }
     missing = []
     for name in _top_level_subcommands():

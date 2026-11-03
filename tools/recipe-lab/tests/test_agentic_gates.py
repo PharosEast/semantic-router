@@ -464,11 +464,11 @@ def test_random_mix_requires_full_pairing():
     assert stats is not None
     assert stats["paired_tasks"] == 1
     assert stats["delta"] == pytest.approx(0.0)
-    assert session_random_mix_stats({}, {"strong": {"t1": 1.0}}, {"strong": 1.0}) is None
     assert (
-        session_random_mix_stats(
-            {"t1": 1.0}, {"strong": {"t2": 1.0}}, {"strong": 1.0}
-        )
+        session_random_mix_stats({}, {"strong": {"t1": 1.0}}, {"strong": 1.0}) is None
+    )
+    assert (
+        session_random_mix_stats({"t1": 1.0}, {"strong": {"t2": 1.0}}, {"strong": 1.0})
         is None
     )
     # a zero-weight reference is not needed for the pairing
@@ -524,8 +524,7 @@ def test_cost_summary_keeps_unknown_sides_unknown():
     assert summary["complete"] is False
     assert summary["actual_cost_usd"] == {"baseline": None, "candidate": None}
     assert any(
-        "cache_neutral_candidate_cost_usd is unknown" in r
-        for r in summary["reasons"]
+        "cache_neutral_candidate_cost_usd is unknown" in r for r in summary["reasons"]
     )
 
 

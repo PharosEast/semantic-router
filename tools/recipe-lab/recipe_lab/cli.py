@@ -298,7 +298,9 @@ def cmd_cases_from_replays(args: argparse.Namespace) -> int:
         for case in cases:
             fh.write(json.dumps(case, ensure_ascii=False, sort_keys=True) + "\n")
     provenance_path = (
-        Path(args.provenance) if args.provenance else output.with_suffix(".provenance.json")
+        Path(args.provenance)
+        if args.provenance
+        else output.with_suffix(".provenance.json")
     )
     provenance_path.parent.mkdir(parents=True, exist_ok=True)
     provenance_path.write_text(
@@ -320,8 +322,7 @@ def cmd_cases_from_replays(args: argparse.Namespace) -> int:
             "granularity": granularity,
             "cases_count": len(cases),
             "duplicate_pct": provenance["duplicate_pct"],
-            "cases_sha256": "sha256:"
-            + hashlib.sha256(output.read_bytes()).hexdigest(),
+            "cases_sha256": "sha256:" + hashlib.sha256(output.read_bytes()).hexdigest(),
         }
     )
     return 0
@@ -391,9 +392,7 @@ def cmd_bootstrap_agentic(args: argparse.Namespace) -> int:
     local_models = list(spec.local_models)
     for raw in args.local_model or []:
         local_models.extend(m.strip() for m in raw.split(",") if m.strip())
-    mcq_order = [
-        m.strip() for m in (args.mcq_order or "").split(",") if m.strip()
-    ]
+    mcq_order = [m.strip() for m in (args.mcq_order or "").split(",") if m.strip()]
     try:
         config, sidecar = bootstrap_agentic_config(
             template,
@@ -427,9 +426,7 @@ def cmd_bootstrap_agentic(args: argparse.Namespace) -> int:
             "config": str(config_path),
             "sidecar": str(sidecar_path),
             "client": args.client,
-            "lanes": {
-                lane["decision"]: lane["model"] for lane in sidecar["lanes"]
-            },
+            "lanes": {lane["decision"]: lane["model"] for lane in sidecar["lanes"]},
             "validated": args.validate and rejection is None,
         }
     )
@@ -1405,9 +1402,7 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
             f"budget exhausted: round {args.round} > budget.rounds {spec.budget.rounds}"
         )
     cases = load_route_cases(args.cases)
-    cases_hash = "sha256:" + hashlib.sha256(
-        Path(args.cases).read_bytes()
-    ).hexdigest()
+    cases_hash = "sha256:" + hashlib.sha256(Path(args.cases).read_bytes()).hexdigest()
     candidates = _resolve_candidates(args.candidates)
     if not candidates:
         _fail(f"no candidate configs found: {args.candidates}")
@@ -1439,9 +1434,7 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
         api_key_env=args.api_key_env,
     )
     trial_timeout_s = spec.budget.max_minutes_per_trial * 60
-    agentic_workload = next(
-        (w for w in spec.workloads if w.kind == "agentic"), None
-    )
+    agentic_workload = next((w for w in spec.workloads if w.kind == "agentic"), None)
     gates = (
         agentic_workload.resolved_agentic_gates()
         if agentic_workload is not None
@@ -1452,9 +1445,7 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
 
     baseline_events: dict[str, int] | None = None
     if args.baseline_config:
-        print(
-            f"[run] route-replay baseline: {args.baseline_config}", file=sys.stderr
-        )
+        print(f"[run] route-replay baseline: {args.baseline_config}", file=sys.stderr)
         baseline = evaluate_route_replay(
             candidate_config=args.baseline_config,
             cases=cases,
@@ -1474,7 +1465,10 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
 
     appended = []
     for index, candidate_path in enumerate(candidates, 1):
-        print(f"[run] candidate {index}/{len(candidates)}: {candidate_path}", file=sys.stderr)
+        print(
+            f"[run] candidate {index}/{len(candidates)}: {candidate_path}",
+            file=sys.stderr,
+        )
         entry = _candidate_entry(candidate_path, args.proposer, index, len(candidates))
         tag = candidate_tag(str(candidate_path))
         try:
@@ -1509,14 +1503,18 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
                     status="timeout",
                 )
             )
-            print(f"[run] {candidate_path.name}: TRIAL TIMEOUT -> ledger", file=sys.stderr)
+            print(
+                f"[run] {candidate_path.name}: TRIAL TIMEOUT -> ledger", file=sys.stderr
+            )
             continue
         except (RunnerError, ContractError, OSError) as exc:
             _fail(f"route-replay evaluation failed for {candidate_path}: {exc}")
         summary = result["summary"]
         gate_results = result["gate_results"]
         gate_status = {
-            g.name: ("pass" if g.passed else ("incomplete" if not g.evaluated else "fail"))
+            g.name: (
+                "pass" if g.passed else ("incomplete" if not g.evaluated else "fail")
+            )
             for g in gate_results
         }
         violated = any(g.evaluated and not g.passed for g in gate_results)
@@ -1544,7 +1542,8 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
             coverage_warning=any(
                 status == "incomplete" for status in gate_status.values()
             ),
-            notes="routing-evidence=" + json.dumps(summary, ensure_ascii=False, sort_keys=True),
+            notes="routing-evidence="
+            + json.dumps(summary, ensure_ascii=False, sort_keys=True),
             status="gate-violated" if violated else None,
         )
         ledger.append(record)
@@ -3381,9 +3380,7 @@ def build_parser() -> argparse.ArgumentParser:
         "candidates (stability weight, switch margin, agent identity header, "
         "min turns before switch)",
     )
-    p_spp.add_argument(
-        "--config", required=True, help="base config YAML to perturb"
-    )
+    p_spp.add_argument("--config", required=True, help="base config YAML to perturb")
     p_spp.add_argument(
         "--diagnosis",
         default=None,
@@ -3421,8 +3418,12 @@ def build_parser() -> argparse.ArgumentParser:
         "template, the profile and the client identity contract (lane "
         "assignment rules + per-lane evidence in a sidecar)",
     )
-    p_boot.add_argument("--spec", required=True, help="experiment spec YAML (local_models)")
-    p_boot.add_argument("--profile", required=True, help="agentic profile JSON (profile-agentic)")
+    p_boot.add_argument(
+        "--spec", required=True, help="experiment spec YAML (local_models)"
+    )
+    p_boot.add_argument(
+        "--profile", required=True, help="agentic profile JSON (profile-agentic)"
+    )
     p_boot.add_argument(
         "--template",
         default=None,

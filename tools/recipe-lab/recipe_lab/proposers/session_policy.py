@@ -78,7 +78,9 @@ def _tuning(config: dict[str, Any]) -> dict[str, Any]:
 
 def _ref(variable: str, new: Any) -> str:
     payload = json.dumps({"variable": variable, "new": new}, sort_keys=True)
-    return "config-rev:session-policy:" + hashlib.sha256(payload.encode()).hexdigest()[:12]
+    return (
+        "config-rev:session-policy:" + hashlib.sha256(payload.encode()).hexdigest()[:12]
+    )
 
 
 def _candidate(

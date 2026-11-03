@@ -1110,7 +1110,9 @@ class OraclePolicy:
     truth_space: str = DEFAULT_TRUTH_SPACE
 
     @classmethod
-    def from_dict(cls, raw: Any, truth_space: str = DEFAULT_TRUTH_SPACE) -> OraclePolicy:
+    def from_dict(
+        cls, raw: Any, truth_space: str = DEFAULT_TRUTH_SPACE
+    ) -> OraclePolicy:
         _require(
             isinstance(raw, dict) and bool(raw),
             "attribution.oracle_policy must be a non-empty mapping",
@@ -1899,8 +1901,7 @@ class ExperimentSpec:
         _require(
             isinstance(local_models_raw, list)
             and all(
-                isinstance(model, str) and model.strip()
-                for model in local_models_raw
+                isinstance(model, str) and model.strip() for model in local_models_raw
             ),
             "local_models must be a list of non-empty model names",
         )
@@ -2257,11 +2258,7 @@ class ExperimentSpec:
                     else {}
                 ),
             },
-            **(
-                {"local_models": list(self.local_models)}
-                if self.local_models
-                else {}
-            ),
+            **({"local_models": list(self.local_models)} if self.local_models else {}),
             "gates": [g.to_dict() for g in self.gates],
             "budget": self.budget.to_dict(),
         }

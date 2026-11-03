@@ -325,8 +325,10 @@ def agentic_cost_summary(pair_comparisons: Sequence[Any]) -> dict[str, Any]:
         entries = (
             comparison.get("comparisons") if isinstance(comparison, dict) else None
         )
-        if not isinstance(entries, list) or len(entries) != 1 or not isinstance(
-            entries[0], dict
+        if (
+            not isinstance(entries, list)
+            or len(entries) != 1
+            or not isinstance(entries[0], dict)
         ):
             summary["complete"] = False
             summary["reasons"].append(f"pair {index}: no single comparisons[] entry")
@@ -366,9 +368,7 @@ def agentic_cost_summary(pair_comparisons: Sequence[Any]) -> dict[str, Any]:
         ):
             base = sums[keys[0]]
             if base > 0:
-                summary["saving_percent"][side] = (
-                    (base - sums[keys[1]]) / base * 100.0
-                )
+                summary["saving_percent"][side] = (base - sums[keys[1]]) / base * 100.0
     return summary
 
 

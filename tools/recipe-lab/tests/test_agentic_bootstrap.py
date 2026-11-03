@@ -297,7 +297,9 @@ def test_cli_profile_and_bootstrap_end_to_end(tmp_path, capsys):
         [("cheap", 0.60, 0.5), ("mid", 0.86, 2.0), ("strong", 0.90, 5.0)],
         strict=False,
     ):
-        path.write_text(json.dumps(_report(name, rate=rate, cost=cost)), encoding="utf-8")
+        path.write_text(
+            json.dumps(_report(name, rate=rate, cost=cost)), encoding="utf-8"
+        )
     profile_path = tmp_path / "profile.json"
     assert (
         main(

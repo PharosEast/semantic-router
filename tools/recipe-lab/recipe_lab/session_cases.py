@@ -149,9 +149,7 @@ def cases_from_replays(
                 )
             if not requests:
                 continue  # every body unreadable: provenance carries the skips
-            prompt = next(
-                (req["prompt"] for req in requests if req["prompt"]), ""
-            )
+            prompt = next((req["prompt"] for req in requests if req["prompt"]), "")
             cases.append(
                 {
                     "case_id": "sess-" + _short_hash(conversation),
@@ -203,9 +201,7 @@ def cases_from_replays(
         )
         dedup_rule = "one case per unique prompt (J3 convention)"
 
-    duplicate_pct = (
-        (1.0 - len(cases) / key_records) * 100.0 if key_records > 0 else 0.0
-    )
+    duplicate_pct = (1.0 - len(cases) / key_records) * 100.0 if key_records > 0 else 0.0
     provenance = {
         "granularity": granularity,
         "records": len(records),
@@ -240,7 +236,9 @@ def load_route_cases(path: str) -> list[dict[str, Any]]:
         try:
             raw = json.loads(raw_line)
         except json.JSONDecodeError as exc:
-            raise ValueError(f"route-replay cases line {lineno}: invalid JSON: {exc}") from exc
+            raise ValueError(
+                f"route-replay cases line {lineno}: invalid JSON: {exc}"
+            ) from exc
         if not isinstance(raw, dict) or not isinstance(raw.get("case_id"), str):
             raise ValueError(f"route-replay cases line {lineno}: case_id required")
         requests = raw.get("requests")
@@ -251,7 +249,9 @@ def load_route_cases(path: str) -> list[dict[str, Any]]:
                     "a non-empty requests list"
                 )
             for index, request in enumerate(requests):
-                messages = request.get("messages") if isinstance(request, dict) else None
+                messages = (
+                    request.get("messages") if isinstance(request, dict) else None
+                )
                 if not isinstance(messages, list) or not messages:
                     raise ValueError(
                         f"route-replay cases line {lineno}: request {index} "

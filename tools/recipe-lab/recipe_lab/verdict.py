@@ -510,9 +510,7 @@ def evaluate_verdict(
         if guard_details:
             veto_reasons.append(f"guard floor violated ({guard_details})")
         if agentic_details:
-            veto_reasons.append(
-                f"agentic stability gate exceeded ({agentic_details})"
-            )
+            veto_reasons.append(f"agentic stability gate exceeded ({agentic_details})")
         # safety vetoes first; any simultaneously violated constraint is still listed
         return VerdictResult(
             VERDICT_FAIL,

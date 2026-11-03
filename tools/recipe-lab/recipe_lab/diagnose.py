@@ -949,7 +949,8 @@ def render_markdown(diagnosis: dict[str, Any]) -> str:
         ]
         failures = agentic.get("failures") or {}
         reason_text = ", ".join(
-            f"`{reason}`={count}" for reason, count in failures.get("terminal_reasons", {}).items()
+            f"`{reason}`={count}"
+            for reason, count in failures.get("terminal_reasons", {}).items()
         )
         lines += [
             "",
