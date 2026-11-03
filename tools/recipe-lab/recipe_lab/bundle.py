@@ -171,6 +171,7 @@ def render_bundle_report(
     spec: ExperimentSpec,
     records: list[dict[str, Any]],
     record: dict[str, Any],
+    lanes: dict[str, Any] | None = None,
 ) -> str:
     """Deterministic acceptance report rendered from the ledger + spec only."""
     candidate = record.get("candidate") or {}
@@ -214,6 +215,25 @@ def render_bundle_report(
     if reasons:
         lines += ["", "### Verdict reasons", ""]
         lines += [f"- {reason}" for reason in reasons]
+    if lanes is not None:
+        # Template path (sub-issue-8 §2.2 step 10): the report must say which
+        # lanes the case set actually measured, which were assigned by the
+        # default rule (untested), and which were explicitly excluded.
+        measured = lanes.get("measured_lanes") or []
+        unmeasured = lanes.get("unmeasured_lanes") or []
+        excluded = lanes.get("excluded_lanes") or []
+        lines += ["", "### Lane coverage", ""]
+        lines.append(
+            f"- measured lanes: {', '.join(measured) if measured else 'none'}"
+        )
+        lines.append(
+            "- unmeasured lanes (assigned by the default rule, untested): "
+            + (", ".join(unmeasured) if unmeasured else "none")
+        )
+        lines.append(
+            "- excluded lanes (--exclude-decision): "
+            + (", ".join(excluded) if excluded else "none")
+        )
     distribution = _routing_distribution(record.get("notes") or "")
     if distribution:
         lines += ["", "### Observed routing distribution (final verify)", ""]
@@ -309,26 +329,37 @@ def build_bundle(
     record_id: str,
     out_dir: str | Path,
     config_path: str | Path,
-    skeleton_path: str | Path,
+    skeleton_path: str | Path | None = None,
     profile_path: str | Path,
     validate_bin: str,
     router_commit: str | None = None,
     model_revisions: dict[str, str] | None = None,
     model_eval_script: str | None = None,
     candidate_sidecar: str | Path,
+    bindings_path: str | Path | None = None,
     extra_private_patterns: list[str] | None = None,
 ) -> dict[str, Any]:
     """Assemble the C9 bundle for one final live PASS record.
 
+    Two candidate modes are supported, selected by the sidecar's schema:
+
+    - **legacy bootstrap sidecar** (recipe-lab-bootstrap-v1): ``--skeleton``
+      and ``--profile`` are bound to the sidecar's scaffold/profile hashes
+      and the packaged config must classify like the evaluated candidate
+      (Y2 projection hash).
+    - **template bindings sidecar** (recipe-lab-bindings-v1, sub-issue-8
+      §2.2 step 10): ``--bindings`` replaces ``--skeleton``; it is bound to
+      the sidecar's bindings hash, the profile to the sidecar's profile
+      hash, and the config to both the ledger candidate and the sidecar's
+      candidate hash. The provenance carries the template bundle hash and
+      the per-lane measured/unmeasured/excluded lists; the report states
+      the lane coverage.
+
     Every rejection is a ContractError (exit 2 through the CLI): unknown
     record, non-live tier, non-PASS verdict, no final flag, a transfer
     guard not passing, a packaged input that is not the artifact the
-    evidence cites (Y4: --config against the record's candidate
-    config_sha256; --skeleton/--profile against the bootstrap sidecar's
-    recorded hashes), a packaged config that does not classify like the
-    evaluated candidate (Y2: projection hash against the sidecar), a
-    failing config validate, or private content in any artifact. Nothing
-    is written unless every check passes.
+    evidence cites (Y4), a failing config validate, or private content in
+    any artifact. Nothing is written unless every check passes.
     """
     records = Ledger(ledger_path).read()
     matches = [row for row in records if row.get("record_id") == record_id]
@@ -386,55 +417,107 @@ def build_bundle(
         raise ContractError(
             f"cannot read the candidate provenance sidecar {sidecar_file}: {exc}"
         ) from exc
-    for flag, role, path in (
-        ("--skeleton", "scaffold", skeleton_file),
-        ("--profile", "profile", profile_file),
-    ):
-        cited = (sidecar.get(role) or {}).get("sha256")
-        if not isinstance(cited, str) or not cited:
+    template_mode = sidecar.get("schema") == "recipe-lab-bindings-v1"
+    skeleton_file = Path(skeleton_path) if skeleton_path is not None else None
+    bindings_file = Path(bindings_path) if bindings_path is not None else None
+    if template_mode:
+        if bindings_file is None or skeleton_file is not None:
             raise ContractError(
-                f"the candidate sidecar cites no {role} sha256; bundle cannot "
-                f"bind {flag} to the evidence"
+                "the candidate sidecar is a template-bindings sidecar "
+                "(recipe-lab-bindings-v1): pass --bindings (not --skeleton); "
+                "the template path has no result_to_config scaffold"
             )
-        packaged = _content_hash(path)
-        if packaged != cited:
+    else:
+        if skeleton_file is None or bindings_file is not None:
             raise ContractError(
-                f"{flag} hashes to {packaged}, but the candidate sidecar cites {cited}"
+                "the candidate sidecar is a legacy bootstrap sidecar: pass "
+                "--skeleton (not --bindings); the template path cites a "
+                "recipe-lab-bindings-v1 sidecar instead"
             )
-    # Y2: the packaged config must classify exactly like the config the
-    # evidence was produced with - the bootstrap sidecar cites the
-    # candidate's classification projection hash.
-    sidecar_classification = sidecar.get("classification") or {}
-    sidecar_projection = sidecar_classification.get("projection_sha256")
-    if not isinstance(sidecar_projection, str) or not sidecar_projection:
-        raise ContractError(
-            "the candidate sidecar cites no classification projection_sha256; "
-            "bundle cannot prove the packaged config classifies like the "
-            "evaluated candidate (Y2)"
-        )
-    try:
-        packaged_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
-    except yaml.YAMLError as exc:
-        raise ContractError(f"--config is not valid YAML: {exc}") from exc
-    packaged_projection = classification_projection_hash(packaged_config or {})
-    if packaged_projection != sidecar_projection:
-        raise ContractError(
-            f"--config's classification projection hashes to {packaged_projection}, "
-            f"but the candidate sidecar cites {sidecar_projection}"
-        )
+        # Y4 (legacy): the scaffold and profile are bound to the bootstrap
+        # sidecar the candidate was generated with.
+        for flag, role, path in (
+            ("--skeleton", "scaffold", skeleton_file),
+            ("--profile", "profile", profile_file),
+        ):
+            cited = (sidecar.get(role) or {}).get("sha256")
+            if not isinstance(cited, str) or not cited:
+                raise ContractError(
+                    f"the candidate sidecar cites no {role} sha256; bundle cannot "
+                    f"bind {flag} to the evidence"
+                )
+            packaged = _content_hash(path)
+            if packaged != cited:
+                raise ContractError(
+                    f"{flag} hashes to {packaged}, but the candidate sidecar cites {cited}"
+                )
+    if template_mode:
+        # Y4 (template): the bindings and the profile are bound to the
+        # bindings sidecar; the config additionally to the sidecar's own
+        # candidate hash (the ledger binding above already pinned it).
+        for flag, role, path in (
+            ("--bindings", "bindings", bindings_file),
+            ("--profile", "profile", profile_file),
+        ):
+            cited = (sidecar.get(role) or {}).get("sha256")
+            if not isinstance(cited, str) or not cited:
+                raise ContractError(
+                    f"the bindings sidecar cites no {role} sha256; bundle cannot "
+                    f"bind {flag} to the evidence"
+                )
+            packaged = _content_hash(path)
+            if packaged != cited:
+                raise ContractError(
+                    f"{flag} hashes to {packaged}, but the bindings sidecar cites {cited}"
+                )
+        sidecar_candidate = (sidecar.get("candidate") or {}).get("sha256")
+        if isinstance(sidecar_candidate, str) and sidecar_candidate:
+            if packaged_config_hash != sidecar_candidate:
+                raise ContractError(
+                    f"--config hashes to {packaged_config_hash}, but the "
+                    f"bindings sidecar's candidate names {sidecar_candidate}"
+                )
+    if not template_mode:
+        # Y2 (legacy only): the packaged config must classify exactly like
+        # the config the evidence was produced with - the bootstrap sidecar
+        # cites the candidate's classification projection hash. The template
+        # path has no shared classification source; `recipe builtin init`
+        # validated the composed config, and the bindings hash pins its
+        # routing structure instead.
+        sidecar_classification = sidecar.get("classification") or {}
+        sidecar_projection = sidecar_classification.get("projection_sha256")
+        if not isinstance(sidecar_projection, str) or not sidecar_projection:
+            raise ContractError(
+                "the candidate sidecar cites no classification projection_sha256; "
+                "bundle cannot prove the packaged config classifies like the "
+                "evaluated candidate (Y2)"
+            )
+        try:
+            packaged_config = yaml.safe_load(config_file.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ContractError(f"--config is not valid YAML: {exc}") from exc
+        packaged_projection = classification_projection_hash(packaged_config or {})
+        if packaged_projection != sidecar_projection:
+            raise ContractError(
+                f"--config's classification projection hashes to {packaged_projection}, "
+                f"but the candidate sidecar cites {sidecar_projection}"
+            )
     validate_text = _run_config_validate(config_file, validate_bin)
 
     config_bytes = config_file.read_bytes()
-    skeleton_text = skeleton_file.read_text(encoding="utf-8")
     profile_bytes = profile_file.read_bytes()
-    diff_text = "".join(
-        difflib.unified_diff(
-            skeleton_text.splitlines(keepends=True),
-            config_bytes.decode("utf-8").splitlines(keepends=True),
-            fromfile="skeleton",
-            tofile="config.yaml",
+    if template_mode:
+        diff_text = None
+    else:
+        skeleton_text = skeleton_file.read_text(encoding="utf-8")
+        diff_text = "".join(
+            difflib.unified_diff(
+                skeleton_text.splitlines(keepends=True),
+                config_bytes.decode("utf-8").splitlines(keepends=True),
+                fromfile="skeleton",
+                tofile="config.yaml",
+            )
         )
-    )
     campaign_hash = record.get("dataset_hash")
     excerpt = [row for row in records if row.get("dataset_hash") == campaign_hash]
     ledger_text = "".join(
@@ -463,10 +546,22 @@ def build_bundle(
             },
         },
         "artifacts": {
-            "skeleton": {
-                "name": skeleton_file.name,
-                "sha256": _content_hash(skeleton_file),
-            },
+            "skeleton": (
+                {
+                    "name": skeleton_file.name,
+                    "sha256": _content_hash(skeleton_file),
+                }
+                if skeleton_file is not None
+                else None
+            ),
+            "bindings": (
+                {
+                    "name": bindings_file.name,
+                    "sha256": _content_hash(bindings_file),
+                }
+                if bindings_file is not None
+                else None
+            ),
             "config": {"name": "config.yaml", "sha256": _content_hash(config_file)},
             "profile": {
                 "name": "profile.json",
@@ -479,10 +574,26 @@ def build_bundle(
         },
         # Y2: hashes only - the projection this bundle verified the packaged
         # config against, plus the classification source's content identity.
+        # Template mode has no shared classification source (the bindings
+        # hash pins the routing structure); classification is null there.
         "classification": {
-            "projection_sha256": sidecar_projection,
-            "source_sha256": sidecar_classification.get("sha256"),
+            "projection_sha256": sidecar_projection if not template_mode else None,
+            "source_sha256": sidecar_classification.get("sha256")
+            if not template_mode
+            else None,
         },
+        # Template mode (sub-issue-8 §2.2 step 10): the template identity and
+        # the per-lane measured/unmeasured/excluded lists the report cites.
+        "template": sidecar.get("template") if template_mode else None,
+        "lanes": (
+            {
+                "measured_lanes": sidecar.get("measured_lanes") or [],
+                "unmeasured_lanes": sidecar.get("unmeasured_lanes") or [],
+                "excluded_lanes": sidecar.get("excluded_lanes") or [],
+            }
+            if template_mode
+            else None
+        ),
         "run_ids": {
             "baseline_ref": record.get("baseline_ref"),
             "bench_refs": list(record.get("bench_refs") or []),
@@ -497,10 +608,10 @@ def build_bundle(
         ),
     }
 
+    lanes_for_report = provenance["lanes"] if template_mode else None
     artifacts: dict[str, str] = {
         "validate.txt": validate_text,
-        "config.diff": diff_text,
-        "report.md": render_bundle_report(spec, records, record),
+        "report.md": render_bundle_report(spec, records, record, lanes_for_report),
         "ledger.jsonl": ledger_text,
         "provenance.json": json.dumps(
             provenance, sort_keys=True, ensure_ascii=False, indent=1
@@ -516,6 +627,10 @@ def build_bundle(
         "config.yaml": "",
         "profile.json": "",
     }
+    if template_mode:
+        artifacts["bindings.yaml"] = bindings_file.read_text(encoding="utf-8")
+    else:
+        artifacts["config.diff"] = diff_text
     artifacts["config.yaml"] = config_bytes.decode("utf-8")
     artifacts["profile.json"] = profile_bytes.decode("utf-8")
     scan_private_content(artifacts, extra_private_patterns)
@@ -524,15 +639,13 @@ def build_bundle(
     out.mkdir(parents=True, exist_ok=True)
     (out / "config.yaml").write_bytes(config_bytes)
     (out / "profile.json").write_bytes(profile_bytes)
-    for name in (
-        "validate.txt",
-        "config.diff",
-        "report.md",
-        "ledger.jsonl",
-        "provenance.json",
-        "PROMOTION.md",
-        "REVIEW.md",
-    ):
+    if template_mode:
+        (out / "bindings.yaml").write_bytes(bindings_file.read_bytes())
+    written = ["validate.txt", "report.md", "ledger.jsonl", "provenance.json",
+               "PROMOTION.md", "REVIEW.md"]
+    if not template_mode:
+        written.append("config.diff")
+    for name in written:
         (out / name).write_text(artifacts[name], encoding="utf-8")
     return {
         "bundle": str(out),

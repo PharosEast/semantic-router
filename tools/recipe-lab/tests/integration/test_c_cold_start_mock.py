@@ -280,6 +280,9 @@ def test_cold_start_model_eval_chain_end_to_end(
             "CASES": str(cases_path),
             "SPEC": str(spec_path),
             "MODEL_EVAL_DIR": str(MODEL_EVAL_DIR),
+            # this test pins the LEGACY domain-scaffold chain (the
+            # compatibility path); the template chain has its own test
+            "MODE": "legacy",
             "LAMBDAS": "0,10",
             "ANSWER_PLAN": str(answer_plan_path),
             "MOCK_PORT": str(mock_port),
@@ -426,6 +429,309 @@ def _read_jsonl(path: Path) -> list[dict]:
         for line in path.read_text(encoding="utf-8").splitlines()
         if line.strip()
     ]
+
+
+@pytest.mark.integration
+def test_cold_start_template_chain_end_to_end(
+    router_bin: str,
+    validate_bin: str,
+    recipe_lab_bin: Path,
+    hf_home: str | None,
+    tmp_path: Path,
+) -> None:
+    """MODE=template (sub-issue-8 §2.2): observe-lanes -> profile --lanes ->
+    bindings -> run -> verify --final --lanes -> bundle --bindings, with the
+    REAL ``vllm-sr recipe builtin list/init`` (never a stand-in).
+
+    Gated on ``RECIPE_LAB_TEMPLATE_STACK=1``: the observation config and the
+    generated candidates serve the mom-v1 bundle's pinned decision model
+    (Vela 2.0 0.8B on CPU through model-runtime), which the plain mock stack
+    cannot answer for. Run this where that artifact is available; the
+    baseline arm is an all-weak bindings derivative built here with the real
+    init (the "route everything to the cheapest model" reference).
+    """
+    if not _openai_available():
+        pytest.skip("openai is not installed; the model_eval driver needs it")
+    if os.environ.get("RECIPE_LAB_TEMPLATE_STACK") != "1":
+        pytest.skip(
+            "RECIPE_LAB_TEMPLATE_STACK is not set; the template path needs "
+            "the mom-v1 decision model (Vela 2.0 0.8B) servable by "
+            "model-runtime"
+        )
+
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text(
+        "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in _fixture_cases()),
+        encoding="utf-8",
+    )
+
+    mock_port = _free_port()
+    backend_port = _free_port()
+
+    splits_dir = tmp_path / "splits"
+    _run_recipe_lab(
+        recipe_lab_bin,
+        ["split", "--cases", str(cases_path), "--output-dir", str(splits_dir)],
+    )
+    for split in ("calib", "dev", "frozen_test"):
+        _run_recipe_lab(
+            recipe_lab_bin,
+            [
+                "cases",
+                "to-model-eval",
+                "--source",
+                str(splits_dir / f"{split}.jsonl"),
+                "--out",
+                str(splits_dir / f"tasks-{split}.jsonl"),
+            ],
+        )
+
+    def split_spec(name: str) -> dict:
+        return {
+            "manifest": f"splits/{name}.jsonl",
+            "content_hash": _sha256(splits_dir / f"{name}.jsonl"),
+            "model_eval_tasks": f"splits/tasks-{name}.jsonl",
+            "model_eval_tasks_sha256": _sha256(splits_dir / f"tasks-{name}.jsonl"),
+        }
+
+    answer_plan_path = tmp_path / "answer-plan.json"
+    answer_plan_path.write_text(json.dumps(_answer_plan()), encoding="utf-8")
+
+    # The providers config is the template path's only endpoint/credential
+    # source: both candidate models point at the long-lived mock backend and
+    # carry the declared capabilities the recipe's candidate_requirements
+    # demand. The bundle's decision model is intentionally NOT declared -
+    # init copies the pinned deployment.
+    providers = {
+        "version": "v0.3",
+        "listeners": [
+            {"name": "gw", "address": "0.0.0.0", "port": 8899, "timeout": "300s"}
+        ],
+        "providers": {
+            "defaults": {"model": ALIAS_A},
+            "models": [
+                {
+                    "name": alias,
+                    "provider_model_id": alias,
+                    "api_format": "openai",
+                    "backend_refs": [
+                        {
+                            "name": f"{alias}-backend",
+                            "endpoint": f"127.0.0.1:{mock_port}",
+                            "protocol": "http",
+                            "provider": "vllm",
+                            "weight": 1,
+                        }
+                    ],
+                }
+                for alias in (ALIAS_A, ALIAS_B)
+            ],
+        },
+        "routing": {
+            "modelCards": [
+                {
+                    "name": ALIAS_A,
+                    "context_window_size": 131072,
+                    "description": "cheap generalist",
+                    "capabilities": ["chat", "text", "vision", "tools"],
+                    "modality": "multimodal",
+                },
+                {
+                    "name": ALIAS_B,
+                    "context_window_size": 131072,
+                    "description": "strong reasoning generalist",
+                    "capabilities": ["chat", "text", "tools"],
+                    "modality": "text",
+                },
+            ]
+        },
+        "global": {
+            "stores": {"response_cache": {"enabled": False, "backend_type": "memory"}}
+        },
+    }
+    providers_path = tmp_path / "providers.yaml"
+    providers_path.write_text(yaml.safe_dump(providers, sort_keys=False), encoding="utf-8")
+
+    spec = {
+        "api_version": API_VERSION,
+        "objective": {
+            "metric_key": METRIC_KEY,
+            "direction": "maximize",
+            "min_improvement_pp": 1.0,
+            "min_cases": 2,
+            "replay_metric": "routed_accuracy",
+        },
+        "workloads": [
+            {
+                "name": "mcq-cold-start-template",
+                "profile": "quick",
+                "driver": "model_eval",
+                "split_rule": "group by source_id; seed 42; 40/30/30",
+                "splits": {
+                    "calib": split_spec("calib"),
+                    "dev": split_spec("dev"),
+                    "frozen_test": split_spec("frozen_test"),
+                },
+            }
+        ],
+        "attribution": {"oracle_policy": {"math": ALIAS_A}},
+        "budget": {"rounds": 1, "max_minutes_per_trial": 10},
+        "cost_basis": {
+            "source": "provider_pricing",
+            "assumed_pricing": {
+                ALIAS_A: {"prompt_per_1m": 1.0, "completion_per_1m": 1.0},
+                ALIAS_B: {"prompt_per_1m": 4.0, "completion_per_1m": 4.0},
+            },
+        },
+        "models": [
+            {
+                "name": ALIAS_A,
+                "endpoint": f"http://127.0.0.1:{mock_port}/v1",
+                "served_name": ALIAS_A,
+                "capabilities": {"vision": True, "tools": True, "context_window": 131072},
+            },
+            {
+                "name": ALIAS_B,
+                "endpoint": f"http://127.0.0.1:{mock_port}/v1",
+                "served_name": ALIAS_B,
+                "capabilities": {"tools": True, "context_window": 131072},
+            },
+        ],
+        "template": {"bundle": "mom-v1", "recipe": "balance"},
+        "providers_config": "providers.yaml",
+        "bootstrap": {"min_lane_cases": 1, "lambdas": [0]},
+        "generation": {"temperature": 0, "max_tokens": 64},
+        "profile": {"min_label_cases": 1},
+        "gates": [],
+    }
+    spec_path = tmp_path / "spec.yaml"
+    spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+
+    # The baseline arm: every lane bound to the cheap model via the REAL
+    # `recipe builtin init` (the "all-weakest" reference config).
+    baseline_dir = tmp_path / "baseline"
+    baseline_dir.mkdir()
+    all_weak_bindings = baseline_dir / "bindings.yaml"
+    lanes = [
+        "long_context",
+        "vision",
+        "recovery",
+        "agentic",
+        "facts",
+        "frontier",
+        "code",
+        "hard",
+        "standard",
+        "fast",
+    ]
+    all_weak_bindings.write_text(
+        yaml.safe_dump(
+            {
+                lane: [{"model": ALIAS_A}, {"model": ALIAS_B, "lora_name": "alt"}]
+                if lane == "frontier"
+                else [{"model": ALIAS_A}]
+                for lane in lanes
+            }
+        ),
+        encoding="utf-8",
+    )
+    baseline_config = baseline_dir / "baseline.yaml"
+    init = subprocess.run(
+        [
+            validate_bin,
+            "recipe",
+            "builtin",
+            "init",
+            "balance",
+            "--bundle",
+            "mom-v1",
+            "--config",
+            str(providers_path),
+            "--bindings",
+            str(all_weak_bindings),
+            "--model-name",
+            "vllm-sr/auto",
+            "--output",
+            str(baseline_config),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+    assert init.returncode == 0, init.stdout + init.stderr
+
+    env = dict(os.environ)
+    env.update(
+        {
+            "RECIPE_LAB_BIN": str(recipe_lab_bin),
+            "ROUTER_BIN": router_bin,
+            "CASES": str(cases_path),
+            "SPEC": str(spec_path),
+            "MODEL_EVAL_DIR": str(MODEL_EVAL_DIR),
+            "MODE": "template",
+            "VLLM_SR_BIN": validate_bin,
+            "LAMBDAS": "0",
+            "ANSWER_PLAN": str(answer_plan_path),
+            "MOCK_PORT": str(mock_port),
+            "DRIVER": "model_eval",
+            "BASELINE_CONFIG": str(baseline_config),
+            "VERIFY_REPETITIONS": "1",
+            "WORK_ROOT": str(tmp_path / "work"),
+            "VALIDATE_BIN": validate_bin,
+            "BACKEND_PORT": str(backend_port),
+        }
+    )
+    if hf_home:
+        env["HF_HOME"] = hf_home
+
+    proc = subprocess.run(
+        ["bash", str(SCRIPT)],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=str(tmp_path),
+        timeout=3600,
+        check=False,
+    )
+    assert proc.returncode == 0, (
+        f"cold-start.sh (MODE=template) exited {proc.returncode}\n"
+        f"--- stdout tail ---\n{proc.stdout[-4000:]}\n"
+        f"--- stderr tail ---\n{proc.stderr[-4000:]}"
+    )
+    assert "COLD-START-DONE" in proc.stdout
+
+    work_dir = tmp_path / "work"
+    (work,) = list(work_dir.glob("cold-start-*"))
+
+    # The template chain's artifacts: lanes observations, the bindings
+    # sidecar and the bundle's bindings.yaml copy.
+    assert (work / "observe-lanes" / "lanes-calib.jsonl").is_file()
+    sidecars = list((work / "cands").glob("bindings-lambda-*.provenance.json"))
+    assert sidecars, "bindings produced no provenance sidecar"
+    sidecar = json.loads(sidecars[0].read_text(encoding="utf-8"))
+    assert sidecar["schema"] == "recipe-lab-bindings-v1"
+    assert sidecar["template"]["bundle"] == "mom-v1"
+    assert sidecar["measured_lanes"] or sidecar["unmeasured_lanes"]
+
+    bundle_dir = work / "bundle"
+    for name in (
+        "report.md",
+        "config.yaml",
+        "bindings.yaml",
+        "profile.json",
+        "validate.txt",
+    ):
+        assert (bundle_dir / name).is_file(), name
+    provenance = json.loads(
+        (bundle_dir / "provenance.json").read_text(encoding="utf-8")
+    )
+    assert provenance["template"]["bundle"] == "mom-v1"
+    assert provenance["lanes"] is not None
+    # The report states the lane coverage honestly.
+    report = (bundle_dir / "report.md").read_text(encoding="utf-8")
+    assert "Lane coverage" in report
+    assert "unmeasured lanes" in report
 
 
 def test_profile_rejects_truncating_generation(tmp_path: Path) -> None:

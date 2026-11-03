@@ -516,7 +516,7 @@ def verify_live_model_eval(
     *,
     spec: ExperimentSpec,
     tasks_path: str | Path,
-    labels_path: str | Path,
+    labels_path: str | Path | None,
     candidate_config: str | Path,
     baseline_endpoint: str,
     candidate_endpoint: str,
@@ -532,6 +532,7 @@ def verify_live_model_eval(
     force: bool = False,
     run_cache: str | Path | None = None,
     incomplete_reasons: list[str] | None = None,
+    lanes_path: str | Path | None = None,
 ) -> dict[str, Any]:
     """Drive the model_eval harness for one candidate and decide the verdict.
 
@@ -540,11 +541,12 @@ def verify_live_model_eval(
     routers serving their respective configs on the same frozen task set
     (`tasks_path`, the contract-declared `model_eval_tasks` rendering of
     the split, hash-checked against the contract by the caller). Y3: the
-    router-label category rewrite the profile used to do externally now
-    happens here - `labels_path` is the C2 labels JSONL for the split,
-    every arm answers the rewritten file written into `work_dir`, and no
-    externally rewritten task file can enter the evidence path. Both
-    rewrite inputs' hashes are recorded with the result.
+    grouping rewrite the profile used to do externally now happens here -
+    `labels_path` (legacy label mode) or `lanes_path` (template lane mode)
+    is the C2 JSONL for the split; every arm answers the rewritten file
+    written into `work_dir`, and no externally rewritten task file can
+    enter the evidence path. Both rewrite inputs' hashes are recorded with
+    the result.
 
     Per pair, the judged rows feed the M2 paired statistics, the M3
     evidence-quality rates and the per-arm accuracies; the merged stats
@@ -600,21 +602,39 @@ def verify_live_model_eval(
     )
     timeout_s = spec.budget.max_minutes_per_trial * 60
     tasks_hash = dataset_content_hash(tasks)
-    # Y3: rewrite the bound tasks' categories to the router's own labels
-    # (the C2 labels file), exactly like the profile does - but here, so
-    # the arms never answer an externally rewritten file. Rare labels merge
-    # into `other` under spec.profile_config.min_label_cases; uncovered
-    # cases join `other` and are counted.
-    labels_file = Path(labels_path)
-    if not labels_file.is_file():
-        raise ContractError(f"labels file not found: {labels_file}")
-    labels = load_labels(labels_file)
-    labeled_rows, label_merges, uncovered = rewrite_task_categories(
-        task_rows, labels, min_label_cases=spec.profile_config.min_label_cases
-    )
+    # Y3: rewrite the bound tasks' categories to the router's own grouping
+    # (the C2 labels file, legacy mode, or the C2 lanes file, template lane
+    # mode), exactly like the profile does - but here, so the arms never
+    # answer an externally rewritten file. Rare labels merge into `other`
+    # under spec.profile_config.min_label_cases; uncovered cases join `other`
+    # and are counted. Lane mode never merges: lanes below
+    # bootstrap.min_lane_cases stay in the tasks and the profile records
+    # them unmeasured; unobserved cases get the `unobserved` category.
+    if (labels_path is None) == (lanes_path is None):
+        raise ContractError(
+            "exactly one grouping source is required: labels_path (legacy) "
+            "or lanes_path (template lane mode)"
+        )
+    lane_mode = lanes_path is not None
+    grouping_file = Path(lanes_path if lane_mode else labels_path)
+    if not grouping_file.is_file():
+        raise ContractError(
+            f"{'lanes' if lane_mode else 'labels'} file not found: {grouping_file}"
+        )
+    label_merges: dict[str, Any] = {}
+    if lane_mode:
+        from .profile import load_lanes, rewrite_task_lanes
+
+        lanes = load_lanes(grouping_file)
+        labeled_rows, uncovered = rewrite_task_lanes(task_rows, lanes)
+    else:
+        labels = load_labels(grouping_file)
+        labeled_rows, label_merges, uncovered = rewrite_task_categories(
+            task_rows, labels, min_label_cases=spec.profile_config.min_label_cases
+        )
     labeled_tasks_path = write_tasks(labeled_rows, work_dir / "tasks-labeled.jsonl")
     labeled_tasks_hash = dataset_content_hash(labeled_tasks_path)
-    labels_hash = dataset_content_hash(labels_file)
+    labels_hash = dataset_content_hash(grouping_file)
     # Y4: the candidate arm's verdict must name the config it ran. The
     # candidate config is bound two ways before any arm is dispatched: the
     # local file's sha256 is recorded, and the router's management API

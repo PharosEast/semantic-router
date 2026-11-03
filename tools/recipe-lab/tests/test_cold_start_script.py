@@ -91,7 +91,7 @@ def test_script_covers_y1_model_eval_chain():
     candidates, auto-picks the winner from `ledger top` and patches verify
     copies so the Y4 hash check names the file the candidate router served."""
     text = _script_text()
-    # Y1 gate: frozen_test is observed through the seed config as well
+    # Y1 gate: frozen_test is observed through the grouping source as well
     assert 'OBSERVE_SPLITS="calib dev frozen_test"' in text
     # fixture inputs and validator override of the model_eval driver
     for token in (
@@ -114,3 +114,25 @@ def test_script_covers_y1_model_eval_chain():
         "--candidate-config",
     ):
         assert token in text
+
+
+def test_script_covers_template_mode():
+    """The default MODE=template path (sub-issue-8 §2.2) walks
+    observe-lanes -> profile --lanes -> bindings -> verify --lanes ->
+    bundle --bindings, and the legacy path keeps its explicit
+    --legacy-domain-template gate."""
+    text = _script_text()
+    for token in (
+        'MODE="${MODE:-template}"',
+        "observe-lanes",
+        "--lanes",
+        '"$RL/recipe-lab" bindings',
+        "--exclude-decision",
+        "BASELINE_CONFIG",
+        "BUNDLE_BINDINGS",
+        "--bindings $BUNDLE_BINDINGS",
+    ):
+        assert token in text, f"template path token missing: {token}"
+    # the legacy path stays gated behind the explicit flag
+    assert "bootstrap --legacy-domain-template" in text
+    assert "MODE=legacy" in text

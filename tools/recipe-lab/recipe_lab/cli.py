@@ -1762,6 +1762,7 @@ def cmd_bundle(args: argparse.Namespace) -> int:
         out_dir=args.out,
         config_path=args.config,
         skeleton_path=args.skeleton,
+        bindings_path=args.bindings,
         profile_path=args.profile,
         validate_bin=args.validate_bin,
         router_commit=args.router_commit,
@@ -1859,10 +1860,22 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 "model_eval_tasks and model_eval_tasks_sha256 (the "
                 "`cases to-model-eval` rendering) for the model_eval driver"
             )
-        if not args.labels:
+        if not args.labels and not getattr(args, "lanes", None):
             raise ContractError(
-                "the model_eval driver needs --labels (the C2 labels JSONL "
-                "for this split; the driver rewrites task categories from it)"
+                "the model_eval driver needs exactly one grouping source: "
+                "--labels (the C2 labels JSONL) or --lanes (the C2 lane-mode "
+                "lanes JSONL for this split; the driver rewrites task "
+                "categories from it)"
+            )
+        if args.labels and getattr(args, "lanes", None):
+            raise ContractError(
+                "pass --labels or --lanes, not both (the driver rewrites task "
+                "categories from exactly one grouping source)"
+            )
+        if getattr(args, "lanes", None) and spec.template is None:
+            raise ContractError(
+                "--lanes requires the spec's template section (lane mode is "
+                "the template path; sub-issue-8 §2.1)"
             )
         spec.require_dataset_file(
             args.tasks, what="--tasks", expected_hash=declared_tasks_hash
@@ -1887,6 +1900,7 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 spec=spec,
                 tasks_path=args.tasks,
                 labels_path=args.labels,
+                lanes_path=getattr(args, "lanes", None),
                 candidate_config=args.candidate_config,
                 baseline_endpoint=args.baseline_router_endpoint,
                 candidate_endpoint=args.candidate_router_endpoint,
@@ -3139,7 +3153,15 @@ def build_parser() -> argparse.ArgumentParser:
         "--labels",
         default=None,
         help="model_eval driver: the C2 labels-<split>.jsonl the driver "
-        "rewrites the task categories from (required for that driver)",
+        "rewrites the task categories from (legacy label mode) - exactly one "
+        "of --labels/--lanes for that driver",
+    )
+    p_verify.add_argument(
+        "--lanes",
+        default=None,
+        help="model_eval driver: the C2 lanes-<split>.jsonl the driver "
+        "rewrites the task categories from (template lane mode; requires the "
+        "spec's template section) - exactly one of --labels/--lanes",
     )
     p_verify.add_argument(
         "--candidate-config",
@@ -3306,8 +3328,17 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_bundle.add_argument(
         "--skeleton",
-        required=True,
-        help="scaffold config the candidate was completed from (config.diff source)",
+        default=None,
+        help="scaffold config the candidate was completed from (config.diff "
+        "source; legacy bootstrap sidecars only - exactly one of "
+        "--skeleton/--bindings)",
+    )
+    p_bundle.add_argument(
+        "--bindings",
+        default=None,
+        help="bindings YAML the template candidate was generated from "
+        "(bindings.yaml artifact; template bindings sidecars only - exactly "
+        "one of --skeleton/--bindings)",
     )
     p_bundle.add_argument(
         "--profile", required=True, help="C3 profile.json to archive in the bundle"
@@ -3315,8 +3346,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_bundle.add_argument(
         "--candidate-sidecar",
         required=True,
-        help="bootstrap provenance JSON of the candidate; its scaffold/profile "
-        "sha256 bind --skeleton/--profile to the evidence (Y4)",
+        help="candidate provenance JSON (bootstrap or bindings sidecar); its "
+        "recorded hashes bind the packaged inputs to the evidence (Y4)",
     )
     p_bundle.add_argument(
         "--validate-bin",
