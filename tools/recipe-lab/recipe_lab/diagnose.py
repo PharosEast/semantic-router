@@ -373,6 +373,190 @@ def load_diagnostic_rows(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
+def _agentic_evidence(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """AG4: the agentic evidence section, or None when the rows carry none.
+
+    Present when any row carries a session phase, an agent marker, a
+    session-policy block or a failed lifecycle - legacy single-turn rows
+    keep the historical diagnosis shape unchanged.
+    """
+    has_evidence = any(
+        row.get("phase")
+        or row.get("agent_id")
+        or isinstance(row.get("session_policy"), dict)
+        or str(row.get("lifecycle_state") or "") == "failed"
+        for row in rows
+    )
+    if not has_evidence:
+        return None
+    return {
+        "phase_distributions": phase_distributions(rows),
+        "agent_separation": agent_separation(rows),
+        "failures": failure_disclosure(rows),
+    }
+
+
+def phase_distributions(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """AG4: decision and signal distributions grouped by the arriving
+    request's session phase (user_turn / tool_loop / ...).
+
+    BUG-3's lesson: the pilot's difficulty statistics were computed over a
+    mixed-phase population, and tool-loop requests run difficulty visibly
+    lower - the mixed quantiles describe neither phase. This section only
+    splits the same facts per phase; judging remains the proposer's job.
+    Rows without a phase (records with no readable request body) stay out.
+    """
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        phase = str(row.get("phase") or "")
+        if phase:
+            groups.setdefault(phase, []).append(row)
+    phases: list[dict[str, Any]] = []
+    for phase in sorted(groups):
+        phase_rows = groups[phase]
+        decisions = Counter(
+            str(row.get("matched_decision") or "")
+            for row in phase_rows
+            if row.get("matched_decision")
+        )
+        values_by_signal: dict[str, list[float]] = {}
+        for row in phase_rows:
+            values = row.get("signal_values")
+            if not isinstance(values, dict):
+                continue
+            for key, value in values.items():
+                # score-type decision signals only (decision:<name>); the
+                # per-choice keys (decision:<name>:<choice>) ride the
+                # full-signal section unchanged
+                if _numeric(value) and key.startswith("decision:") and key.count(":") == 1:
+                    values_by_signal.setdefault(key, []).append(float(value))
+        signals: dict[str, Any] = {}
+        for key, values in sorted(values_by_signal.items()):
+            values.sort()
+            signals[key] = {
+                "n": len(values),
+                "p05": _num(percentile(values, 5)),
+                "p50": _num(percentile(values, 50)),
+                "p95": _num(percentile(values, 95)),
+            }
+        phases.append(
+            {
+                "phase": phase,
+                "requests": len(phase_rows),
+                "decisions": dict(sorted(decisions.items())),
+                "signals": signals,
+            }
+        )
+    return {"phases": phases}
+
+
+def _identity_missing(row: dict[str, Any]) -> bool:
+    """AG4: whether one judged row's protection identity is missing.
+
+    Only rows carrying a session-policy block are judged (the router
+    recorded its identity resolution); a missing conversation part or an
+    explicit status="missing" counts, rows without the block carry no
+    evidence either way.
+    """
+    policy = row.get("session_policy")
+    if not isinstance(policy, dict):
+        return False
+    identity = policy.get("identity")
+    if not isinstance(identity, dict):
+        return False
+    conversation = identity.get("conversation")
+    if isinstance(conversation, dict) and conversation.get("status"):
+        return conversation["status"] == "missing"
+    return True
+
+
+def agent_separation(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """AG4: do sub-agent requests keep their own protection identity?
+
+    An agent-marked request (record carries `agent_id`) that shares the
+    main conversation's identity - or carries none - is not kept separate:
+    conversation-scoped protection would fold the sub-agent's traffic into
+    the main agent's window. When no agent marker exists but identities are
+    missing outright, separate retention cannot hold either (the AG8
+    fixture case: the client sends no identity headers at all). With no
+    marker and every judged request identified, the check is unverifiable -
+    reported as a limitation, never asserted either way.
+    """
+    judged = [row for row in rows if isinstance(row.get("session_policy"), dict)]
+    agent_rows = [row for row in judged if row.get("agent_id")]
+    missing = [row for row in judged if _identity_missing(row)]
+    if agent_rows:
+        identities: dict[str, set[str]] = {}
+        for row in agent_rows:
+            session = row.get("session") if isinstance(row.get("session"), dict) else {}
+            conversation = str(
+                session.get("conversation_id") or session.get("session_id") or ""
+            )
+            identities.setdefault(conversation, set()).add(str(row["agent_id"]))
+        shared = sorted(
+            conversation
+            for conversation, markers in identities.items()
+            if len(markers) > 1
+        )
+        agent_missing = sum(1 for row in agent_rows if _identity_missing(row))
+        if shared or agent_missing:
+            return {
+                "status": "not_separate",
+                "agent_requests": len(agent_rows),
+                "shared_identity_conversations": shared,
+                "agent_requests_missing_identity": agent_missing,
+                "reason": (
+                    "agent-marked requests share the main conversation identity "
+                    f"({len(shared)} conversation(s)) or carry none "
+                    f"({agent_missing} request(s))"
+                ),
+            }
+        return {
+            "status": "separate",
+            "agent_requests": len(agent_rows),
+            "reason": "every agent-marked request carries its own identity",
+        }
+    if missing:
+        return {
+            "status": "not_separate",
+            "agent_requests": 0,
+            "requests_missing_identity": len(missing),
+            "reason": (
+                f"protection identity missing on {len(missing)} request(s); "
+                "sub-agents cannot keep a separate identity without one"
+            ),
+        }
+    return {
+        "status": "unverifiable",
+        "agent_requests": 0,
+        "reason": (
+            "no agent marker in the records (the router does not record agent "
+            "headers yet) and every judged request carries an identity"
+        ),
+    }
+
+
+def failure_disclosure(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """AG4: failed selections disclosed as facts (sub-6 P1).
+
+    A lifecycle_state=failed record is a rejected request (503 under
+    selection_rejected); the count and its terminal reasons belong in the
+    diagnosis so a protection misconfiguration is visible before any
+    proposal is made on top of it.
+    """
+    failed = [
+        row for row in rows if str(row.get("lifecycle_state") or "") == "failed"
+    ]
+    reasons = Counter(
+        str(row.get("terminal_reason") or "unknown") for row in failed
+    )
+    return {
+        "failed_requests": len(failed),
+        "terminal_reasons": dict(sorted(reasons.items())),
+        "selection_rejected": reasons.get("selection_rejected", 0),
+    }
+
+
 def build_diagnosis(
     rows: list[dict[str, Any]],
     config: dict[str, Any],
@@ -399,6 +583,7 @@ def build_diagnosis(
     )
     distribution = signal_distribution(rows, config)
     reachability = threshold_reachability(rows, config)
+    agentic = _agentic_evidence(rows)
 
     alerts: list[dict[str, Any]] = []
     for name in coverage["dead_decisions"]:
@@ -458,6 +643,7 @@ def build_diagnosis(
         "decision_coverage": coverage,
         "signal_distribution": distribution,
         "threshold_reachability": reachability,
+        **({"agentic": agentic} if agentic is not None else {}),
         # rl/04 `next --diagnosis` compatibility: the alerting subset only
         "dead_decisions": coverage["dead_decisions"],
         "rare_decisions": coverage["rare_decisions"],
@@ -606,4 +792,66 @@ def render_markdown(diagnosis: dict[str, Any]) -> str:
             )
     else:
         lines.append("- none (no rule-level predicate sites in the config)")
+
+    agentic = diagnosis.get("agentic")
+    if agentic:
+        lines += ["", "## Agentic session evidence", ""]
+        phases = (agentic.get("phase_distributions") or {}).get("phases", [])
+        if phases:
+            lines += [
+                "### Decisions by session phase",
+                "",
+                "| phase | requests | decisions |",
+                "|---|---|---|",
+            ]
+            for entry in phases:
+                decisions = ", ".join(
+                    f"`{name}`={count}" for name, count in entry["decisions"].items()
+                )
+                lines.append(
+                    f"| {entry['phase']} | {entry['requests']} | {decisions or '-'} |"
+                )
+            signal_keys = sorted(
+                {
+                    key
+                    for entry in phases
+                    for key in (entry.get("signals") or {})
+                }
+            )
+            for key in signal_keys:
+                lines += [
+                    "",
+                    f"### `{key}` by session phase",
+                    "",
+                    "| phase | n | p05 | p50 | p95 |",
+                    "|---|---|---|---|---|",
+                ]
+                for entry in phases:
+                    stats = (entry.get("signals") or {}).get(key)
+                    if stats is None:
+                        continue
+                    lines.append(
+                        f"| {entry['phase']} | {stats['n']} | {_fmt(stats['p05'])} "
+                        f"| {_fmt(stats['p50'])} | {_fmt(stats['p95'])} |"
+                    )
+        separation = agentic.get("agent_separation") or {}
+        lines += [
+            "",
+            "### Sub-agent separate retention",
+            "",
+            f"- status: **{separation.get('status', 'unverifiable')}**",
+            f"- {separation.get('reason', '')}",
+        ]
+        failures = agentic.get("failures") or {}
+        reason_text = ", ".join(
+            f"`{reason}`={count}" for reason, count in failures.get("terminal_reasons", {}).items()
+        )
+        lines += [
+            "",
+            "### Failed selections",
+            "",
+            f"- failed requests: {failures.get('failed_requests', 0)} "
+            f"(selection_rejected: {failures.get('selection_rejected', 0)})",
+            f"- terminal reasons: {reason_text or '-'}",
+        ]
     return "\n".join(lines) + "\n"
