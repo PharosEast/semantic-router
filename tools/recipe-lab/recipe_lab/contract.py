@@ -63,7 +63,7 @@ DEFAULT_MAX_EVIDENCE_PCT = 2.0
 # replay/propose work and may only be touched by live-verdict --final, once.
 SPLIT_NAMES = ("calib", "dev", "frozen_test")
 RUNNABLE_SPLITS = ("calib", "dev")
-TIERS = {"replay", "preview", "live"}
+TIERS = {"replay", "preview", "live", "route_replay"}
 CANDIDATE_KINDS = {"config", "artifact"}
 VERDICTS = {"PASS", "FAIL", "INCONCLUSIVE", "RANKED"}
 # Numeric predicate ops for oracle-policy conditions and truth facts, with
@@ -72,6 +72,13 @@ VERDICTS = {"PASS", "FAIL", "INCONCLUSIVE", "RANKED"}
 PREDICATE_OPS = ("gte", "lte", "gt", "lt")
 LIVE_VERDICTS = {"PASS", "FAIL", "INCONCLUSIVE"}
 REPLAY_VERDICTS = {"RANKED"}
+# AG3: how a case's truth label names evidence. "decision" labels ARE the
+# intended decision (the legacy F1 mapping); "behavior" labels describe an
+# observed outcome and only constrain the model route through the oracle
+# mapping (or F2 rules) - a behavior label can never ground a
+# decision_mismatch verdict.
+TRUTH_SPACES = {"decision", "behavior"}
+DEFAULT_TRUTH_SPACE = "decision"
 
 
 class ContractError(ValueError):
@@ -1098,9 +1105,12 @@ class OraclePolicy:
     mapping: dict[str, str] = field(default_factory=dict)
     rules: tuple[OracleRule, ...] = ()
     default: Expectation | None = None
+    # AG3: the truth namespace the mapping is written in (decision labels are
+    # intended decisions; behavior labels constrain the model route only).
+    truth_space: str = DEFAULT_TRUTH_SPACE
 
     @classmethod
-    def from_dict(cls, raw: Any) -> OraclePolicy:
+    def from_dict(cls, raw: Any, truth_space: str = DEFAULT_TRUTH_SPACE) -> OraclePolicy:
         _require(
             isinstance(raw, dict) and bool(raw),
             "attribution.oracle_policy must be a non-empty mapping",
@@ -1125,7 +1135,7 @@ class OraclePolicy:
                 if default_raw is not None
                 else None
             )
-            return cls(rules=rules, default=default)
+            return cls(rules=rules, default=default, truth_space=truth_space)
         for label, model in raw.items():
             _require(
                 isinstance(label, str) and label.strip(),
@@ -1135,7 +1145,7 @@ class OraclePolicy:
                 isinstance(model, str) and model.strip(),
                 f"oracle policy model for label {label!r} must be a non-empty string",
             )
-        return cls(mapping=dict(raw))
+        return cls(mapping=dict(raw), truth_space=truth_space)
 
     @staticmethod
     def _rule_from_dict(raw: Any, index: int) -> OracleRule:
@@ -1874,7 +1884,14 @@ class ExperimentSpec:
         )
         workloads = _parse_workloads(raw)
         attribution = _require_mapping(raw.get("attribution", {}), "attribution")
-        oracle_policy = OraclePolicy.from_dict(attribution.get("oracle_policy"))
+        truth_space = attribution.get("truth_space", DEFAULT_TRUTH_SPACE)
+        _require(
+            truth_space in TRUTH_SPACES,
+            f"attribution.truth_space must be one of {sorted(TRUTH_SPACES)}",
+        )
+        oracle_policy = OraclePolicy.from_dict(
+            attribution.get("oracle_policy"), truth_space=truth_space
+        )
         gates_raw = raw.get("gates", [])
         _require(isinstance(gates_raw, list), "gates must be a list")
         gates = tuple(Gate.from_dict(g, i) for i, g in enumerate(gates_raw))
@@ -2217,7 +2234,15 @@ class ExperimentSpec:
                 if len(self.workloads) == 1
                 else [w.to_dict() for w in self.workloads]
             ),
-            "attribution": {"oracle_policy": self.oracle_policy.to_dict()},
+            "attribution": {
+                "oracle_policy": self.oracle_policy.to_dict(),
+                # round-trip stability: the default namespace serializes nothing
+                **(
+                    {"truth_space": self.oracle_policy.truth_space}
+                    if self.oracle_policy.truth_space != DEFAULT_TRUTH_SPACE
+                    else {}
+                ),
+            },
             "gates": [g.to_dict() for g in self.gates],
             "budget": self.budget.to_dict(),
         }

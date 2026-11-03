@@ -363,6 +363,13 @@ def _expectation_for(case: CaseInput, policy: OraclePolicy) -> Expectation | Non
     expected_model = policy.expected(case.truth)
     if expected_model is None:
         return None
+    if policy.truth_space == "behavior":
+        # AG3: a behavior label names an observed outcome, not an intended
+        # decision. The oracle mapping (or the F2 rules, which the caller
+        # declared instead of a bare mapping) constrains the model route
+        # only, so the label itself can never ground a decision_mismatch;
+        # an unmapped behavior label stays policy_gap (None above).
+        return Expectation(decision="", models=(expected_model,))
     return Expectation(decision=case.truth, models=(expected_model,))
 
 

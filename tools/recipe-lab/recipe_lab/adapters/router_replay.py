@@ -413,30 +413,51 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     One row per record, including records without a prompt: coverage and
     distribution diagnostics want every request, not only labeled ones.
-    Never raises on skip reasons; callers that need the labeled join should
-    use records_to_cases instead.
+    Rows carry the same session / lifecycle / timeline evidence as the
+    labeled join (session attribution and the AG3 route-replay tier order
+    conversations by them). Never raises on skip reasons; callers that need
+    the labeled join should use records_to_cases instead.
     """
     rows: list[dict[str, Any]] = []
     for record in records:
         prompt = _record_field(record, "prompt", "Prompt")
-        rows.append(
-            {
-                "request_id": str(
-                    _record_field(record, "request_id", "RequestID") or ""
-                ),
-                "matched_decision": _record_field(record, "decision", "Decision") or "",
-                "routed": _record_field(record, "selected_model", "SelectedModel")
-                or "",
-                "prompt": prompt if isinstance(prompt, str) else "",
-                "signal_values": _record_field(record, "signal_values", "SignalValues")
-                or {},
-                "signal_confidences": _record_field(
-                    record, "signal_confidences", "SignalConfidences"
-                )
-                or {},
-                "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
-            }
-        )
+        row = {
+            "request_id": str(
+                _record_field(record, "request_id", "RequestID") or ""
+            ),
+            "matched_decision": _record_field(record, "decision", "Decision") or "",
+            "routed": _record_field(record, "selected_model", "SelectedModel")
+            or "",
+            "prompt": prompt if isinstance(prompt, str) else "",
+            "signal_values": _record_field(record, "signal_values", "SignalValues")
+            or {},
+            "signal_confidences": _record_field(
+                record, "signal_confidences", "SignalConfidences"
+            )
+            or {},
+            "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
+        }
+        record_ts = _record_field(record, "timestamp", "Timestamp")
+        if record_ts is not None:
+            row["record_ts"] = str(record_ts)
+        lifecycle_state = _record_field(record, "lifecycle_state", "LifecycleState")
+        if lifecycle_state:
+            row["lifecycle_state"] = str(lifecycle_state)
+        terminal_reason = _record_field(record, "terminal_reason", "TerminalReason")
+        if terminal_reason:
+            row["terminal_reason"] = str(terminal_reason)
+        session_evidence = {
+            "conversation_id": _record_field(record, "conversation_id", "ConversationID"),
+            "session_id": _record_field(record, "session_id", "SessionID"),
+            "turn_index": _record_field(record, "turn_index", "TurnIndex"),
+            "session_action": _record_field(record, "session_action", "SessionAction"),
+            "selection_reasoning": _record_field(
+                record, "selection_reasoning", "SelectionReasoning"
+            ),
+        }
+        if any(value is not None for value in session_evidence.values()):
+            row["session"] = {k: v for k, v in session_evidence.items() if v is not None}
+        rows.append(row)
     return rows
 
 

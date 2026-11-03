@@ -32,6 +32,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -116,12 +117,21 @@ from .runner import (
     RunnerError,
     RunnerTimeoutError,
     attribution_delta,
+    candidate_tag,
     evaluate_candidate,
+    evaluate_route_replay,
     replay_constraint_evidence,
     replay_metric_value,
     routed_cost_index,
 )
+from .contract import DEFAULT_AGENTIC_GATES
 from .session_attribution import write_session_report
+from .session_cases import (
+    DEFAULT_DUPLICATE_WARN_PCT,
+    GRANULARITIES,
+    cases_from_replays,
+    load_route_cases,
+)
 from .splitting import (
     default_split_rule,
     load_cases,
@@ -239,6 +249,71 @@ def cmd_cases_to_srbench(args: argparse.Namespace) -> int:
             "output": str(output),
             "cases_count": len(rows),
             "srbench_sha256": dataset_content_hash(output),
+        }
+    )
+    return 0
+
+
+def cmd_cases_from_replays(args: argparse.Namespace) -> int:
+    """AG3: productize the J3 rebuild - replay records -> route-replay cases
+    at an explicit granularity, dedup rules written into provenance."""
+    try:
+        records = [
+            json.loads(line)
+            for line in Path(args.records).read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ContractError(f"cannot read records: {exc}") from exc
+    granularity = args.granularity
+    if granularity is None:
+        # agentic sources default to the session granularity; records without
+        # conversation identities fall back to the J3 prompt convention
+        has_identity = any(
+            isinstance(r, dict)
+            and (
+                isinstance(r.get("conversation_id"), str)
+                or isinstance(r.get("session_id"), str)
+            )
+            and (r.get("conversation_id") or r.get("session_id"))
+            for r in records
+        )
+        granularity = "session" if has_identity else "prompt"
+    cases, provenance = cases_from_replays(
+        records,
+        granularity,
+        duplicate_warn_pct=args.duplicate_warn_pct,
+    )
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with output.open("w", encoding="utf-8") as fh:
+        for case in cases:
+            fh.write(json.dumps(case, ensure_ascii=False, sort_keys=True) + "\n")
+    provenance_path = (
+        Path(args.provenance) if args.provenance else output.with_suffix(".provenance.json")
+    )
+    provenance_path.parent.mkdir(parents=True, exist_ok=True)
+    provenance_path.write_text(
+        json.dumps(provenance, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    if provenance["duplicate_warning"]:
+        print(
+            f"[cases] WARNING: duplicate share {provenance['duplicate_pct']}% exceeds "
+            f"{args.duplicate_warn_pct:g}% at granularity {granularity!r}; consider a "
+            "coarser granularity",
+            file=sys.stderr,
+        )
+    _print_json(
+        {
+            "records": str(args.records),
+            "output": str(output),
+            "provenance": str(provenance_path),
+            "granularity": granularity,
+            "cases_count": len(cases),
+            "duplicate_pct": provenance["duplicate_pct"],
+            "cases_sha256": "sha256:"
+            + hashlib.sha256(output.read_bytes()).hexdigest(),
         }
     )
     return 0
@@ -1157,7 +1232,177 @@ def _candidate_entry(
     }
 
 
+def cmd_run_route_replay(args: argparse.Namespace) -> int:
+    """AG3: the route-replay tier - recorded sessions replayed per candidate
+    for routing evidence only (RANKED or gate-violated records; no PASS/FAIL
+    and no quality metric, because the recorded history cannot change with
+    the candidate)."""
+    spec = _load_spec(args.spec)
+    if args.round > spec.budget.rounds:
+        raise ContractError(
+            f"budget exhausted: round {args.round} > budget.rounds {spec.budget.rounds}"
+        )
+    cases = load_route_cases(args.cases)
+    cases_hash = "sha256:" + hashlib.sha256(
+        Path(args.cases).read_bytes()
+    ).hexdigest()
+    candidates = _resolve_candidates(args.candidates)
+    if not candidates:
+        _fail(f"no candidate configs found: {args.candidates}")
+    rejected: list[dict] = []
+    if args.validate:
+        kept: list[Path] = []
+        for path in candidates:
+            reason = validate_config(path, args.validate_bin)
+            if reason is None:
+                kept.append(path)
+            else:
+                rejected.append({"path": str(path), "reason": reason})
+                print(f"[run] rejected {path.name}: {reason}", file=sys.stderr)
+        candidates = kept
+    output_dir = Path(args.output_dir)
+    ledger = Ledger(args.ledger)
+    env = RunnerEnv(
+        router_bin=args.router_bin,
+        mock_backend_script=args.mock_backend,
+        python_bin=args.python_bin,
+        work_dir=output_dir,
+        backend_port=args.backend_port,
+        ready_timeout_s=args.ready_timeout,
+        hf_home=args.hf_home,
+        mock_extra_args=(
+            tuple(args.mock_extra_args.split()) if args.mock_extra_args else ()
+        ),
+        reload_mode="restart",
+        api_key_env=args.api_key_env,
+    )
+    trial_timeout_s = spec.budget.max_minutes_per_trial * 60
+    agentic_workload = next(
+        (w for w in spec.workloads if w.kind == "agentic"), None
+    )
+    gates = (
+        agentic_workload.resolved_agentic_gates()
+        if agentic_workload is not None
+        else DEFAULT_AGENTIC_GATES
+    )
+    cost_model = spec.cost_model
+    strong_model = getattr(args, "strong_model", None)
+
+    baseline_events: dict[str, int] | None = None
+    if args.baseline_config:
+        print(
+            f"[run] route-replay baseline: {args.baseline_config}", file=sys.stderr
+        )
+        baseline = evaluate_route_replay(
+            candidate_config=args.baseline_config,
+            cases=cases,
+            env=env,
+            router_model=args.router_model,
+            request_timeout=180.0,
+            trial_timeout_s=trial_timeout_s,
+            request_id_prefix=f"rl-rt-{candidate_tag(str(args.baseline_config))}-",
+            gates=gates,
+            cost_model=cost_model,
+            strong_model=strong_model,
+        )
+        baseline_events = {
+            "selection_failed": baseline["summary"]["selection_rejected"],
+            "tool_loop_interrupted": baseline["summary"]["tool_loop_interrupted"],
+        }
+
+    appended = []
+    for index, candidate_path in enumerate(candidates, 1):
+        print(f"[run] candidate {index}/{len(candidates)}: {candidate_path}", file=sys.stderr)
+        entry = _candidate_entry(candidate_path, args.proposer, index, len(candidates))
+        tag = candidate_tag(str(candidate_path))
+        try:
+            result = evaluate_route_replay(
+                candidate_config=candidate_path,
+                cases=cases,
+                env=env,
+                router_model=args.router_model,
+                trial_timeout_s=trial_timeout_s,
+                request_id_prefix=f"rl-rt-{tag}-",
+                gates=gates,
+                baseline_events=baseline_events,
+                cost_model=cost_model,
+                strong_model=strong_model,
+            )
+        except RunnerTimeoutError as exc:
+            ledger.append(
+                LedgerRecord(
+                    round=args.round,
+                    ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    candidate=entry,
+                    tier="route_replay",
+                    baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
+                    metrics={},
+                    verdict="RANKED",
+                    dataset_hash=cases_hash,
+                    reasons=[f"trial timeout: {exc}"],
+                    gates={name: "not_evaluated" for name in gates},
+                    bench_refs=[],
+                    coverage_warning=True,
+                    notes="",
+                    status="timeout",
+                )
+            )
+            print(f"[run] {candidate_path.name}: TRIAL TIMEOUT -> ledger", file=sys.stderr)
+            continue
+        except (RunnerError, ContractError, OSError) as exc:
+            _fail(f"route-replay evaluation failed for {candidate_path}: {exc}")
+        summary = result["summary"]
+        gate_results = result["gate_results"]
+        gate_status = {
+            g.name: ("pass" if g.passed else ("incomplete" if not g.evaluated else "fail"))
+            for g in gate_results
+        }
+        violated = any(g.evaluated and not g.passed for g in gate_results)
+        reasons = list(result["reasons"])
+        for g in gate_results:
+            if g.evaluated and not g.passed:
+                reasons.append(
+                    f"agentic stability gate exceeded ({g.name}: {g.value:g} > bound {g.bound:g})"
+                )
+        metrics: dict = {}
+        if summary["cost_index"] is not None:
+            metrics[COST_PROXY_METRIC] = summary["cost_index"]
+        record = LedgerRecord(
+            round=args.round,
+            ts=time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            candidate=entry,
+            tier="route_replay",
+            baseline_ref=spec.stack.baseline_ref if spec.stack else "unknown",
+            metrics=metrics,
+            verdict="RANKED",
+            dataset_hash=cases_hash,
+            reasons=reasons,
+            gates=gate_status,
+            bench_refs=[],
+            coverage_warning=any(
+                status == "incomplete" for status in gate_status.values()
+            ),
+            notes="routing-evidence=" + json.dumps(summary, ensure_ascii=False, sort_keys=True),
+            status="gate-violated" if violated else None,
+        )
+        ledger.append(record)
+        appended.append(entry["name"] if isinstance(entry, dict) else str(entry))
+        marker = "GATE-VIOLATED" if violated else "RANKED"
+        print(f"[run] {candidate_path.name}: {marker} -> ledger", file=sys.stderr)
+    _print_json(
+        {
+            "tier": "route_replay",
+            "evaluated": len(candidates),
+            "rejected": rejected,
+            "recorded": appended,
+        }
+    )
+    return 0
+
+
 def cmd_run(args: argparse.Namespace) -> int:
+    if args.tier == "route-replay":
+        return cmd_run_route_replay(args)
     spec = _load_spec(args.spec)
     # A5 budget gate: rounds beyond the contract are refused up front.
     if args.round > spec.budget.rounds:
@@ -2151,6 +2396,40 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_toeval.set_defaults(func=cmd_cases_to_model_eval)
 
+    p_fromreplays = cases_sub.add_parser(
+        "from-replays",
+        help="AG3: build route-replay cases from router replay records "
+        "(--granularity session|prompt|request; dedup rules into provenance; "
+        "duplicate share above 50 percent warns)",
+    )
+    p_fromreplays.add_argument(
+        "--records", required=True, help="router replay records JSONL"
+    )
+    p_fromreplays.add_argument(
+        "--granularity",
+        default=None,
+        choices=list(GRANULARITIES),
+        help="case granularity (default: session when the records carry "
+        "conversation identities, else prompt - the J3 convention)",
+    )
+    p_fromreplays.add_argument(
+        "--output", required=True, help="output route-replay cases JSONL path"
+    )
+    p_fromreplays.add_argument(
+        "--provenance",
+        default=None,
+        help="output provenance JSON path (dedup rules and their effects); "
+        "default: <output>.provenance.json",
+    )
+    p_fromreplays.add_argument(
+        "--duplicate-warn-pct",
+        type=float,
+        default=DEFAULT_DUPLICATE_WARN_PCT,
+        help="duplicate-share warning threshold in percent "
+        f"(default {DEFAULT_DUPLICATE_WARN_PCT})",
+    )
+    p_fromreplays.set_defaults(func=cmd_cases_from_replays)
+
     p_observe = sub.add_parser(
         "observe-labels",
         help="observe the router's own domain labels for a split (C2: seed "
@@ -2927,8 +3206,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument(
         "--tier",
         default="replay",
-        choices=["replay"],
-        help="replay tier (RANKED records); live tier uses the live-verdict command",
+        choices=["replay", "route-replay"],
+        help="replay tier (answer bank, RANKED records) or route-replay tier (AG3: recorded "
+        "sessions replayed for routing evidence only; live tier uses the live-verdict command)",
     )
     p_run.add_argument("--spec", required=True, help="experiment spec YAML")
     p_run.add_argument("--cases", required=True, help="labeled case list JSONL")
@@ -2944,7 +3224,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="workload from spec.workloads to replay on (default: the first workload; "
         "transfer workloads are quarantined; M5)",
     )
-    p_run.add_argument("--bank", required=True, help="answer bank JSONL")
+    p_run.add_argument(
+        "--bank",
+        default=None,
+        help="answer bank JSONL (replay tier; unused on the route-replay tier)",
+    )
     p_run.add_argument(
         "--candidates",
         required=True,
@@ -2991,6 +3275,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--python-bin", default=sys.executable, help="python used to launch the backend"
     )
     p_run.add_argument("--router-model", default="vllm-sr/auto")
+    p_run.add_argument(
+        "--strong-model",
+        default=None,
+        help="route-replay tier: model name for the strong-model share (from the model_cards/cost_model naming)",
+    )
     p_run.add_argument("--family", default="d3")
     p_run.add_argument("--backend-port", type=int, default=8000)
     p_run.add_argument(
@@ -3276,7 +3565,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_show = ledger_sub.add_parser("show", help="list ledger records with filters")
     p_show.add_argument("--file", required=True, help="path to the ledger JSONL")
-    p_show.add_argument("--tier", choices=["replay", "preview", "live"], default=None)
+    p_show.add_argument(
+        "--tier", choices=["replay", "route_replay", "preview", "live"], default=None
+    )
     p_show.add_argument(
         "--verdict", choices=["PASS", "FAIL", "INCONCLUSIVE", "RANKED"], default=None
     )

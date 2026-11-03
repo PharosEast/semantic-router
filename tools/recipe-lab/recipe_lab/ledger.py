@@ -182,9 +182,9 @@ def validate_record(raw: dict) -> None:
     if tier not in TIERS:
         raise ContractError(f"tier must be one of {sorted(TIERS)}, got {tier!r}")
     verdict = raw["verdict"]
-    if tier == "replay" and verdict not in REPLAY_VERDICTS:
+    if tier in ("replay", "route_replay") and verdict not in REPLAY_VERDICTS:
         raise ContractError(
-            f"replay-tier records must use RANKED verdict (got {verdict!r}); "
+            f"{tier}-tier records must use RANKED verdict (got {verdict!r}); "
             "unverified numbers must not look like conclusions"
         )
     if tier == "live" and verdict not in LIVE_VERDICTS:
