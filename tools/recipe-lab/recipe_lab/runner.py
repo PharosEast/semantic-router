@@ -68,10 +68,14 @@ from .adapters.router_replay import (
     fetch_replays,
     records_to_cases,
     records_to_cases_by_request_id,
+    records_to_rows,
 )
+from .agentic import agentic_gate_results
 from .attribution import CaseInput, attribute, summarize
 from .bank import apply_bank
 from .contract import ContractError, OraclePolicy
+from .session_attribution import analyze_sessions, ordered_sessions
+from .session_cases import TOOL_LOOP_PHASE
 from .verdict import resolve_constraint
 
 
@@ -250,6 +254,23 @@ def _send_prompt(
         return int(exc.code)
 
 
+def _stop_procs(procs: list[subprocess.Popen]) -> None:
+    """Terminate a booted stack: SIGTERM the process groups, then SIGKILL
+    whatever survived (the spawned model runtime dies with its group)."""
+    for proc in procs:
+        try:
+            os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
+        except (ProcessLookupError, PermissionError):
+            with contextlib.suppress(ProcessLookupError):
+                proc.terminate()
+    for proc in procs:
+        try:
+            proc.wait(timeout=15)
+        except subprocess.TimeoutExpired:
+            with contextlib.suppress(ProcessLookupError, PermissionError):
+                os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+
+
 def probe_records(
     env: RunnerEnv,
     config: str | Path,
@@ -393,18 +414,7 @@ def probe_records(
         timings["fetch_s"] = time.monotonic() - fetch_started
         return records, statuses, timings
     finally:
-        for proc in procs:
-            try:
-                os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
-            except (ProcessLookupError, PermissionError):
-                with contextlib.suppress(ProcessLookupError):
-                    proc.terminate()
-        for proc in procs:
-            try:
-                proc.wait(timeout=15)
-            except subprocess.TimeoutExpired:
-                with contextlib.suppress(ProcessLookupError, PermissionError):
-                    os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+        _stop_procs(procs)
 
 
 def evaluate_candidate(
@@ -460,6 +470,352 @@ def evaluate_candidate(
         "join_stats": join_stats,
         "bank_stats": bank_stats,
         "timings": timings,
+        "reload": "restart",
+    }
+
+
+def _post_messages(
+    router_url: str,
+    model: str,
+    messages: list[Any],
+    timeout: float,
+    request_id: str | None = None,
+    session_identity: str | None = None,
+) -> int:
+    """Send one recorded request through the router, identity headers on.
+
+    The route-replay tier replays a conversation in order, so every request
+    carries the conversation's `x-session-id` and `x-conversation-id`
+    (conversation-scoped protection binds to both, see AG1/W1) plus the
+    candidate-scoped `x-request-id` the replay store keeps verbatim.
+    """
+    body = json.dumps(
+        {"model": model, "max_tokens": 64, "messages": messages}
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if request_id:
+        headers["x-request-id"] = request_id
+    if session_identity:
+        headers["x-session-id"] = session_identity
+        headers["x-conversation-id"] = session_identity
+    request = urllib.request.Request(
+        router_url + "/v1/chat/completions",
+        data=body,
+        headers=headers,
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return int(response.status)
+    except urllib.error.HTTPError as exc:
+        return int(exc.code)
+
+
+def probe_route_replay(
+    env: RunnerEnv,
+    config: str | Path,
+    cases: list[dict[str, Any]],
+    *,
+    router_model: str = "vllm-sr/auto",
+    request_timeout: float = 180.0,
+    trial_timeout_s: float | None = None,
+    request_id_prefix: str | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, int], dict[str, float]]:
+    """The route-replay probe primitive (AG3): boot the stack once, replay
+    every session case's request sequence in order with the original
+    identity headers, pull this candidate's replay records, stop the stack.
+
+    Session cases carry `requests` (recorded message lists, replay order);
+    single-request cases carry `prompt`. The recorded history is fixed - a
+    changed candidate cannot alter later requests - so the pulled records
+    measure routing only, never quality. Records are filtered to this
+    probe's `x-request-id` prefix when one is given (the replay store has
+    no delete endpoint). Returns (records, statuses, timings).
+    """
+    env.work_dir.mkdir(parents=True, exist_ok=True)
+    patched_config, router_port, management_port = _patch_ports(
+        Path(config), env.work_dir
+    )
+    management_url = f"http://127.0.0.1:{management_port}"
+    router_url = f"http://127.0.0.1:{router_port}"
+    deadline = (
+        time.monotonic() + trial_timeout_s if trial_timeout_s is not None else None
+    )
+
+    def check_deadline(stage: str) -> None:
+        if deadline is not None and time.monotonic() > deadline:
+            raise RunnerTimeoutError(
+                f"trial exceeded {trial_timeout_s:.0f}s budget before {stage}"
+            )
+
+    procs: list[subprocess.Popen] = []
+    timings = {"switch_s": 0.0, "request_s": 0.0, "fetch_s": 0.0}
+    try:
+        status_file = patched_config.parent / "router-runtime.json"
+        if status_file.exists():
+            status_file.unlink(missing_ok=True)
+        switch_started = time.monotonic()
+        mock = subprocess.Popen(
+            [
+                env.python_bin,
+                env.mock_backend_script,
+                "--port",
+                str(env.backend_port),
+                *env.mock_extra_args,
+            ],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+        procs.append(mock)
+        time.sleep(1.0)
+        router_env = dict(os.environ)
+        if env.hf_home:
+            router_env["HF_HOME"] = env.hf_home
+        router_env.update(env.env_extra)
+        router = subprocess.Popen(
+            [
+                env.router_bin,
+                "-config",
+                str(patched_config),
+                "-gateway",
+                "standalone",
+                "-api-port",
+                str(management_port),
+            ],
+            stdout=open(  # noqa: SIM115
+                Path(env.work_dir) / "router.log", "w", encoding="utf-8"
+            ),
+            stderr=subprocess.STDOUT,
+            env=router_env,
+            start_new_session=True,
+        )
+        procs.append(router)
+        _wait_model_runtime_ready(
+            management_url, env.ready_timeout_s, router, status_file=status_file
+        )
+        timings["switch_s"] = time.monotonic() - switch_started
+
+        statuses: dict[str, int] = {}
+        request_started = time.monotonic()
+        for case in cases:
+            identity = str(case.get("session_id") or case["case_id"])
+            if isinstance(case.get("requests"), list):
+                requests = case["requests"]
+            else:
+                requests = [
+                    {
+                        "messages": [
+                            {"role": "user", "content": case["prompt"]},
+                        ]
+                    }
+                ]
+            for index, request in enumerate(requests):
+                check_deadline(f"case {case['case_id']} request {index}")
+                request_id = (
+                    None
+                    if request_id_prefix is None
+                    else f"{request_id_prefix}{case['case_id']}-{index}"
+                )
+                statuses[f"{case['case_id']}-{index}"] = _post_messages(
+                    router_url,
+                    router_model,
+                    request["messages"],
+                    request_timeout,
+                    request_id=request_id,
+                    session_identity=identity,
+                )
+        timings["request_s"] = time.monotonic() - request_started
+
+        check_deadline("replay fetch")
+        fetch_started = time.monotonic()
+        records = fetch_replays(management_url, api_key_env=env.api_key_env)
+        if request_id_prefix is not None:
+            records = [
+                record
+                for record in records
+                if str(record.get("request_id") or "").startswith(request_id_prefix)
+            ]
+        timings["fetch_s"] = time.monotonic() - fetch_started
+        return records, statuses, timings
+    finally:
+        _stop_procs(procs)
+
+
+def route_replay_phases(
+    cases: list[dict[str, Any]], request_id_prefix: str
+) -> dict[str, str]:
+    """Map each replayed request id to its phase (the arriving request's
+    position in its conversation: user turn vs tool loop), computed from the
+    cases' own recorded messages (the replay record carries no phase)."""
+    phases: dict[str, str] = {}
+    for case in cases:
+        if isinstance(case.get("requests"), list):
+            for index, request in enumerate(case["requests"]):
+                phases[f"{request_id_prefix}{case['case_id']}-{index}"] = str(
+                    request.get("phase") or ""
+                )
+        else:
+            phases[f"{request_id_prefix}{case['case_id']}-0"] = ""
+    return phases
+
+
+def route_replay_evidence(
+    records: list[dict[str, Any]],
+    *,
+    phases_by_request_id: dict[str, str],
+    gates: dict[str, Any] | None = None,
+    baseline_events: dict[str, int] | None = None,
+    cost_model: dict[str, float] | None = None,
+    strong_model: str | None = None,
+) -> dict[str, Any]:
+    """AG3: routing evidence from one candidate's replay records.
+
+    The recorded history is fixed, so this is routing evidence only - no
+    quality claim is derivable. Carries the session attribution (lane
+    flaps, rejected selections, interrupted tool loops), the tool-loop
+    switch count (adjacent routed-model changes whose arriving request sat
+    in the tool-loop phase), the per-session switch average, the model
+    share distribution, the first-turn decision distribution, the optional
+    strong-model share and the cost proxy over the routed models.
+
+    `gates` (an `agentic_gates` mapping) resolves through AG7's
+    `agentic_gate_results` against this evidence; the baseline arm's event
+    counts anchor a `baseline` interruption bound.
+    """
+    rows = records_to_rows(records)
+    analysis = analyze_sessions(rows)
+    tool_loop_switches = 0
+    for requests in ordered_sessions(rows).values():
+        routed = [row for row in requests if str(row.get("routed") or "")]
+        for previous, current in zip(routed, routed[1:]):
+            phase = phases_by_request_id.get(str(current.get("request_id") or ""))
+            if phase == TOOL_LOOP_PHASE and previous.get("routed") != current.get(
+                "routed"
+            ):
+                tool_loop_switches += 1
+    multi_request = [
+        session for session in analysis["sessions"] if session["requests_recorded"] > 1
+    ]
+    mean_switches = (
+        analysis["event_counts"]["lane_flap"] / len(multi_request)
+        if multi_request
+        else None
+    )
+    model_counts: dict[str, int] = {}
+    for row in rows:
+        model = str(row.get("routed") or "")
+        if model:
+            model_counts[model] = model_counts.get(model, 0) + 1
+    routed_total = sum(model_counts.values())
+    model_shares = (
+        {model: count / routed_total for model, count in sorted(model_counts.items())}
+        if routed_total
+        else {}
+    )
+    first_turn_decisions: dict[str, int] = {}
+    for requests in ordered_sessions(rows).values():
+        decision = str(requests[0].get("matched_decision") or "") if requests else ""
+        if decision:
+            first_turn_decisions[decision] = first_turn_decisions.get(decision, 0) + 1
+    strong_share: float | None = None
+    if strong_model and routed_total:
+        strong_share = model_counts.get(strong_model, 0) / routed_total
+    cost_index: float | None = None
+    cost_unknown: list[str] = []
+    if cost_model:
+        costs: list[float] = []
+        unknown: set[str] = set()
+        for row in rows:
+            model = str(row.get("routed") or "")
+            if not model:
+                continue
+            entry = cost_model.get(model)
+            if entry is None:
+                unknown.add(model)
+            else:
+                costs.append(float(entry))
+        if unknown or not costs:
+            cost_unknown = sorted(unknown)
+        else:
+            cost_index = round(sum(costs) / len(costs), 6)
+    summary = {
+        "records": len(records),
+        "sessions": len(analysis["sessions"]),
+        "model_switches": analysis["event_counts"]["lane_flap"],
+        "tool_loop_switches": tool_loop_switches,
+        "selection_rejected": analysis["event_counts"]["selection_failed"],
+        "tool_loop_interrupted": analysis["event_counts"]["tool_loop_interrupted"],
+        "mean_switches_per_session": mean_switches,
+        "model_shares": model_shares,
+        "first_turn_decisions": dict(sorted(first_turn_decisions.items())),
+        "strong_model_share": strong_share,
+        "cost_index": cost_index,
+    }
+    reasons: list[str] = []
+    if cost_unknown:
+        reasons.append(
+            "cost proxy incomplete: routed model(s) not in cost_model: "
+            + ", ".join(cost_unknown)
+        )
+    gate_results = agentic_gate_results(
+        gates or {},
+        candidate_continuity={
+            "model_switches_by_phase": {TOOL_LOOP_PHASE: tool_loop_switches},
+            "mean_switches_per_task": mean_switches,
+        },
+        candidate_events=analysis["event_counts"],
+        baseline_events=baseline_events,
+    )
+    return {
+        "summary": summary,
+        "gate_results": gate_results,
+        "reasons": reasons,
+        "analysis": analysis,
+    }
+
+
+def evaluate_route_replay(
+    *,
+    candidate_config: str | Path,
+    cases: list[dict[str, Any]],
+    env: RunnerEnv,
+    router_model: str = "vllm-sr/auto",
+    request_timeout: float = 180.0,
+    trial_timeout_s: float | None = None,
+    request_id_prefix: str | None = None,
+    gates: dict[str, Any] | None = None,
+    baseline_events: dict[str, int] | None = None,
+    cost_model: dict[str, float] | None = None,
+    strong_model: str | None = None,
+) -> dict[str, Any]:
+    """AG3: one candidate on the route-replay tier - boot the stack, replay
+    the recorded sessions in order, and turn the pulled records into routing
+    evidence and stability-gate results. No quality metric is produced:
+    the recorded history cannot change with the candidate."""
+    records, statuses, timings = probe_route_replay(
+        env,
+        candidate_config,
+        cases,
+        router_model=router_model,
+        request_timeout=request_timeout,
+        trial_timeout_s=trial_timeout_s,
+        request_id_prefix=request_id_prefix,
+    )
+    evidence = route_replay_evidence(
+        records,
+        phases_by_request_id=route_replay_phases(cases, request_id_prefix or ""),
+        gates=gates,
+        baseline_events=baseline_events,
+        cost_model=cost_model,
+        strong_model=strong_model,
+    )
+    return {
+        "summary": evidence["summary"],
+        "gate_results": evidence["gate_results"],
+        "reasons": evidence["reasons"],
+        "statuses": statuses,
+        "timings": timings,
+        "records_count": len(records),
         "reload": "restart",
     }
 

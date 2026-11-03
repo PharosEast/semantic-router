@@ -104,6 +104,29 @@ def _event(
     return event
 
 
+def ordered_sessions(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any]]]:
+    """Group attribution rows into conversations in replay order (AG3).
+
+    The AG3 route-replay tier and `analyze_sessions` share one ordering:
+    rows keyed by conversation identity (conversation_id, else session_id),
+    requests sorted by (turn_index, record_ts, request_id). Rows without a
+    conversation identity are dropped here (single-turn attribution owns
+    them). Deterministic: same rows -> same mapping.
+    """
+    sessions: dict[str, list[dict[str, Any]]] = {}
+    for row in rows:
+        key = _conversation_key(row)
+        if key is None:
+            continue
+        sessions.setdefault(key, []).append(row)
+    for key in sessions:
+        sessions[key] = sorted(
+            (row for row in sessions[key] if _turn_index(row) is not None),
+            key=_request_order,
+        )
+    return sessions
+
+
 def analyze_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
     """Aggregate attribution rows into per-conversation agentic evidence.
 
@@ -111,22 +134,13 @@ def analyze_sessions(rows: list[dict[str, Any]]) -> dict[str, Any]:
     (the single-turn attribution owns them). Deterministic output: sessions
     sorted by key, requests by (turn_index, record_ts, request_id).
     """
-    sessions: dict[str, list[dict[str, Any]]] = {}
-    single_turn = 0
-    for row in rows:
-        key = _conversation_key(row)
-        if key is None:
-            single_turn += 1
-            continue
-        sessions.setdefault(key, []).append(row)
+    sessions = ordered_sessions(rows)
+    single_turn = sum(1 for row in rows if _conversation_key(row) is None)
 
     events: list[dict[str, Any]] = []
     session_summaries: list[dict[str, Any]] = []
     for conversation in sorted(sessions):
-        requests = sorted(
-            (row for row in sessions[conversation] if _turn_index(row) is not None),
-            key=_request_order,
-        )
+        requests = sessions[conversation]
         lane_flaps = 0
         selection_failures = 0
         interruptions = 0
