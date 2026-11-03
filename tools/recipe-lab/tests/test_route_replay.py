@@ -562,8 +562,10 @@ def _session_case(case_id: str, identity: str) -> dict:
     }
 
 
-@pytest.fixture()
-def route_stack(tmp_path):
+def _build_route_stack(tmp_path):
+    """The fake route-replay stack builder (a plain helper, importable by
+    other test modules - fixtures must not be called directly, which newer
+    pytest turns into an error)."""
     router = tmp_path / "fake_router.py"
     router.write_text(FAKE_ROUTE_REPLAY_ROUTER)
     router.chmod(0o755)
@@ -602,6 +604,11 @@ def route_stack(tmp_path):
         return config, env
 
     return make
+
+
+@pytest.fixture()
+def route_stack(tmp_path):
+    return _build_route_stack(tmp_path)
 
 
 @pytest.mark.skipif(
