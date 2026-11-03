@@ -391,6 +391,14 @@ cfg = yaml.safe_load(open(config_path, encoding="utf-8"))
 GATE = int(cfg["listeners"][0]["port"])
 API = int(sys.argv[sys.argv.index("-api-port") + 1])
 MODE = cfg.get("x-route-mode", "protected")
+# AG6: the fake router honours the real protection knob - a raised
+# stability weight holds the lane through the tool loop
+try:
+    WEIGHT = float(
+        cfg["global"]["router"]["learning"]["protection"]["tuning"]["stability_weight"]
+    )
+except (KeyError, TypeError, ValueError):
+    WEIGHT = 1.0
 STATE = os.environ["FAKE_STATE"]
 lock = threading.Lock()
 
@@ -426,10 +434,11 @@ class Handler(BaseHTTPRequestHandler):
             state = json.load(open(STATE, encoding="utf-8"))
             counter = state["turns"].get(conversation, 0)
             state["turns"][conversation] = counter + 1
-            if MODE == "protected" or not in_tool_loop:
+            if MODE == "protected" or not in_tool_loop or WEIGHT >= 2.0:
                 model = "local/model-a"
             else:
-                # an unprotected candidate flaps onto the strong model mid-loop
+                # an unprotected, low-stability candidate flaps onto the
+                # strong model mid-loop
                 model = "local/model-strong"
             state["records"].append(
                 {
@@ -516,7 +525,7 @@ def route_stack(tmp_path):
     mock = tmp_path / "mock_backend.py"
     mock.write_text("import time\ntime.sleep(300)\n")
 
-    def make(mode: str) -> tuple[Path, RunnerEnv]:
+    def make(mode: str, *, stability_weight: float = 1.0) -> tuple[Path, RunnerEnv]:
         state = tmp_path / f"state-{mode}.json"
         state.write_text(json.dumps({"records": [], "turns": {}}), encoding="utf-8")
         config = tmp_path / f"candidate-{mode}.yaml"
@@ -527,6 +536,14 @@ def route_stack(tmp_path):
             "    address: 0.0.0.0\n"
             "    port: 8899\n"
             f"x-route-mode: {mode}\n"
+            "global:\n"
+            "  router:\n"
+            "    learning:\n"
+            "      protection:\n"
+            "        enabled: true\n"
+            "        scope: conversation\n"
+            "        tuning:\n"
+            f"          stability_weight: {stability_weight}\n"
         )
         env = RunnerEnv(
             router_bin=str(router),
