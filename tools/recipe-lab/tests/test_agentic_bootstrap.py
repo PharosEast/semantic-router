@@ -10,14 +10,12 @@ import json
 
 import pytest
 import yaml
-
 from recipe_lab.agentic_bootstrap import (
     PROFILE_KIND,
     bootstrap_agentic_config,
     profile_from_reports,
     select_models,
 )
-from recipe_lab.contract import ExperimentSpec
 
 
 def _report(model: str, *, rate: float, cost: float, tasks: int = 10) -> dict:

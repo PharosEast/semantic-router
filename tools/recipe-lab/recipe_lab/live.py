@@ -100,8 +100,8 @@ from .contract import (
     References,
     Workload,
 )
-from .srbench import SrbenchCli, extract_metric_values
 from .session_attribution import analyze_sessions
+from .srbench import SrbenchCli, extract_metric_values
 from .verdict import (
     GuardResult,
     PairedStats,

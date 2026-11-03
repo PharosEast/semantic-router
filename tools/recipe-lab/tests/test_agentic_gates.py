@@ -11,7 +11,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from recipe_lab.agentic import (
     TOOL_LOOP_PHASE,
     AgenticGateResult,
@@ -21,9 +20,9 @@ from recipe_lab.agentic import (
     replay_switch_evidence,
     session_random_mix_stats,
 )
-from recipe_lab.contract import ContractError, DEFAULT_AGENTIC_GATES, Workload
-from recipe_lab.verdict import evaluate_verdict
+from recipe_lab.contract import DEFAULT_AGENTIC_GATES, ContractError, Workload
 from recipe_lab.session_attribution import analyze_sessions
+from recipe_lab.verdict import evaluate_verdict
 
 
 def _continuity(

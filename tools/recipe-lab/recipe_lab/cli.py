@@ -49,6 +49,13 @@ from .adapters.router_replay import (
     records_to_rows,
     write_cases,
 )
+from .agentic_bootstrap import (
+    CLIENTS,
+    DEFAULT_MEDIUM_TOLERANCE_PP,
+    PROFILE_KIND,
+    bootstrap_agentic_config,
+    profile_from_reports,
+)
 from .attribution import (
     attribute,
     load_records,
@@ -67,6 +74,7 @@ from .bootstrap import (
 from .bundle import build_bundle
 from .classification import load_classification_source
 from .contract import (
+    DEFAULT_AGENTIC_GATES,
     RUNNABLE_SPLITS,
     ContractError,
     ExperimentSpec,
@@ -125,14 +133,6 @@ from .runner import (
     replay_metric_value,
     routed_cost_index,
 )
-from .agentic_bootstrap import (
-    CLIENTS,
-    DEFAULT_MEDIUM_TOLERANCE_PP,
-    PROFILE_KIND,
-    bootstrap_agentic_config,
-    profile_from_reports,
-)
-from .contract import DEFAULT_AGENTIC_GATES
 from .session_attribution import write_session_report
 from .session_cases import (
     DEFAULT_DUPLICATE_WARN_PCT,
@@ -1496,7 +1496,7 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
                     verdict="RANKED",
                     dataset_hash=cases_hash,
                     reasons=[f"trial timeout: {exc}"],
-                    gates={name: "not_evaluated" for name in gates},
+                    gates=dict.fromkeys(gates, "not_evaluated"),
                     bench_refs=[],
                     coverage_warning=True,
                     notes="",

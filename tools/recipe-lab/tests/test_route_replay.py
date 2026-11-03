@@ -9,7 +9,6 @@ import sys
 from pathlib import Path
 
 import pytest
-
 from recipe_lab.runner import RunnerEnv, evaluate_route_replay, route_replay_evidence
 from recipe_lab.session_cases import (
     TOOL_LOOP_PHASE,
@@ -403,6 +402,7 @@ def test_contract_truth_space_validation():
     import copy
 
     from recipe_lab.contract import ContractError, ExperimentSpec
+
     from tests.fixtures import VALID_SPEC
 
     spec_dict = copy.deepcopy(VALID_SPEC)

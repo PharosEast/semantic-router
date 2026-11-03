@@ -320,7 +320,7 @@ def agentic_cost_summary(pair_comparisons: Sequence[Any]) -> dict[str, Any]:
         "reasons": [],
         "notes": {},
     }
-    sums = {key: 0.0 for key in _COMPARISON_COST_KEYS}
+    sums = dict.fromkeys(_COMPARISON_COST_KEYS, 0.0)
     for index, comparison in enumerate(pair_comparisons, 1):
         entries = (
             comparison.get("comparisons") if isinstance(comparison, dict) else None

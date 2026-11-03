@@ -8,7 +8,6 @@ import sys
 
 import pytest
 import yaml
-
 from recipe_lab.proposers.session_policy import propose_session_policy
 
 BASE_CONFIG = {
@@ -181,6 +180,7 @@ def test_high_switch_diagnosis_candidate_switches_less_on_replay(tmp_path):
 
 def evaluate(config, env, tmp_path, name):
     from recipe_lab.runner import evaluate_route_replay
+
     from tests.test_route_replay import _session_case
 
     env = RunnerEnvLike(env, tmp_path, name)
@@ -200,9 +200,9 @@ class RunnerEnvLike:
     """A per-evaluation RunnerEnv (fresh work dir and backend port)."""
 
     def __init__(self, env, tmp_path, name):
-        from tests.test_route_replay import _free_port
-
         import dataclasses
+
+        from tests.test_route_replay import _free_port
 
         env_dict = dataclasses.asdict(env)
         env_dict["work_dir"] = tmp_path / f"work-{name}"
