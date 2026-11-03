@@ -28,6 +28,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 GRANULARITIES = ("session", "prompt", "request")
@@ -222,8 +223,6 @@ def load_route_cases(path: str) -> list[dict[str, Any]]:
     prompt/request cases carry a non-empty `prompt`. `case_id` is required
     either way.
     """
-    from pathlib import Path
-
     cases_path = Path(path)
     if not cases_path.is_file():
         raise ValueError(f"route-replay cases file not found: {path}")

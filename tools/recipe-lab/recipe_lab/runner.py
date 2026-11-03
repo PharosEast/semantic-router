@@ -51,6 +51,7 @@ import contextlib
 import hashlib
 import json
 import os
+from itertools import pairwise
 import signal
 import socket
 import subprocess
@@ -695,7 +696,7 @@ def route_replay_evidence(
     drift_releases = 0
     for requests in ordered_sessions(rows).values():
         routed = [row for row in requests if str(row.get("routed") or "")]
-        for previous, current in zip(routed, routed[1:]):
+        for previous, current in pairwise(routed):
             phase = phases_by_request_id.get(str(current.get("request_id") or ""))
             if phase == TOOL_LOOP_PHASE and previous.get("routed") != current.get(
                 "routed"

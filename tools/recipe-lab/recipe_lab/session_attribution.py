@@ -119,9 +119,9 @@ def ordered_sessions(rows: list[dict[str, Any]]) -> dict[str, list[dict[str, Any
         if key is None:
             continue
         sessions.setdefault(key, []).append(row)
-    for key in sessions:
+    for key, session_rows in sessions.items():
         sessions[key] = sorted(
-            (row for row in sessions[key] if _turn_index(row) is not None),
+            (row for row in session_rows if _turn_index(row) is not None),
             key=_request_order,
         )
     return sessions

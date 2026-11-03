@@ -187,7 +187,7 @@ def test_j3_records_rebuild_to_pilot_sessions_and_unique_prompts():
     multi = [case for case in session_cases if len(case["requests"]) > 1]
     assert len(multi) == 12  # one pilot session captured a single request
     # prompt granularity: the J3 rebuild's 14 unique prompts
-    prompt_cases, prompt_prov = cases_from_replays(records, "prompt")
+    _, prompt_prov = cases_from_replays(records, "prompt")
     assert prompt_prov["cases"] == 14
     # the default granularity for identity-bearing (agentic) records is session
     auto_cases, auto_prov = cases_from_replays(records, "session")

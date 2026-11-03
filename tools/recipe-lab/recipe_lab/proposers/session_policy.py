@@ -35,6 +35,16 @@ import yaml
 # subagents (AG0-W2).
 AGENT_HEADER = "x-claude-code-agent-id"
 
+# The raised values the proposer moves a knob to; each doubles as the
+# exhaustion check ("already at the raised value proposes nothing").
+STABILITY_WEIGHT_RAISED = 2.0
+SWITCH_MARGIN_RAISED = 0.1
+MIN_TURNS_RAISED = 2
+# The switch-margin trigger: enough absolute flips, or a high per-session
+# mean, indicate lane flapping that a wider margin can hold.
+SWITCH_MARGIN_MIN_FLIPS = 2
+SWITCH_MARGIN_MEAN_ALERT = 0.5
+
 
 @dataclass(frozen=True)
 class SessionPolicyCandidate:
@@ -101,9 +111,9 @@ def _stability_candidate(base, tuning, summary) -> SessionPolicyCandidate | None
     if switches <= 0:
         return None
     current = tuning.get("stability_weight", 1.0)
-    if current >= 2.0:
+    if current >= STABILITY_WEIGHT_RAISED:
         return None  # already at the raised weight; the knob is exhausted
-    new = 2.0
+    new = STABILITY_WEIGHT_RAISED
     candidate = _candidate(
         base,
         "stability_weight",
@@ -122,16 +132,18 @@ def _stability_candidate(base, tuning, summary) -> SessionPolicyCandidate | None
 def _switch_margin_candidate(base, tuning, summary) -> SessionPolicyCandidate | None:
     flips = summary.get("model_switches") or 0
     mean = summary.get("mean_switches_per_session")
-    if flips < 2 and not (mean is not None and mean > 0.5):
+    if flips < SWITCH_MARGIN_MIN_FLIPS and not (
+        mean is not None and mean > SWITCH_MARGIN_MEAN_ALERT
+    ):
         return None
     current = tuning.get("switch_margin", 0.05)
-    if current >= 0.1:
+    if current >= SWITCH_MARGIN_RAISED:
         return None  # the margin is already at its proposed value
     candidate = _candidate(
         base,
         "switch_margin",
         current,
-        0.1,
+        SWITCH_MARGIN_RAISED,
         {
             "reason": "model_switches",
             "model_switches": flips,
@@ -139,7 +151,7 @@ def _switch_margin_candidate(base, tuning, summary) -> SessionPolicyCandidate | 
             "note": "sessions flip between models; a wider margin holds the lane",
         },
     )
-    _tuning(candidate.config)["switch_margin"] = 0.1
+    _tuning(candidate.config)["switch_margin"] = SWITCH_MARGIN_RAISED
     return candidate
 
 
@@ -178,7 +190,7 @@ def _min_turns_candidate(base, tuning, summary) -> SessionPolicyCandidate | None
     if rejected <= 0:
         return None
     current = tuning.get("min_turns_before_switch", 1)
-    if current >= 2:
+    if current >= MIN_TURNS_RAISED:
         return None  # already holding past the first turn
     candidate = _candidate(
         base,

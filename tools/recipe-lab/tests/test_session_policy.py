@@ -136,7 +136,7 @@ def _diff(base, candidate):
     def walk(b, c, path):
         if isinstance(b, dict) and isinstance(c, dict):
             for key in set(b) | set(c):
-                walk(b.get(key), c.get(key), path + [str(key)])
+                walk(b.get(key), c.get(key), [*path, str(key)])
         elif b != c:
             diffs.append((".".join(path[:-1]), path[-1]))
 
@@ -154,9 +154,8 @@ def _diff(base, candidate):
 def test_high_switch_diagnosis_candidate_switches_less_on_replay(tmp_path):
     from pathlib import Path
 
-    from tests.test_route_replay import _build_route_stack, _session_case
+    from tests.test_route_replay import _build_route_stack
 
-    cases = [_session_case("s1", "conv-ag6")]
     stack = _build_route_stack(tmp_path)
 
     # the base candidate flaps mid-loop
