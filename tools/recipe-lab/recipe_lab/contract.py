@@ -1867,6 +1867,9 @@ class ExperimentSpec:
     template: TemplateConfig | None = None
     providers_config: str | None = None
     bootstrap_config: BootstrapConfig = field(default_factory=BootstrapConfig)
+    # AG5: the models privacy/security traffic stays on (the agentic
+    # bootstrap pins those lanes to them with adaptation bypassed).
+    local_models: tuple[str, ...] = field(default=())
     # directory of the YAML file this spec was loaded from (from_yaml only);
     # workload.manifest resolves against it. Not part of the contract.
     spec_dir: str | None = None
@@ -1892,6 +1895,16 @@ class ExperimentSpec:
         oracle_policy = OraclePolicy.from_dict(
             attribution.get("oracle_policy"), truth_space=truth_space
         )
+        local_models_raw = raw.get("local_models", [])
+        _require(
+            isinstance(local_models_raw, list)
+            and all(
+                isinstance(model, str) and model.strip()
+                for model in local_models_raw
+            ),
+            "local_models must be a list of non-empty model names",
+        )
+        local_models = tuple(local_models_raw)
         gates_raw = raw.get("gates", [])
         _require(isinstance(gates_raw, list), "gates must be a list")
         gates = tuple(Gate.from_dict(g, i) for i, g in enumerate(gates_raw))
@@ -2037,6 +2050,7 @@ class ExperimentSpec:
             template=template,
             providers_config=providers_config,
             bootstrap_config=bootstrap_config,
+            local_models=local_models,
         )
 
     @property
@@ -2243,6 +2257,11 @@ class ExperimentSpec:
                     else {}
                 ),
             },
+            **(
+                {"local_models": list(self.local_models)}
+                if self.local_models
+                else {}
+            ),
             "gates": [g.to_dict() for g in self.gates],
             "budget": self.budget.to_dict(),
         }

@@ -124,6 +124,13 @@ from .runner import (
     replay_metric_value,
     routed_cost_index,
 )
+from .agentic_bootstrap import (
+    CLIENTS,
+    DEFAULT_MEDIUM_TOLERANCE_PP,
+    PROFILE_KIND,
+    bootstrap_agentic_config,
+    profile_from_reports,
+)
 from .contract import DEFAULT_AGENTIC_GATES
 from .session_attribution import write_session_report
 from .session_cases import (
@@ -314,6 +321,115 @@ def cmd_cases_from_replays(args: argparse.Namespace) -> int:
             "duplicate_pct": provenance["duplicate_pct"],
             "cases_sha256": "sha256:"
             + hashlib.sha256(output.read_bytes()).hexdigest(),
+        }
+    )
+    return 0
+
+
+def _load_json_objects(paths: list[str], what: str) -> list[dict]:
+    payloads: list[dict] = []
+    for path in paths:
+        try:
+            payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ContractError(f"cannot read {what} {path}: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise ContractError(f"{what} {path} is not a JSON object")
+        payloads.append(payload)
+    return payloads
+
+
+def cmd_profile_agentic(args: argparse.Namespace) -> int:
+    """AG5: aggregate per-model single-target sr-bench run reports into the
+    agentic profile (recipe-lab-agentic-profile-v1)."""
+    reports = _load_json_objects(args.reports, "run report")
+    try:
+        profile = profile_from_reports(reports)
+    except ValueError as exc:
+        raise ContractError(str(exc)) from exc
+    output = Path(args.output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    output.write_text(
+        json.dumps(profile, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    _print_json(
+        {
+            "profile": str(output),
+            "kind": PROFILE_KIND,
+            "models": [m["model"] for m in profile["models"]],
+            "profile_sha256": "sha256:"
+            + hashlib.sha256(output.read_bytes()).hexdigest(),
+        }
+    )
+    return 0
+
+
+def cmd_bootstrap_agentic(args: argparse.Namespace) -> int:
+    """AG5: generate an agentic candidate config from the agent recipe
+    template, the profile and the client identity contract; every lane's
+    choice rides a sidecar with its rule and evidence."""
+    spec = _load_spec(args.spec)
+    template_path = args.template
+    if template_path is None:
+        # the shipped agent recipe, resolved from the repository checkout
+        template_path = str(
+            Path(__file__).resolve().parents[3]
+            / "config"
+            / "recipes"
+            / "agent"
+            / "config.yaml"
+        )
+    profile_payload = _load_json_objects([args.profile], "profile")[0]
+    try:
+        template = yaml.safe_load(Path(template_path).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise ContractError(f"cannot read template {template_path}: {exc}") from exc
+    if not isinstance(template, dict):
+        raise ContractError(f"template {template_path} is not a YAML mapping")
+    local_models = list(spec.local_models)
+    for raw in args.local_model or []:
+        local_models.extend(m.strip() for m in raw.split(",") if m.strip())
+    mcq_order = [
+        m.strip() for m in (args.mcq_order or "").split(",") if m.strip()
+    ]
+    try:
+        config, sidecar = bootstrap_agentic_config(
+            template,
+            profile_payload,
+            client=args.client,
+            medium_tolerance_pp=args.medium_tolerance_pp,
+            local_models=local_models,
+            mcq_order=mcq_order,
+        )
+    except ValueError as exc:
+        raise ContractError(str(exc)) from exc
+    output_dir = Path(args.out)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    config_path = output_dir / "agentic-config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(config, sort_keys=False, allow_unicode=True),
+        encoding="utf-8",
+    )
+    sidecar_path = output_dir / "agentic-config.bootstrap.json"
+    sidecar_path.write_text(
+        json.dumps(sidecar, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    rejection = None
+    if args.validate:
+        rejection = validate_config(config_path, args.validate_bin)
+        if rejection is not None:
+            _fail(f"agentic candidate failed config validate: {rejection}")
+    _print_json(
+        {
+            "config": str(config_path),
+            "sidecar": str(sidecar_path),
+            "client": args.client,
+            "lanes": {
+                lane["decision"]: lane["model"] for lane in sidecar["lanes"]
+            },
+            "validated": args.validate and rejection is None,
         }
     )
     return 0
@@ -3227,6 +3343,73 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir", default=None, help="directory for candidate config YAMLs"
     )
     p_cal.set_defaults(func=cmd_propose_calibrated)
+
+    p_prof = sub.add_parser(
+        "profile-agentic",
+        help="AG5: aggregate per-model single-target sr-bench run reports "
+        "into the agentic profile (recipe-lab-agentic-profile-v1)",
+    )
+    p_prof.add_argument(
+        "--reports",
+        action="append",
+        required=True,
+        help="run report JSON path; repeat once per model arm",
+    )
+    p_prof.add_argument("--output", required=True, help="output profile JSON path")
+    p_prof.set_defaults(func=cmd_profile_agentic)
+
+    p_boot = sub.add_parser(
+        "bootstrap-agentic",
+        help="AG5: generate an agentic candidate from the agent recipe "
+        "template, the profile and the client identity contract (lane "
+        "assignment rules + per-lane evidence in a sidecar)",
+    )
+    p_boot.add_argument("--spec", required=True, help="experiment spec YAML (local_models)")
+    p_boot.add_argument("--profile", required=True, help="agentic profile JSON (profile-agentic)")
+    p_boot.add_argument(
+        "--template",
+        default=None,
+        help="agent recipe config.yaml to rewrite (default: config/recipes/agent/config.yaml "
+        "next to the package)",
+    )
+    p_boot.add_argument(
+        "--client",
+        required=True,
+        choices=list(CLIENTS),
+        help="client whose identity headers the session protection reads",
+    )
+    p_boot.add_argument(
+        "--medium-tolerance-pp",
+        type=float,
+        default=DEFAULT_MEDIUM_TOLERANCE_PP,
+        help="medium lane: max success-rate gap to the best model in percentage points "
+        f"(default {DEFAULT_MEDIUM_TOLERANCE_PP})",
+    )
+    p_boot.add_argument(
+        "--local-model",
+        action="append",
+        default=None,
+        help="local model for the privacy/security lanes (repeatable; defaults to "
+        "the spec's local_models)",
+    )
+    p_boot.add_argument(
+        "--mcq-order",
+        default="",
+        help="comma-separated model order from the MCQ picture for the STEM and "
+        "legal-health lanes",
+    )
+    p_boot.add_argument("--out", required=True, help="output candidate directory")
+    p_boot.add_argument(
+        "--validate",
+        action="store_true",
+        help="run the validator on the generated config before writing the candidate",
+    )
+    p_boot.add_argument(
+        "--validate-bin",
+        default="vllm-sr",
+        help="validator invoked as '<bin> config validate --config <path>'",
+    )
+    p_boot.set_defaults(func=cmd_bootstrap_agentic)
 
     p_run = sub.add_parser(
         "run", help="evaluate candidate configs in the replay tier (RANKED -> ledger)"
