@@ -156,6 +156,8 @@ def _diff(base, candidate):
     reason="the runner's process-group teardown needs os.killpg (POSIX)",
 )
 def test_high_switch_diagnosis_candidate_switches_less_on_replay(tmp_path):
+    from pathlib import Path
+
     from tests.test_route_replay import _build_route_stack, _session_case
 
     cases = [_session_case("s1", "conv-ag6")]
@@ -167,8 +169,9 @@ def test_high_switch_diagnosis_candidate_switches_less_on_replay(tmp_path):
     assert base_result["summary"]["tool_loop_switches"] >= 1
 
     # the high-switch evidence triggers the stability candidate
+    base_spec = yaml.safe_load(Path(base_config).read_text(encoding="utf-8"))
     candidates = propose_session_policy(
-        base_config, replay_summary=base_result["summary"]
+        base_spec, replay_summary=base_result["summary"]
     )
     stability = next(
         c for c in candidates if c.variable == "stability_weight"
