@@ -273,6 +273,17 @@ proposals.
 
 ## Proposal and replay tier
 
+- `recipe-lab propose-session-policy --config C [--diagnosis D]
+  [--replay-summary S] --output-dir D`
+  AG6: diagnosis-triggered one-variable session-protection candidates.
+  Evidence asks, the proposer proposes - no evidence, no candidate:
+  tool-loop switches raise `stability_weight` (to 2.0), model flips raise
+  `switch_margin` (0.05 -> 0.1), a `not_separate` sub-agent separation adds
+  the agent identity header (x-claude-code-agent-id), rejected selections
+  raise `min_turns_before_switch`. Each candidate changes exactly one
+  variable and carries a sidecar naming its trigger; run the candidates
+  through the route-replay gates (`run --tier route-replay`) before
+  anything reaches the live tier.
 - `recipe-lab propose-thresholds --base-config C --signal S --deltas=-0.1,0.1
   --output-dir D`
   Deterministic single-variable threshold candidates (baseline dropped,

@@ -108,6 +108,7 @@ from .observe_lanes import (
 )
 from .profile import results_dirname, run_profile
 from .proposers import distribution_calibration, rule_threshold, threshold_search
+from .proposers import session_policy as session_policy_proposer
 from .provenance import write_run_manifest
 from .report import render_promotion_draft, write_run_report
 from .runner import (
@@ -1237,6 +1238,36 @@ def cmd_propose_rule(args: argparse.Namespace) -> int:
     _print_json(
         {
             "signal": args.signal,
+            "candidates": [c.summary() for c in candidates],
+            "files": [str(p) for p in paths],
+        }
+    )
+    return 0
+
+
+def cmd_propose_session_policy(args: argparse.Namespace) -> int:
+    """AG6: diagnosis-triggered one-variable session-policy candidates."""
+    try:
+        base = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError) as exc:
+        raise SystemExit(f"cannot read base config: {exc}") from exc
+    if not isinstance(base, dict):
+        raise SystemExit("propose-session-policy: base config is not a YAML mapping")
+    diagnosis = None
+    if args.diagnosis:
+        diagnosis = _load_json_objects([args.diagnosis], "diagnosis")[0]
+    summary = None
+    if args.replay_summary:
+        summary = _load_json_objects([args.replay_summary], "route-replay summary")[0]
+    try:
+        candidates = session_policy_proposer.propose_session_policy(
+            base, diagnosis=diagnosis, replay_summary=summary
+        )
+        paths = session_policy_proposer.write_candidates(candidates, args.output_dir)
+    except ValueError as exc:
+        raise SystemExit(f"proposer error: {exc}") from exc
+    _print_json(
+        {
             "candidates": [c.summary() for c in candidates],
             "files": [str(p) for p in paths],
         }
@@ -3343,6 +3374,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--output-dir", default=None, help="directory for candidate config YAMLs"
     )
     p_cal.set_defaults(func=cmd_propose_calibrated)
+
+    p_spp = sub.add_parser(
+        "propose-session-policy",
+        help="AG6: diagnosis-triggered one-variable session-protection "
+        "candidates (stability weight, switch margin, agent identity header, "
+        "min turns before switch)",
+    )
+    p_spp.add_argument(
+        "--config", required=True, help="base config YAML to perturb"
+    )
+    p_spp.add_argument(
+        "--diagnosis",
+        default=None,
+        help="AG4 diagnosis JSON whose agentic.agent_separation triggers the "
+        "agent-header candidate",
+    )
+    p_spp.add_argument(
+        "--replay-summary",
+        default=None,
+        help="AG3 route-replay summary JSON whose switches / rejected "
+        "selections trigger the tuning candidates",
+    )
+    p_spp.add_argument(
+        "--output-dir", required=True, help="directory for candidate config YAMLs"
+    )
+    p_spp.set_defaults(func=cmd_propose_session_policy)
 
     p_prof = sub.add_parser(
         "profile-agentic",
