@@ -191,6 +191,33 @@ proposals.
   (exit 2). `--from` restricts the move to sites currently at that value
   (the 2.5 -> 1.75 BUG-3 calibration).
 
+## Agentic cold start (AG5)
+
+- `recipe-lab profile-agentic --reports R1.json --reports R2.json ... --output P`
+  Aggregates per-model single-target sr-bench run reports (the AG1
+  protocol: one run per model, one arm each) into the agentic profile
+  (`recipe-lab-agentic-profile-v1`): task success rate with its interval,
+  per-task actual and cache-neutral cost, calls per task, latency and the
+  truncation rate. Fields a report does not carry stay None and are listed
+  in the model entry's `missing` - missing evidence is never counted as
+  zero.
+- `recipe-lab bootstrap-agentic --spec S --profile P --template T --client
+  claude-code|openai-chat|generic --out D [--medium-tolerance-pp P]
+  [--local-model M] [--mcq-order M1,M2] [--validate [--validate-bin vllm-sr]]`
+  Rewrites the agent recipe template from the profile (lane assignment:
+  complex lanes take the strongest model, medium lanes the cheapest within
+  `medium_tolerance_pp` of the best, the simple lane and fallback the
+  cheapest, privacy/security the spec's `local_models` with adaptation
+  bypassed, legal-health and STEM the MCQ picture when declared). Session
+  protection is written per client: claude-code protects the whole session
+  keyed by the verified headers (x-claude-code-session-id, agent:
+  x-claude-code-agent-id, from AG0-W2); other clients protect one
+  conversation keyed by the neutral headers. Adaptation is disabled, the
+  progress gate starts in observe mode, and candidate requirements demand
+  declared capabilities. Writes `agentic-config.yaml` and a sidecar
+  (`agentic-config.bootstrap.json`) carrying every lane's rule and
+  evidence. `--validate` refuses an unvalidatable candidate (exit 2).
+
 ## Proposal and replay tier
 
 - `recipe-lab propose-thresholds --base-config C --signal S --deltas=-0.1,0.1
