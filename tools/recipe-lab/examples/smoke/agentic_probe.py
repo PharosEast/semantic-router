@@ -419,8 +419,8 @@ def main() -> int:
         "--repeat",
         type=int,
         default=1,
-        help="run every fixture this many times (run1..runN) and compare the "
-        "trajectories turn by turn; N >= 2 exercises the determinism contract",
+        help="run every fixture this many times (run1, run2, ...) and compare "
+        "the trajectories turn by turn; N >= 2 exercises the determinism contract",
     )
     parser.add_argument(
         "--compare-with",
