@@ -92,6 +92,8 @@ def test_attribute_honors_workload_selection(tmp_path, capsys):
                 "dev",
                 "--workload",
                 "office",
+                "--output-dir",
+                str(tmp_path / "attr"),
             ]
         )
         == 0
@@ -300,6 +302,8 @@ def test_attribute_cases_hash_match_passes(tmp_path, capsys):
                 str(records),
                 "--cases",
                 str(cases),
+                "--output-dir",
+                str(tmp_path / "attr"),
             ]
         )
         == 0
