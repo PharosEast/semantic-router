@@ -1,4 +1,20 @@
-"""C3: per-model profiles grouped by the router's own domain labels.
+"""C3: per-model profiles grouped by the router's own labels or lanes.
+
+Two grouping modes share this module:
+
+- **label mode** (legacy domain-template path): tasks are rewritten so
+  ``category`` is the router's own domain label from ``observe-labels``
+  (``--labels``). Labels observed on fewer than ``profile.min_label_cases``
+  cases merge into ``other`` and the merge is recorded in the profile.
+  Cases without an observed label join ``other`` too and are counted
+  (``uncovered``).
+- **lane mode** (template path, sub-issue-8 §2.2 step 4): ``category`` is
+  the template lane observed by ``observe-lanes`` (``--lanes``). Rare lanes
+  are never merged - lanes observed on fewer than
+  ``bootstrap.min_lane_cases`` cases are recorded in the profile as
+  *unmeasured* and the bindings generator binds them by the default rule
+  and marks them untested. Cases without an observed lane get the
+  ``unobserved`` category and are counted (``unobserved_cases``).
 
 Verified facts this module encodes (plan doc §3.2, checked 2026-11-01
 against src/training/model_eval sources):
@@ -70,6 +86,9 @@ from .model_eval_tasks import load_source_rows, write_tasks
 PROFILE_SCHEMA = "recipe-lab-profile-v1"
 OTHER_LABEL = "other"
 TRUNCATION_FINISH = "length"
+# Lane mode: cases without an observed lane get this category (a lost
+# record is not a lane observation); bindings never use it.
+UNOBSERVED_LANE = "unobserved"
 
 MODEL_EVAL_SCRIPTS = (
     "multi_benchmark_eval.py",
@@ -133,6 +152,61 @@ def load_labels(path: str | Path) -> dict[str, str]:
     if not labels:
         raise ContractError(f"{path} contains no labels")
     return labels
+
+
+def load_lanes(path: str | Path) -> dict[str, str]:
+    """Load C2 (lane mode) lanes JSONL as case_id -> lane."""
+    lanes: dict[str, str] = {}
+    with Path(path).open("r", encoding="utf-8") as fh:
+        for line_no, line in enumerate(fh, 1):
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise ContractError(
+                    f"{path}:{line_no} is not valid JSON: {exc}"
+                ) from exc
+            case_id = row.get("case_id")
+            lane = row.get("lane")
+            if not isinstance(case_id, str) or not case_id:
+                raise ContractError(f"{path}:{line_no} has no case_id")
+            if not isinstance(lane, str) or not lane:
+                raise ContractError(f"{path}:{line_no} has no lane")
+            if case_id in lanes:
+                raise ContractError(f"{path}:{line_no}: duplicate case_id {case_id!r}")
+            lanes[case_id] = lane
+    if not lanes:
+        raise ContractError(f"{path} contains no lanes")
+    return lanes
+
+
+def rewrite_task_lanes(
+    rows: list[dict[str, Any]], lanes: dict[str, str]
+) -> tuple[list[dict[str, Any]], int]:
+    """Rewrite tasks' ``category`` to the observed template lane.
+
+    Returns ``(rewritten_rows, unobserved_count)``. Cases without an
+    observed lane get the ``unobserved`` category and are counted - a lost
+    record is never folded into a real lane. Rare lanes are NOT merged:
+    the profile records them as unmeasured (see ``run_profile``).
+    """
+    assigned: dict[str, str] = {}
+    unobserved = 0
+    for row in rows:
+        case_id = row.get("case_id") or row.get("task_id")
+        lane = lanes.get(case_id)
+        if lane is None:
+            unobserved += 1
+            lane = UNOBSERVED_LANE
+        assigned[case_id] = lane
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        rewritten = dict(row)
+        case_id = row.get("case_id") or row.get("task_id")
+        rewritten["category"] = assigned[case_id]
+        out.append(rewritten)
+    return out, unobserved
 
 
 def rewrite_task_categories(
@@ -381,7 +455,8 @@ def run_profile(
     spec: ExperimentSpec,
     cases_paths: dict[str, Path],
     cases_hashes: dict[str, str],
-    labels_dir: str | Path,
+    labels_dir: str | Path | None = None,
+    lanes_dir: str | Path | None = None,
     splits: list[str],
     out_dir: str | Path,
     model_eval_dir: str | Path,
@@ -392,14 +467,24 @@ def run_profile(
 ) -> Path:
     """Run the C3 chain and write ``<out_dir>/profile.json`` (byte-stable).
 
-    Per split: rewrite tasks to router labels, then per model run
+    Exactly one grouping source is required: ``labels_dir`` (legacy label
+    mode) or ``lanes_dir`` (template lane mode). Per split: rewrite tasks
+    to the grouping labels/lanes, then per model run
     multi_benchmark_eval (direct endpoint, resume-capable) and mcq_judge
     ``--analysis``; per split run cost_aware_calib ``--token-costs-only``
-    once for all models. Quality gate after each judge.
+    once for all models. Quality gate after each judge. Lane mode records
+    the unmeasured lanes (below ``bootstrap.min_lane_cases``) instead of
+    merging them.
     """
+    if (labels_dir is None) == (lanes_dir is None):
+        raise ContractError(
+            "profile needs exactly one grouping source: --labels (legacy "
+            "domain-template path) or --lanes (template lane mode)"
+        )
+    lane_mode = lanes_dir is not None
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
-    labels_dir = Path(labels_dir)
+    grouping_dir = Path(lanes_dir if lane_mode else labels_dir)  # type: ignore[arg-type]
     model_eval_dir = Path(model_eval_dir)
     scripts = {name: model_eval_dir / name for name in MODEL_EVAL_SCRIPTS}
     for path in scripts.values():
@@ -426,24 +511,40 @@ def run_profile(
 
     label_merges: dict[str, Any] = {}
     uncovered_by_split: dict[str, int] = {}
+    unmeasured_by_split: dict[str, dict[str, int]] = {}
     quality: dict[str, Any] = {}
     stats: dict[str, Any] = {}
     commands: dict[str, Any] = {}
     tasks_hashes: dict[str, str] = {}
+    source_name = "lanes" if lane_mode else "labels"
     labels_hashes = {
-        split: dataset_content_hash(labels_dir / f"labels-{split}.jsonl")
+        split: dataset_content_hash(
+            grouping_dir / f"{source_name}-{split}.jsonl"
+        )
         for split in splits
     }
 
     for split in splits:
         rows = load_source_rows(cases_paths[split])
-        labels = load_labels(labels_dir / f"labels-{split}.jsonl")
-        tasks, merge_record, uncovered = rewrite_task_categories(
-            rows, labels, min_label_cases=spec.profile_config.min_label_cases
-        )
-        if merge_record:
-            label_merges[split] = merge_record
-        uncovered_by_split[split] = uncovered
+        grouping_path = grouping_dir / f"{source_name}-{split}.jsonl"
+        if lane_mode:
+            lanes = load_lanes(grouping_path)
+            tasks, unobserved = rewrite_task_lanes(rows, lanes)
+            uncovered_by_split[split] = unobserved
+            counts = Counter(lanes.values())
+            unmeasured_by_split[split] = {
+                lane: n
+                for lane, n in sorted(counts.items())
+                if n < spec.bootstrap_config.min_lane_cases
+            }
+        else:
+            labels = load_labels(grouping_path)
+            tasks, merge_record, uncovered = rewrite_task_categories(
+                rows, labels, min_label_cases=spec.profile_config.min_label_cases
+            )
+            if merge_record:
+                label_merges[split] = merge_record
+            uncovered_by_split[split] = uncovered
         tasks_path = write_tasks(tasks, out / split / "tasks.jsonl")
         tasks_hashes[split] = dataset_content_hash(tasks_path)
 
@@ -545,10 +646,12 @@ def run_profile(
 
     profile = {
         "schema": PROFILE_SCHEMA,
+        "grouping": "lanes" if lane_mode else "labels",
         "splits": list(splits),
         "models": aliases,
         "label_merges": label_merges,
         "uncovered_cases": uncovered_by_split,
+        "unmeasured_lanes": unmeasured_by_split if lane_mode else {},
         "quality": quality,
         "model_split_stats": stats,
         "inputs": {

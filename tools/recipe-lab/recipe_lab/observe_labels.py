@@ -236,7 +236,11 @@ def request_id_for_case(case_id: str) -> str:
 
 
 def labels_from_records(
-    records: list[dict[str, Any]], cases: list[dict[str, Any]]
+    records: list[dict[str, Any]],
+    cases: list[dict[str, Any]],
+    *,
+    label_of: Any = None,
+    request_id_prefix: str = REQUEST_ID_PREFIX,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Join replay records to cases by request id and extract label rows.
 
@@ -245,7 +249,14 @@ def labels_from_records(
     file is byte-stable across runs that observe the same routing). Cases
     without a record are reported in stats["missing"], never silently folded
     into `other` - a lost record is not a routing observation.
+
+    ``label_of`` maps the record's matched decision name to the reported
+    label; the default folds non-domain decisions into `other`. The lane
+    observer (observe_lanes) passes the identity mapping: in a template
+    config every decision IS a lane.
     """
+    if label_of is None:
+        label_of = label_for_decision
     by_request_id: dict[str, dict[str, Any]] = {}
     seen_case_ids: set[str] = set()
     for case in cases:
@@ -253,7 +264,7 @@ def labels_from_records(
         if case_id in seen_case_ids:
             raise ContractError(f"duplicate case_id in the observed split: {case_id}")
         seen_case_ids.add(case_id)
-        by_request_id[request_id_for_case(case_id)] = case
+        by_request_id[f"{request_id_prefix}{case_id}"] = case
 
     rows: list[dict[str, Any]] = []
     stats = {
@@ -280,7 +291,7 @@ def labels_from_records(
         rows.append(
             {
                 "case_id": str(case["case_id"]),
-                "router_label": label_for_decision(decision),
+                "router_label": label_of(decision),
                 "confidence": extract_confidence(record),
             }
         )

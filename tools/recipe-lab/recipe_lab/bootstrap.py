@@ -71,7 +71,12 @@ from urllib.parse import urlparse
 import yaml
 
 from .classification import classification_projection_hash
-from .contract import ContractError, ExperimentSpec, dataset_content_hash
+from .contract import (
+    ContractError,
+    ExperimentSpec,
+    dataset_content_hash,
+    lambda_tag,
+)
 from .observe_labels import (
     REPLAY_PLUGIN,
     ROUTER_MODEL,
@@ -104,14 +109,6 @@ TOOLS_DISABLED_REASON = (
     "disabled for evaluation: tool integrations are not part of the MCQ "
     "cold-start contract. Re-enable for production if wanted."
 )
-
-
-def lambda_tag(lam: float) -> str:
-    """Deterministic filename-safe tag for a lambda value."""
-    lam = float(lam)
-    if lam == int(lam):
-        return str(int(lam))
-    return repr(lam)
 
 
 def parse_lambdas(raw: str) -> list[float]:

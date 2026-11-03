@@ -56,6 +56,7 @@ from .attribution import (
     write_jsonl,
 )
 from .bank import apply_bank, build_bank, import_judged, load_bank, write_bank
+from .bindings import run_bindings
 from .bootstrap import (
     DEFAULT_LAMBDAS,
     DEFAULT_LISTENER_PORT,
@@ -93,6 +94,15 @@ from .observe_labels import (
     write_labels,
     write_labels_summary,
     write_seed_config,
+)
+from .observe_lanes import (
+    OBSERVE_MODEL_NAME,
+    build_observation_config,
+    observation_config_fingerprint,
+    observe_lanes_split,
+    template_info,
+    write_lanes,
+    write_lanes_summary,
 )
 from .profile import results_dirname, run_profile
 from .proposers import distribution_calibration, rule_threshold, threshold_search
@@ -338,9 +348,138 @@ def cmd_observe_labels(args: argparse.Namespace) -> int:
     return 0
 
 
-def cmd_profile(args: argparse.Namespace) -> int:
-    """C3: per-model profiles grouped by the router's own domain labels."""
+def cmd_observe_lanes(args: argparse.Namespace) -> int:
+    """C2 (template path): observe which template lane each case hits.
+
+    Reads the template's lanes via ``vllm-sr recipe builtin list``, builds
+    the observation config via ``recipe builtin init`` (template bound to
+    placeholder models; the bundle's pinned decision model decides the
+    lane), boots the stack with tagged request ids, and writes
+    lanes-<split>.jsonl (case_id/lane/confidence) plus a summary carrying
+    the lane coverage.
+    """
     spec = _load_spec(args.spec)
+    if spec.template is None:
+        raise ContractError(
+            "spec declares no template section: observe-lanes generates the "
+            "observation config from a built-in recipe template (sub-issue-8 "
+            "§2.1; the legacy path is observe-labels)"
+        )
+    workload = spec.require_tunable_workload(getattr(args, "workload", None))
+    split_name = _select_split(spec, args.split, workload)
+    spec.verify_workload(split=split_name, workload=workload.name)
+    if spec.spec_dir is None:
+        raise ContractError("spec must be loaded from a file to resolve its manifest")
+    cases_path = Path(spec.spec_dir) / workload.split_manifest(split_name)
+    try:
+        cases = load_cases(cases_path)
+    except OSError as exc:
+        raise ContractError(f"cannot read split manifest: {exc}") from exc
+
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    template = template_info(
+        bundle=spec.template.bundle,
+        recipe=spec.template.recipe,
+        vllm_sr_bin=args.vllm_sr_bin,
+        catalog_version=args.catalog_version,
+        timeout_s=args.init_timeout,
+    )
+    try:
+        observation = build_observation_config(
+            template=template,
+            out_dir=out_dir,
+            backend_endpoint=f"127.0.0.1:{args.backend_port}",
+            vllm_sr_bin=args.vllm_sr_bin,
+            model_name=args.model_name,
+            listener_port=args.listener_port,
+            timeout_s=args.init_timeout,
+        )
+    except ContractError as exc:
+        raise SystemExit(f"observation config generation failed: {exc}") from exc
+
+    env = RunnerEnv(
+        router_bin=args.router_bin,
+        mock_backend_script=args.mock_backend,
+        python_bin=args.python_bin,
+        work_dir=out_dir / "work",
+        backend_port=args.backend_port,
+        ready_timeout_s=args.ready_timeout,
+        hf_home=args.hf_home,
+        mock_extra_args=(
+            tuple(args.mock_extra_args.split()) if args.mock_extra_args else ()
+        ),
+    )
+    trial_timeout_s = spec.budget.max_minutes_per_trial * 60
+    try:
+        result = observe_lanes_split(
+            env=env,
+            config=observation["config"],
+            cases=cases,
+            router_model=args.model_name,
+            request_timeout=args.request_timeout,
+            trial_timeout_s=trial_timeout_s,
+        )
+    except RunnerTimeoutError as exc:
+        raise SystemExit(f"lane observation exceeded the trial budget: {exc}") from exc
+    except (RunnerError, ContractError) as exc:
+        raise SystemExit(f"lane observation failed: {exc}") from exc
+
+    lanes_path = write_lanes(result["rows"], out_dir / f"lanes-{split_name}.jsonl")
+    summary = {
+        **result["summary"],
+        "split": split_name,
+        "workload": workload.name,
+        "cases_file": str(cases_path),
+        "cases_sha256": workload.split_hash(split_name),
+        "observation_config": str(observation["config"]),
+        "observation_config_sha256": observation_config_fingerprint(
+            observation["config"]
+        ),
+        "template": {
+            "bundle": template["bundle"],
+            "recipe": template["recipe"],
+            "sha256": template["sha256"],
+            "catalog_version": template["catalog_version"],
+        },
+        "init_command": observation["init_command"],
+        "cache_disabled": observation["cache_disabled"],
+        "join_stats": result["stats"],
+        "timings": result["timings"],
+    }
+    summary_path = write_lanes_summary(
+        summary, out_dir / f"lanes-{split_name}-summary.json"
+    )
+    _print_json(
+        {
+            "lanes": str(lanes_path),
+            "summary": str(summary_path),
+            "observation_config": str(observation["config"]),
+            "cases": summary["cases"],
+            "observed": summary["observed"],
+            "missing": summary["missing"],
+            "lane_coverage": summary["lane_coverage"],
+            "lane_counts": summary["lane_counts"],
+        }
+    )
+    return 0
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    """C3: per-model profiles grouped by labels (legacy) or template lanes."""
+    spec = _load_spec(args.spec)
+    labels = getattr(args, "labels", None)
+    lanes = getattr(args, "lanes", None)
+    if (labels is None) == (lanes is None):
+        raise ContractError(
+            "profile needs exactly one grouping source: --labels (legacy "
+            "domain-template path) or --lanes (template lane mode)"
+        )
+    if lanes is not None and spec.template is None:
+        raise ContractError(
+            "--lanes requires the spec's template section (lane mode is the "
+            "template path; sub-issue-8 §2.1)"
+        )
     workload = spec.require_tunable_workload(getattr(args, "workload", None))
     if spec.spec_dir is None:
         raise ContractError("spec must be loaded from a file to resolve its manifest")
@@ -380,7 +519,8 @@ def cmd_profile(args: argparse.Namespace) -> int:
         spec=spec,
         cases_paths=cases_paths,
         cases_hashes=cases_hashes,
-        labels_dir=Path(args.labels),
+        labels_dir=Path(labels) if labels else None,
+        lanes_dir=Path(lanes) if lanes else None,
         splits=splits,
         out_dir=out_dir,
         model_eval_dir=model_eval_dir,
@@ -394,21 +534,29 @@ def cmd_profile(args: argparse.Namespace) -> int:
             "profile": str(profile_path),
             "splits": splits,
             "models": [model.name for model in spec.models],
+            "grouping": "lanes" if lanes else "labels",
             "min_label_cases": spec.profile_config.min_label_cases,
+            "min_lane_cases": spec.bootstrap_config.min_lane_cases,
         }
     )
     return 0
 
 
 def cmd_bootstrap(args: argparse.Namespace) -> int:
-    """C4+C5: per-lambda scaffold via result_to_config, completed to candidates.
+    """C4+C5 (legacy domain-template path): per-lambda scaffold via
+    result_to_config, completed to candidates.
 
-    Consumes the C3 profile's calib split only (anti-leak); every candidate
-    must pass ``<validate-bin> config validate`` before it is emitted. The Y2
-    label-agreement check then observes the dev split through the seed config
-    and through every candidate: a candidate that disagrees with the seed's
-    labels fails the command.
+    This is the compatibility path (sub-issue-8 §2.5): it only runs with
+    the explicit ``--legacy-domain-template`` flag and is not part of the
+    cold-start completion criteria. The template path is ``bindings``.
     """
+    if not getattr(args, "legacy_domain_template", False):
+        raise ContractError(
+            "bootstrap is the legacy domain-template path (result_to_config "
+            "scaffold); pass --legacy-domain-template to run it explicitly, "
+            "or use the template path: observe-lanes + profile --lanes + "
+            "bindings (sub-issue-8 §2.5)"
+        )
     spec = _load_spec(args.spec)
     if not spec.models:
         raise ContractError(
@@ -471,6 +619,43 @@ def cmd_bootstrap(args: argparse.Namespace) -> int:
         env=env,
         request_timeout=args.request_timeout,
         listener_port=args.listener_port,
+    )
+    _print_json(result)
+    return 0
+
+
+def cmd_bindings(args: argparse.Namespace) -> int:
+    """C4+C5 (template path): per-lane bindings + candidate configs.
+
+    Runs the routing-space check, plans the per-lane bindings for every
+    lambda (capability filter, accuracy - lambda * normalized cost,
+    minimum_candidates, unmeasured lanes by the default rule), generates
+    each candidate via ``recipe builtin init`` over the spec's
+    providers_config, and validates it. A ``no_routing_space`` verdict ends
+    the command with the report and no candidates (sub-issue-8 §2.2).
+    """
+    spec = _load_spec(args.spec)
+    if not spec.models:
+        raise ContractError(
+            "spec declares no models section: bindings needs the candidate "
+            "models, their direct endpoints and their declared capabilities"
+        )
+    profile_dir = Path(args.profile)
+    if not (profile_dir / "profile.json").is_file():
+        raise ContractError(
+            f"profile not found: {profile_dir / 'profile.json'} (bindings "
+            "consumes the C3 profile directory)"
+        )
+    result = run_bindings(
+        spec=spec,
+        profile_dir=profile_dir,
+        out_dir=Path(args.out),
+        lambdas_raw=args.lambdas,
+        exclude=tuple(args.exclude_decision or ()),
+        vllm_sr_bin=args.vllm_sr_bin,
+        catalog_version=args.catalog_version,
+        model_name=args.model_name,
+        timeout_s=args.init_timeout,
     )
     _print_json(result)
     return 0
@@ -1945,19 +2130,123 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_observe.set_defaults(func=cmd_observe_labels)
 
+    p_observe_lanes = sub.add_parser(
+        "observe-lanes",
+        help="observe which template lane each case hits (C2 template path: "
+        "recipe builtin list reads the lanes, recipe builtin init binds the "
+        "template to placeholder models, the bundle's pinned decision model "
+        "decides; writes lanes-<split>.jsonl with case_id/lane/confidence)",
+    )
+    p_observe_lanes.add_argument(
+        "--spec", required=True, help="experiment spec YAML (template section "
+        "selects the built-in bundle/recipe; selects the split)"
+    )
+    p_observe_lanes.add_argument(
+        "--split",
+        default="dev",
+        choices=["calib", "dev", "frozen_test"],
+        help="workload split to observe (frozen_test is quarantined; B)",
+    )
+    p_observe_lanes.add_argument(
+        "--workload",
+        default=None,
+        help="workload from spec.workloads (default: the first workload; "
+        "transfer workloads are quarantined; M5)",
+    )
+    p_observe_lanes.add_argument(
+        "--out",
+        required=True,
+        help="output directory (providers-observe.yaml + bindings-observe.yaml "
+        "+ observe-config.yaml + lanes-<split>.jsonl + lanes-<split>-summary.json)",
+    )
+    p_observe_lanes.add_argument(
+        "--vllm-sr-bin",
+        default="vllm-sr",
+        help="vllm-sr binary for recipe builtin list/init (its hash-held "
+        "commands land in the summary)",
+    )
+    p_observe_lanes.add_argument(
+        "--catalog-version",
+        default="latest",
+        help="built-in bundle catalog version (recipe builtin list/init)",
+    )
+    p_observe_lanes.add_argument(
+        "--model-name",
+        default=OBSERVE_MODEL_NAME,
+        help="entrypoint model name of the observation config (recipe builtin "
+        "init --model-name)",
+    )
+    p_observe_lanes.add_argument(
+        "--router-bin", required=True, help="path to the semantic-router binary"
+    )
+    p_observe_lanes.add_argument(
+        "--mock-backend",
+        required=True,
+        help="path to a mock/real OpenAI backend launcher script (serves the "
+        "placeholder lane models; answers are irrelevant)",
+    )
+    p_observe_lanes.add_argument(
+        "--python-bin", default=sys.executable, help="python used to launch the backend"
+    )
+    p_observe_lanes.add_argument("--backend-port", type=int, default=8000)
+    p_observe_lanes.add_argument(
+        "--listener-port",
+        type=int,
+        default=8899,
+        help="listener port written into the observation config",
+    )
+    p_observe_lanes.add_argument(
+        "--init-timeout",
+        type=float,
+        default=300.0,
+        help="per-invocation timeout for recipe builtin list/init",
+    )
+    p_observe_lanes.add_argument(
+        "--ready-timeout",
+        type=int,
+        default=300,
+        help="model-runtime readiness timeout in seconds",
+    )
+    p_observe_lanes.add_argument(
+        "--hf-home",
+        default=None,
+        help="HF_HOME for the router process (model artifacts)",
+    )
+    p_observe_lanes.add_argument(
+        "--mock-extra-args",
+        default="",
+        help="extra args passed to the mock backend (split on spaces)",
+    )
+    p_observe_lanes.add_argument(
+        "--request-timeout",
+        type=float,
+        default=180.0,
+        help="per-request timeout in seconds",
+    )
+    p_observe_lanes.set_defaults(func=cmd_observe_lanes)
+
     p_profile = sub.add_parser(
         "profile",
-        help="per-model MCQ profiles grouped by the router's own domain labels "
-        "(C3: rewrites task categories to router labels, runs the model_eval "
-        "scripts direct per model, writes profile.json with the provenance)",
+        help="per-model MCQ profiles grouped by the router's own labels "
+        "(--labels, legacy domain-template path) or by template lanes "
+        "(--lanes, template path; C3: rewrites task categories, runs the "
+        "model_eval scripts direct per model, writes profile.json with the "
+        "provenance; lane mode records unmeasured lanes instead of merging)",
     )
     p_profile.add_argument(
         "--spec", required=True, help="experiment spec YAML (models/generation/profile)"
     )
     p_profile.add_argument(
         "--labels",
-        required=True,
-        help="labels directory from observe-labels (labels-<split>.jsonl)",
+        default=None,
+        help="labels directory from observe-labels (labels-<split>.jsonl); "
+        "exactly one of --labels/--lanes",
+    )
+    p_profile.add_argument(
+        "--lanes",
+        default=None,
+        help="lanes directory from observe-lanes (lanes-<split>.jsonl); "
+        "requires the spec's template section; exactly one of --labels/--lanes",
     )
     p_profile.add_argument(
         "--splits",
@@ -2003,14 +2292,82 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_profile.set_defaults(func=cmd_profile)
 
+    p_bindings = sub.add_parser(
+        "bindings",
+        help="per-lane bindings + candidate configs from the C3 profile "
+        "(C4+C5 template path: routing-space check, capability filter, "
+        "accuracy - lambda * normalized cost ranking, minimum_candidates, "
+        "unmeasured lanes by the default rule, then recipe builtin init "
+        "generates and config validate accepts every candidate; a "
+        "no-routing-space verdict ends with the report and no candidates)",
+    )
+    p_bindings.add_argument(
+        "--spec",
+        required=True,
+        help="experiment spec YAML (template + models with capabilities + "
+        "providers_config + cost_basis)",
+    )
+    p_bindings.add_argument(
+        "--profile",
+        required=True,
+        help="C3 profile directory (profile.json; lane mode, calib split only)",
+    )
+    p_bindings.add_argument(
+        "--out",
+        required=True,
+        help="output directory (providers-eval.yaml + bindings-lambda-<tag>.yaml "
+        "+ candidate-lambda-<tag>.yaml + bindings-lambda-<tag>.provenance.json)",
+    )
+    p_bindings.add_argument(
+        "--lambdas",
+        default=None,
+        help="comma-separated cost-lambda values (default: the spec's "
+        "bootstrap.lambdas, else 0 = pure accuracy)",
+    )
+    p_bindings.add_argument(
+        "--exclude-decision",
+        action="append",
+        default=None,
+        help="explicitly omit a named lane whose capability requirement no "
+        "model satisfies (repeatable; passed to recipe builtin init)",
+    )
+    p_bindings.add_argument(
+        "--vllm-sr-bin",
+        default="vllm-sr",
+        help="vllm-sr binary for recipe builtin list/init and config validate",
+    )
+    p_bindings.add_argument(
+        "--catalog-version",
+        default="latest",
+        help="built-in bundle catalog version (recipe builtin list/init)",
+    )
+    p_bindings.add_argument(
+        "--model-name",
+        default=OBSERVE_MODEL_NAME,
+        help="public entrypoint name of the generated config (recipe builtin "
+        "init --model-name)",
+    )
+    p_bindings.add_argument(
+        "--init-timeout",
+        type=float,
+        default=300.0,
+        help="per-invocation timeout for recipe builtin list/init",
+    )
+    p_bindings.set_defaults(func=cmd_bindings)
+
     p_boot = sub.add_parser(
         "bootstrap",
-        help="generate candidate configs from the C3 profile (C4+C5: runs the "
-        "real result_to_config.py per --lambdas value over calib only, "
-        "completes each scaffold into a runnable canonical config - per-model "
-        "endpoints, route-<model> decisions grouped by cost-aware first place, "
-        "traffic-ordered priorities, cache/tools off - and validates every "
-        "candidate before emitting it)",
+        help="legacy domain-template path (sub-issue-8 §2.5): per-lambda "
+        "scaffold via result_to_config, completed to candidates; requires "
+        "--legacy-domain-template and is not part of the cold-start "
+        "completion criteria - the template path is observe-lanes + profile "
+        "--lanes + bindings",
+    )
+    p_boot.add_argument(
+        "--legacy-domain-template",
+        action="store_true",
+        help="run the legacy result_to_config scaffold path explicitly "
+        "(sub-issue-8 §2.5: compatibility only)",
     )
     p_boot.add_argument(
         "--spec", required=True, help="experiment spec YAML (models + cost_basis)"

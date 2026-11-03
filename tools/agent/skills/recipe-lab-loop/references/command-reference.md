@@ -106,34 +106,83 @@ INCONCLUSIVE for `live-verdict`).
   `labels-<split>-summary.json`; its `label_coverage` (non-other labels over
   all cases; missing records count as uncovered) is the number the
   provenance records. `frozen_test` is refused (exit 2).
+- `recipe-lab observe-lanes --spec S --split calib --out D
+  --router-bin B --mock-backend M [--workload W] [--vllm-sr-bin V]
+  [--catalog-version L] [--model-name N] [--request-timeout S]`
+  Cold-start observation, template path (C2, sub-issue-8 §2.2). Requires
+  the spec's `template:` section (built-in bundle + recipe). Reads the
+  template's lanes via `vllm-sr recipe builtin list`, generates the
+  observation config via `vllm-sr recipe builtin init` (every lane bound to
+  placeholder models on the mock backend; the bundle's pinned decision
+  model decides the lane, so no Y2 label-agreement check is needed), then
+  probes each split case with `x-request-id: rl-observe-lanes-<case_id>`
+  and joins the replay records by request id. Writes
+  `providers-observe.yaml`, `bindings-observe.yaml`, `observe-config.yaml`
+  (response cache forced off), `lanes-<split>.jsonl`
+  (case_id/lane/confidence) and `lanes-<split>-summary.json` (template
+  hash, init command, lane_coverage, lane_counts). `frozen_test` is
+  refused (exit 2).
 - `recipe-lab profile --spec S --labels D --splits calib,dev --out P
   --model-eval-dir M [--workload W] [--python-bin B] [--concurrency N]
   [--request-timeout S] [--force]`
-  Model profiles (C3). For every spec `models:` entry, per split: rewrites
-  the split tasks so `category` is the router label from `labels-<split>.jsonl`
-  (labels under `profile.min_label_cases`, default 20, merge into `other`
-  with the merge recorded; uncovered cases join `other`), runs
-  `multi_benchmark_eval.py` direct against the model's endpoint (resumes
-  completed records unless `--force`), then `mcq_judge.py --analysis`;
-  one `cost_aware_calib.py --token-costs-only` invocation per split writes
-  `token_costs/` for bootstrap. The scripts are invoked, never copied:
-  the profile records script path, content sha256, git blob hash and every
-  command line. Truncation (`finish_reason: length`) and no-answer rates
-  beyond `evidence_quality` ceilings fail with exit 2 and a
-  generation-params hint. Writes `generation.json` (the shared
-  `generation:` params, also used by the live arms), per-split
-  `tasks.jsonl` / `results/<alias>_direct/` / `token_costs/` and a
-  byte-stable `profile.json` (recipe-lab-profile-v1: per model x label n,
-  accuracy with Wilson CI, tokens, assumed-pricing cost, p50/p95 latency,
-  quality rates, all input hashes). Aliases must survive the
-  result_to_config dirname round-trip (one `/` or no `_`, never `auto`).
-  `calib` outputs feed bootstrap (C4/C5), `dev` outputs the answer bank
-  (C6); `frozen_test` is refused (exit 2).
-- `recipe-lab bootstrap --spec S --profile P --model-eval-dir M --out D
-  [--lambdas 0,0.1,0.2,0.3] [--python-bin B] [--validate-bin V]
-  [--listener-port N]`
-  Cold-start candidates (C4+C5). Consumes the C3 profile's calib split
-  only (anti-leak). Per lambda: runs the real `result_to_config.py`
+  Model profiles (C3), legacy label mode. For every spec `models:` entry,
+  per split: rewrites the split tasks so `category` is the router label
+  from `labels-<split>.jsonl` (labels under `profile.min_label_cases`,
+  default 20, merge into `other` with the merge recorded; uncovered cases
+  join `other`), runs `multi_benchmark_eval.py` direct against the model's
+  endpoint (resumes completed records unless `--force`), then
+  `mcq_judge.py --analysis`; one `cost_aware_calib.py --token-costs-only`
+  invocation per split writes `token_costs/` for bootstrap. The scripts
+  are invoked, never copied: the profile records script path, content
+  sha256, git blob hash and every command line. Truncation
+  (`finish_reason: length`) and no-answer rates beyond `evidence_quality`
+  ceilings fail with exit 2 and a generation-params hint. Writes
+  `generation.json` (the shared `generation:` params, also used by the
+  live arms), per-split `tasks.jsonl` / `results/<alias>_direct/` /
+  `token_costs/` and a byte-stable `profile.json` (recipe-lab-profile-v1:
+  per model x label n, accuracy with Wilson CI, tokens, assumed-pricing
+  cost, p50/p95 latency, quality rates, all input hashes). Aliases must
+  survive the result_to_config dirname round-trip (one `/` or no `_`,
+  never `auto`). `calib` outputs feed bootstrap (C4/C5), `dev` outputs the
+  answer bank (C6); `frozen_test` is refused (exit 2).
+- `recipe-lab profile --spec S --lanes D --splits calib,dev --out P ...`
+  Model profiles, template lane mode (C3, sub-issue-8 §2.2 step 4):
+  identical chain, but `category` is the template lane from
+  `lanes-<split>.jsonl`. Rare lanes are never merged: lanes under
+  `bootstrap.min_lane_cases` (default 20) are recorded in the profile as
+  `unmeasured_lanes`, and cases without an observed lane get the
+  `unobserved` category. Requires the spec's `template:` section.
+- `recipe-lab bindings --spec S --profile P --out D [--lambdas ...]
+  [--exclude-decision LANE ...] [--vllm-sr-bin V] [--catalog-version L]
+  [--model-name N]`
+  Cold-start candidates, template path (C4+C5, sub-issue-8 §2.2 steps
+  5-7). First the routing-space check: "no benefit to routing" ends the
+  command with a report and no candidates (no measured lane shows the
+  `min_advantage_pp` advantage of a best model over the cheapest, or every
+  measured lane prefers the same model and the cheapest is never within
+  the threshold). Otherwise, per lambda: capability filter (only models
+  whose declared `capabilities` satisfy the lane requirement - vision
+  needs vision, agentic needs tools, long_context needs a 200K context
+  window), rank measured lanes by `accuracy - lambda * normalized cost`
+  (per-lane max normalization, the cost_aware_calib convention), take the
+  template's `minimum_candidates`; unmeasured lanes rank by the
+  lambda-adjusted overall score and are marked "default rule, untested";
+  a lane no model can satisfy must be excluded via `--exclude-decision`
+  (passed to `recipe builtin init`, recorded in the report). Each
+  candidate is generated by `vllm-sr recipe builtin init` over the spec's
+  `providers_config` (endpoints/credentials come only from there; the
+  derived eval copy disables the response cache) and must pass
+  `vllm-sr config validate`. Writes `providers-eval.yaml`,
+  `bindings-lambda-<tag>.yaml`, `candidate-lambda-<tag>.yaml` and
+  `bindings-lambda-<tag>.provenance.json` (template hash, per-lane basis
+  with scores/n/measured, unmeasured and excluded lanes, init command).
+- `recipe-lab bootstrap --legacy-domain-template --spec S --profile P
+  --model-eval-dir M --out D [--lambdas 0,0.1,0.2,0.3] [--python-bin B]
+  [--validate-bin V] [--listener-port N]`
+  Cold-start candidates, LEGACY domain-template path (C4+C5 legacy,
+  sub-issue-8 §2.5; requires `--legacy-domain-template` and is not part of
+  the cold-start completion criteria). Consumes the C3 profile's calib
+  split only (anti-leak). Per lambda: runs the real `result_to_config.py`
   (`--mode full`) over `P/calib/results` + `P/calib/token_costs` into
   `scaffold-lambda-<lambda>.yaml`; the script is invoked, never copied,
   and the sidecar records its path, sha256, git blob hash and command

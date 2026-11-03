@@ -64,9 +64,11 @@ pip install -e '.[dev]'
 | `attribute` | E1/E2/E3 误路由归因（`--split` + 可选 `--cases` 哈希校验） |
 | `attribute-session` | 会话级 agentic 归因：lane_flap / tool_loop_interrupted / selection_failed（sub-6 P2） |
 | `collect-replays` | 从管理 API 拉取 router_replay 记录并连接标签（`--unlabeled` 出原始诊断行） |
-| `observe-labels` | C2 冷启动观测：种子配置 + request-id 打标探测 → labels-<split>.jsonl（case_id/router_label/confidence，未命中记 other）；`--classification-config` 指定分类源配置，其 modules/embeddings 注入种子（Y2 同源） |
-| `profile` | C3 模型画像：task 类别改写为 router 标签 + 调用 model_eval 脚本直连各模型 → profile.json（含区间/成本/质量门） |
-| `bootstrap` | C4+C5 冷启动候选：每个 λ 调真实 `result_to_config.py` 出骨架（只吃 calib，Warning 即拒绝），补全成可运行配置（契约端点/按第一名分组的 `route-<模型>` 决策/流量优先级/缓存与 tools 关闭）并逐个过 `config validate` 后才落盘；Y2：候选的分类节（modules/embeddings）来自 `--classification-config`（与 observe-labels 的种子同源，骨架副本被丢弃），随后 dev split 经种子与每个候选各观测一次，标签一致率 < 99% 拒绝（exit 2），一致率与分类源哈希写入 provenance 旁车 |
+| `observe-labels` | C2 冷启动观测（遗留 domain 路径）：种子配置 + request-id 打标探测 → labels-<split>.jsonl（case_id/router_label/confidence，未命中记 other）；`--classification-config` 指定分类源配置，其 modules/embeddings 注入种子（Y2 同源） |
+| `observe-lanes` | C2 冷启动观测（模板路径，sub-issue-8 §2.2）：`vllm-sr recipe builtin list` 读模板 lane → `recipe builtin init` 把模板绑到占位模型生成观测配置（决策模型由模板钉住，无需 Y2 一致率检查）→ request-id 打标探测 → lanes-<split>.jsonl（case_id/lane/confidence）+ summary（lane_coverage、模板哈希、init 命令） |
+| `profile` | C3 模型画像：`--labels`（遗留 domain 路径）或 `--lanes`（模板路径）二选一分组 + 调用 model_eval 脚本直连各模型 → profile.json（含区间/成本/质量门；lane 模式不合并稀有 lane，低于 `bootstrap.min_lane_cases` 的记为 unmeasured_lanes，未观测到 lane 的记 unobserved） |
+| `bindings` | C4+C5 冷启动候选（模板路径，sub-issue-8 §2.2）：路由空间检查（无空间则出"不建议路由"报告、不生成候选）→ 每个 λ 一份 bindings（能力过滤 → 正确率 − λ×归一化成本排序 → 满足 `minimum_candidates`；未测量 lane 按默认规则并标注"未经实测"；能力无法满足的 lane 必须 `--exclude-decision` 显式排除）→ `recipe builtin init` 以 spec 的 providers_config 生成候选（评估副本关闭响应缓存）→ `config validate` 通过才落盘；旁车记模板哈希/逐 lane 依据/未实测与被排除 lane |
+| `bootstrap` | C4+C5 冷启动候选（**遗留 domain 模板路径**，sub-issue-8 §2.5，需显式 `--legacy-domain-template`，不计入完成条件）：每个 λ 调真实 `result_to_config.py` 出骨架（只吃 calib，Warning 即拒绝），补全成可运行配置（契约端点/按第一名分组的 `route-<模型>` 决策/流量优先级/缓存与 tools 关闭）并逐个过 `config validate` 后才落盘；Y2：候选的分类节（modules/embeddings）来自 `--classification-config`（与 observe-labels 的种子同源，骨架副本被丢弃），随后 dev split 经种子与每个候选各观测一次，标签一致率 < 99% 拒绝（exit 2），一致率与分类源哈希写入 provenance 旁车 |
 | `bank` | 构建 / 导入 / 应用 per-case/per-model 答案库（`contains` / `mcq` 判卷，I；`import` 直接转换 C3 画像的 dev judged.jsonl，C6） |
 | `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D） |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
@@ -96,16 +98,28 @@ recipe-lab observe-labels --spec spec.yaml --split calib --out observe/ \
   --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py \
   --classification-config config/config.yaml
 
+# C2 模板路径（sub-issue-8 §2.2）：recipe builtin init 生成观测配置，
+# 模板钉住的决策模型决定 lane；spec 需声明 template（bundle/recipe）
+recipe-lab observe-lanes --spec spec.yaml --split calib --out observe-lanes/ \
+  --router-bin build/bin/semantic-router --mock-backend scripts/mock_backend.py
+
 # C3 模型画像：调 model_eval 脚本直连各模型，profile.json 含脚本哈希与完整命令行
+# --labels（遗留 domain 路径）或 --lanes（模板路径）二选一
 recipe-lab profile --spec spec.yaml --labels observe/ --splits calib,dev \
   --out profile/ --model-eval-dir src/training/model_eval
 
-# C4+C5 冷启动候选：每个 λ 一份骨架 + 一份补全后的候选（先过 config validate）
+# C4+C5 模板路径：路由空间检查 → 每个 λ 一份 bindings → recipe builtin init
+# 生成候选（过 config validate 才落盘）；无路由空间时输出报告、不生成候选
+recipe-lab bindings --spec spec.yaml --profile profile/ \
+  --lambdas 0,0.1,0.2,0.3 --out cands/ \
+  --vllm-sr-bin vllm-sr --model-name vllm-sr/auto
+
+# C4+C5 遗留 domain 模板路径（需显式 --legacy-domain-template；sub-issue-8 §2.5）
 # 产物：scaffold-lambda-<λ>.yaml、candidate-lambda-<λ>.yaml、
 #       candidate-lambda-<λ>.provenance.json（proposer/λ/逐标签表/哈希/命令）
 # Y2：--classification-config 与 observe-labels 同源；bootstrap 随后对 dev split
 #     跑标签一致率检查（< 99% exit 2），需要 --router-bin/--mock-backend 启动检查栈
-recipe-lab bootstrap --spec spec.yaml --profile profile/ \
+recipe-lab bootstrap --legacy-domain-template --spec spec.yaml --profile profile/ \
   --model-eval-dir src/training/model_eval --lambdas 0,0.1,0.2,0.3 \
   --out cands/ --validate-bin vllm-sr \
   --classification-config config/config.yaml \

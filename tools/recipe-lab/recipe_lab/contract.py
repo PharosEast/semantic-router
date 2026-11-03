@@ -1385,6 +1385,17 @@ class CostBasis:
 # Cold start (C3): profile/grouping setting. Labels with fewer observed
 # cases than this merge into `other` before the profile is computed.
 DEFAULT_MIN_LABEL_CASES = 20
+# Cold start (C3 lane mode): a lane observed on fewer cases than this is
+# reported as "not measured" (sub-issue-8 §2.1 bootstrap.min_lane_cases);
+# its binding follows the default rule and is marked untested.
+DEFAULT_MIN_LANE_CASES = 20
+# Cold start (bindings): below this advantage (percentage points) between a
+# lane's best model and the cheapest acceptable one, the routing-space check
+# reports "no benefit to routing" (sub-issue-8 §2.2 step 5).
+DEFAULT_MIN_ADVANTAGE_PP = 5.0
+# Cold start (bindings): a lane whose requirement is a context window needs
+# at least this many tokens (MoM V1 long_context lane: 200K, recipe.dsl L127).
+LONG_CONTEXT_MIN_TOKENS = 200_000
 # Cold start (C3): generation params shared by every direct-model eval and
 # the later live arms; keys mirror multi_benchmark_eval.py's load_params.
 GENERATION_KEYS = (
@@ -1394,6 +1405,175 @@ GENERATION_KEYS = (
     "chat_template_kwargs",
     "extra_body",
 )
+
+
+@dataclass(frozen=True)
+class ModelCapabilities:
+    """Cold start (bindings): one model's user-declared capabilities.
+
+    recipe-lab never guesses capabilities (sub-issue-8 §2.1): lane
+    requirements filter against exactly what the user declared here.
+    """
+
+    vision: bool = False
+    tools: bool = False
+    reasoning: bool = False
+    context_window: int | None = None
+
+    def is_default(self) -> bool:
+        return self == ModelCapabilities()
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> ModelCapabilities:
+        unknown = sorted(
+            set(raw) - {"vision", "tools", "reasoning", "context_window"}
+        )
+        _require(not unknown, f"capabilities has unknown keys: {', '.join(unknown)}")
+        for key in ("vision", "tools", "reasoning"):
+            if key in raw:
+                _require(
+                    isinstance(raw[key], bool),
+                    f"capabilities.{key} must be a boolean",
+                )
+        window = raw.get("context_window")
+        if window is not None:
+            _require(
+                isinstance(window, int)
+                and not isinstance(window, bool)
+                and window >= 1,
+                "capabilities.context_window must be an integer >= 1",
+            )
+        return cls(
+            vision=bool(raw.get("vision", False)),
+            tools=bool(raw.get("tools", False)),
+            reasoning=bool(raw.get("reasoning", False)),
+            context_window=window,
+        )
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {}
+        if self.vision:
+            out["vision"] = True
+        if self.tools:
+            out["tools"] = True
+        if self.reasoning:
+            out["reasoning"] = True
+        if self.context_window is not None:
+            out["context_window"] = self.context_window
+        return out
+
+
+@dataclass(frozen=True)
+class TemplateConfig:
+    """Cold start (C2/C4): the built-in recipe template the config is
+    generated from (sub-issue-8 §2.1 `template`).
+
+    `bundle` is a built-in model-bundle name (e.g. `mom-v1`) and `recipe`
+    the recipe inside it (e.g. `balance`); both are validated against
+    `vllm-sr recipe builtin list` at runtime, and the bundle's sha256 is
+    written into the provenance.
+    """
+
+    bundle: str
+    recipe: str
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> TemplateConfig:
+        unknown = sorted(set(raw) - {"bundle", "recipe"})
+        _require(not unknown, f"template has unknown keys: {', '.join(unknown)}")
+        bundle = raw.get("bundle")
+        recipe = raw.get("recipe")
+        _require(
+            isinstance(bundle, str) and bundle.strip(),
+            "template.bundle must be a non-empty string",
+        )
+        _require(
+            isinstance(recipe, str) and recipe.strip(),
+            "template.recipe must be a non-empty string",
+        )
+        return cls(bundle=bundle, recipe=recipe)
+
+    def to_dict(self) -> dict:
+        return {"bundle": self.bundle, "recipe": self.recipe}
+
+
+@dataclass(frozen=True)
+class BootstrapConfig:
+    """Cold start (bindings, sub-issue-8 §2.1 `bootstrap`): generation-side
+    settings shared by every lambda."""
+
+    min_lane_cases: int = DEFAULT_MIN_LANE_CASES
+    min_advantage_pp: float = DEFAULT_MIN_ADVANTAGE_PP
+    lambdas: tuple[float, ...] | None = None
+
+    @classmethod
+    def from_dict(cls, raw: dict) -> BootstrapConfig:
+        unknown = sorted(
+            set(raw) - {"min_lane_cases", "min_advantage_pp", "lambdas"}
+        )
+        _require(not unknown, f"bootstrap has unknown keys: {', '.join(unknown)}")
+        min_cases = raw.get("min_lane_cases", DEFAULT_MIN_LANE_CASES)
+        _require(
+            isinstance(min_cases, int)
+            and not isinstance(min_cases, bool)
+            and min_cases >= 1,
+            "bootstrap.min_lane_cases must be an integer >= 1",
+        )
+        advantage = raw.get("min_advantage_pp", DEFAULT_MIN_ADVANTAGE_PP)
+        _require(
+            isinstance(advantage, (int, float))
+            and not isinstance(advantage, bool)
+            and advantage > 0,
+            "bootstrap.min_advantage_pp must be a number > 0",
+        )
+        lambdas_raw = raw.get("lambdas")
+        lambdas: tuple[float, ...] | None = None
+        if lambdas_raw is not None:
+            _require(
+                isinstance(lambdas_raw, list) and bool(lambdas_raw),
+                "bootstrap.lambdas must be a non-empty list of numbers",
+            )
+            values: list[float] = []
+            seen: set[str] = set()
+            for i, entry in enumerate(lambdas_raw):
+                _require(
+                    isinstance(entry, (int, float))
+                    and not isinstance(entry, bool)
+                    and entry >= 0,
+                    f"bootstrap.lambdas[{i}] must be a number >= 0",
+                )
+                tag = lambda_tag(float(entry))
+                if tag not in seen:
+                    seen.add(tag)
+                    values.append(float(entry))
+            lambdas = tuple(values)
+        return cls(
+            min_lane_cases=min_cases,
+            min_advantage_pp=float(advantage),
+            lambdas=lambdas,
+        )
+
+    def to_dict(self) -> dict:
+        out: dict[str, Any] = {}
+        if self.min_lane_cases != DEFAULT_MIN_LANE_CASES:
+            out["min_lane_cases"] = self.min_lane_cases
+        if self.min_advantage_pp != DEFAULT_MIN_ADVANTAGE_PP:
+            out["min_advantage_pp"] = self.min_advantage_pp
+        if self.lambdas is not None:
+            out["lambdas"] = list(self.lambdas)
+        return out
+
+
+def lambda_tag(lam: float) -> str:
+    """Deterministic filename-safe tag for a lambda value.
+
+    Lives at module level so BootstrapConfig and the bindings CLI share one
+    tagging convention.
+    """
+    lam = float(lam)
+    if lam == int(lam):
+        return str(int(lam))
+    return repr(lam)
 
 
 @dataclass(frozen=True)
@@ -1412,10 +1592,16 @@ class ModelEntry:
     endpoint: str
     served_name: str
     api_key_env: str | None = None
+    # Cold start (bindings): user-declared capabilities; lane requirements
+    # filter against exactly these (sub-issue-8 §2.1 - never guessed).
+    capabilities: ModelCapabilities = field(default_factory=ModelCapabilities)
 
     @classmethod
     def from_dict(cls, raw: dict) -> ModelEntry:
-        unknown = sorted(set(raw) - {"name", "endpoint", "served_name", "api_key_env"})
+        unknown = sorted(
+            set(raw)
+            - {"name", "endpoint", "served_name", "api_key_env", "capabilities"}
+        )
         _require(not unknown, f"model entry has unknown keys: {', '.join(unknown)}")
         name = raw.get("name")
         _require(
@@ -1454,8 +1640,22 @@ class ModelEntry:
                 isinstance(api_key_env, str) and api_key_env.strip(),
                 f"model {name!r} api_key_env must be a non-empty string",
             )
+        capabilities_raw = raw.get("capabilities")
+        capabilities = (
+            ModelCapabilities.from_dict(
+                _require_mapping(
+                    capabilities_raw, f"model {name!r} capabilities"
+                )
+            )
+            if capabilities_raw is not None
+            else ModelCapabilities()
+        )
         return cls(
-            name=name, endpoint=endpoint, served_name=served, api_key_env=api_key_env
+            name=name,
+            endpoint=endpoint,
+            served_name=served,
+            api_key_env=api_key_env,
+            capabilities=capabilities,
         )
 
     def to_dict(self) -> dict:
@@ -1466,6 +1666,8 @@ class ModelEntry:
         }
         if self.api_key_env is not None:
             out["api_key_env"] = self.api_key_env
+        if not self.capabilities.is_default():
+            out["capabilities"] = self.capabilities.to_dict()
         return out
 
 
@@ -1543,6 +1745,14 @@ class ExperimentSpec:
     models: tuple[ModelEntry, ...] = field(default=())
     generation: dict[str, Any] | None = None
     profile_config: ProfileConfig = field(default_factory=ProfileConfig)
+    # Cold start (C2/C4, sub-issue-8 §2.1): the built-in template the config
+    # is generated from, the provider config `recipe builtin init --config`
+    # consumes (endpoints/credentials come only from there), and the
+    # generation-side bootstrap settings. All three are lane-mode only; the
+    # legacy domain-template path ignores them.
+    template: TemplateConfig | None = None
+    providers_config: str | None = None
+    bootstrap_config: BootstrapConfig = field(default_factory=BootstrapConfig)
     # directory of the YAML file this spec was loaded from (from_yaml only);
     # workload.manifest resolves against it. Not part of the contract.
     spec_dir: str | None = None
@@ -1637,6 +1847,35 @@ class ExperimentSpec:
         profile_config = ProfileConfig.from_dict(
             _require_mapping(raw.get("profile", {}), "profile")
         )
+        # Cold start (sub-issue-8 §2.1): the lane-mode template, provider
+        # config and bootstrap settings; all optional (the legacy
+        # domain-template path declares none of them).
+        template_raw = raw.get("template")
+        template = (
+            TemplateConfig.from_dict(_require_mapping(template_raw, "template"))
+            if template_raw is not None
+            else None
+        )
+        providers_config = raw.get("providers_config")
+        if providers_config is not None:
+            _require(
+                isinstance(providers_config, str) and providers_config.strip(),
+                "providers_config must be a non-empty path string",
+            )
+        bootstrap_config = BootstrapConfig.from_dict(
+            _require_mapping(raw.get("bootstrap", {}), "bootstrap")
+        )
+        if template is not None:
+            _require(
+                bool(models),
+                "template requires the models section (the template path binds "
+                "its lanes from the declared candidates)",
+            )
+            _require(
+                providers_config is not None,
+                "template requires providers_config (recipe builtin init consumes "
+                "it; endpoints and credentials come only from there)",
+            )
         # M4: a benefit constraint (cost bounded against a reference arm)
         # is meaningless without a declared cost basis - refuse it; a ref
         # bound also needs the references section to resolve against.
@@ -1674,6 +1913,9 @@ class ExperimentSpec:
             models=models,
             generation=generation,
             profile_config=profile_config,
+            template=template,
+            providers_config=providers_config,
+            bootstrap_config=bootstrap_config,
         )
 
     @property
@@ -1901,6 +2143,12 @@ class ExperimentSpec:
             out["generation"] = dict(self.generation)
         if self.profile_config != ProfileConfig():
             out["profile"] = self.profile_config.to_dict()
+        if self.template is not None:
+            out["template"] = self.template.to_dict()
+        if self.providers_config is not None:
+            out["providers_config"] = self.providers_config
+        if self.bootstrap_config != BootstrapConfig():
+            out["bootstrap"] = self.bootstrap_config.to_dict()
         return out
 
 

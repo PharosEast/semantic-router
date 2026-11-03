@@ -669,6 +669,7 @@ def test_bootstrap_cli_end_to_end(tmp_path, capsys):
     rc = main(
         [
             "bootstrap",
+            "--legacy-domain-template",
             "--spec",
             _write_spec(tmp_path),
             "--profile",
@@ -715,6 +716,7 @@ def test_bootstrap_cli_refuses_missing_profile(tmp_path, capsys):
     rc = main(
         [
             "bootstrap",
+            "--legacy-domain-template",
             "--spec",
             _write_spec(tmp_path),
             "--profile",
@@ -739,6 +741,7 @@ def test_bootstrap_cli_refuses_negative_lambda(tmp_path, capsys):
     rc = main(
         [
             "bootstrap",
+            "--legacy-domain-template",
             "--spec",
             _write_spec(tmp_path),
             "--profile",
@@ -768,6 +771,7 @@ def test_bootstrap_cli_requires_dev_split(tmp_path, capsys):
     rc = main(
         [
             "bootstrap",
+            "--legacy-domain-template",
             "--spec",
             _write_spec(tmp_path, dev_split=False),
             "--profile",
