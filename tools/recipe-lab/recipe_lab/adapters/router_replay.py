@@ -63,6 +63,7 @@ from pathlib import Path
 from typing import Any
 
 from ..contract import ContractError
+from ..session_cases import request_phase_of
 
 REPLAYS_PATH = "/api/v1/observability/replays"
 
@@ -319,6 +320,41 @@ def session_rows_for_run(
     return rows
 
 
+def _record_phase(record: dict) -> str | None:
+    """AG4: the arriving request's session phase, derived from the recorded
+    request body's messages (the record carries no phase of its own; the
+    rule mirrors the Router's tool-loop classification)."""
+    body = _record_field(record, "request_body", "RequestBody")
+    if isinstance(body, str):
+        try:
+            body = json.loads(body)
+        except json.JSONDecodeError:
+            body = None
+    if not isinstance(body, dict):
+        return None
+    messages = body.get("messages")
+    if not isinstance(messages, list) or not messages:
+        return None
+    return request_phase_of(messages)
+
+
+def _row_extras(record: dict) -> dict[str, Any]:
+    """AG4 evidence shared by the labeled and unlabeled row shapes: the
+    session phase, the client agent marker (when the router records one) and
+    the verbatim session-policy block (identity status included)."""
+    extras: dict[str, Any] = {}
+    phase = _record_phase(record)
+    if phase is not None:
+        extras["phase"] = phase
+    agent_id = _record_field(record, "agent_id", "AgentID")
+    if agent_id:
+        extras["agent_id"] = str(agent_id)
+    policy = _record_field(record, "session_policy", "SessionPolicy")
+    if isinstance(policy, dict):
+        extras["session_policy"] = policy
+    return extras
+
+
 def _case_row(record: dict[str, Any], case: CaseJoin, *, family: str) -> dict[str, Any]:
     """Build one attribution input row from a record joined with its case.
 
@@ -346,6 +382,7 @@ def _case_row(record: dict[str, Any], case: CaseJoin, *, family: str) -> dict[st
         "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
     }
     row.update(_record_evidence(record))
+    row.update(_row_extras(record))
     return row
 
 
@@ -457,6 +494,7 @@ def records_to_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         }
         if any(value is not None for value in session_evidence.values()):
             row["session"] = {k: v for k, v in session_evidence.items() if v is not None}
+        row.update(_row_extras(record))
         rows.append(row)
     return rows
 
