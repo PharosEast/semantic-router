@@ -51,7 +51,6 @@ import contextlib
 import hashlib
 import json
 import os
-from itertools import pairwise
 import signal
 import socket
 import subprocess
@@ -59,6 +58,7 @@ import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
