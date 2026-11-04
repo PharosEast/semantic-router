@@ -235,6 +235,26 @@ def test_probe_repeat_two_trajectories_identical(
     sub = [e for e in transcript if e["agent"] == "sub"]
     assert len(sub) == 2
     assert all("x-claude-code-agent-id" in e["headers_sent"] for e in sub)
+    # Z9: every turn carries a deterministic per-request id, and the run
+    # writes the sub-agent manifest the diagnosis joins the protection
+    # traces with
+    assert all(e["request_id"] for e in transcript)
+    assert transcript[0]["request_id"] == "probe-simple-main-0-run1"
+    manifest = json.loads((out / "agent-requests-run1.json").read_text("utf-8"))
+    assert manifest["agent_requests"] == [
+        {
+            "request_id": "probe-sub-agent-sub-0-run1",
+            "agent": "sub",
+            "fixture": "sub-agent",
+            "step": 0,
+        },
+        {
+            "request_id": "probe-sub-agent-sub-1-run1",
+            "agent": "sub",
+            "fixture": "sub-agent",
+            "step": 1,
+        },
+    ]
     correction = [e for e in transcript if e["fixture"] == "correction"]
     assert len(correction) == 2
     assert "DETERMINISM" not in capsys.readouterr().err

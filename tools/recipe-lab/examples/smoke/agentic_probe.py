@@ -13,7 +13,11 @@ Each session in agentic_fixtures.json describes one conversation:
   loop under a second agent identity header;
 - identity headers are configurable: x-session-id / x-conversation-id by
   default, plus any `--header Name: value` extras and a `--sub-agent-header`
-  applied only to sub-agent turns.
+  applied only to sub-agent turns;
+- every request carries a deterministic `x-request-id` (recorded in the
+  transcript), and each run writes `agent-requests-<tag>.json` naming the
+  sub-agent request ids - Z9's client-side join key for judging sub-agent
+  retention from the replay protection traces without router changes.
 
 Determinism contract (AG8 completion criterion): the same fixture run twice
 must produce identical session trajectories. `--repeat N` runs every fixture
@@ -198,6 +202,26 @@ def compare_transcripts(a: list[dict], b: list[dict]) -> list[str]:
     return diffs
 
 
+def agent_request_manifest(transcript: list[dict]) -> dict:
+    """Z9: which request ids the client drove as sub-agent turns - the join
+    key the diagnosis needs, because the router does not log agent headers
+    into its replay records. Consumed by `recipe-lab diagnose
+    --agent-requests` to judge sub-agent retention from the protection
+    traces' identity hashes."""
+    return {
+        "agent_requests": [
+            {
+                "request_id": entry["request_id"],
+                "agent": entry["agent"],
+                "fixture": entry["fixture"],
+                "step": entry["step"],
+            }
+            for entry in transcript
+            if entry.get("agent") == "sub" and entry.get("request_id")
+        ]
+    }
+
+
 class AgentRunner:
     """Plays the agent client for one run tag: drives every requested fixture
     session and records a normalized transcript with sent identity headers."""
@@ -267,6 +291,12 @@ class AgentRunner:
         correction_after = session.get("user_correction_after_step")
         final_content = ""
         for step in range(self.max_steps):
+            # Z9: a deterministic per-request id the client records locally -
+            # the router does not log agent headers in replays, so the join
+            # that judges sub-agent retention rides the request ids instead
+            request_id = (
+                f"{self.session_prefix}-{fixture}-{agent}-{step}-{self.run_tag}"
+            )
             body: dict = {
                 "model": "vllm-sr/auto",
                 "max_tokens": self.max_tokens,
@@ -275,7 +305,9 @@ class AgentRunner:
             names = list(task.get("tool_names") or [])
             if names:
                 body["tools"] = tool_specs(names)
-            status, data, resp_headers = post(self.router, body, headers)
+            status, data, resp_headers = post(
+                self.router, body, {**headers, "x-request-id": request_id}
+            )
             choice = (data.get("choices") or [{}])[0]
             message = choice.get("message") or {}
             calls = message.get("tool_calls") or []
@@ -283,6 +315,7 @@ class AgentRunner:
                 "fixture": fixture,
                 "agent": agent,
                 "step": step,
+                "request_id": request_id,
                 "status": status,
                 "finish_reason": (
                     choice.get("finish_reason")
@@ -442,6 +475,12 @@ def main() -> int:
             runner.run_session(session)
         (out / f"transcript-{tag}.json").write_text(
             json.dumps(runner.transcript, ensure_ascii=False, indent=1),
+            encoding="utf-8",
+        )
+        (out / f"agent-requests-{tag}.json").write_text(
+            json.dumps(
+                agent_request_manifest(runner.transcript), ensure_ascii=False, indent=1
+            ),
             encoding="utf-8",
         )
         rows = dump_replays(args.mgmt, out / f"replays-{tag}.json")
