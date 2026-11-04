@@ -275,15 +275,25 @@ proposals.
 
 - `recipe-lab propose-session-policy --config C [--diagnosis D]
   [--replay-summary S] --output-dir D`
-  AG6: diagnosis-triggered one-variable session-protection candidates.
-  Evidence asks, the proposer proposes - no evidence, no candidate:
-  tool-loop switches raise `stability_weight` (to 2.0), model flips raise
-  `switch_margin` (0.05 -> 0.1), a `not_separate` sub-agent separation adds
-  the agent identity header (x-claude-code-agent-id), rejected selections
-  raise `min_turns_before_switch`. Each candidate changes exactly one
-  variable and carries a sidecar naming its trigger; run the candidates
-  through the route-replay gates (`run --tier route-replay`) before
-  anything reaches the live tier.
+  AG6/Z6: cause-keyed one-variable session-protection candidates. The
+  rules follow the real mechanism (upstream #5567): the tool loop is a
+  hard lock independent of the tuning knobs, a drifted decision releases
+  it (in-design), and `switch_margin` / `stability_weight` only widen the
+  hold on ordinary out-of-lock scoring. Evidence asks, the proposer
+  proposes - no evidence, no candidate: unprotected tool-loop switches
+  (the tool-loop total minus the drift releases) map the identity headers
+  the client sends (W1/W2 class), out-of-lock flips raise
+  `stability_weight` (to 2.0) and `switch_margin` (0.05 -> 0.1), a
+  `not_separate` sub-agent separation adds the agent identity header
+  (x-claude-code-agent-id). Causes that must NOT become knobs come back
+  as `handoffs` in the report: drift releases over the per-task ceiling
+  point at threshold calibration (`propose-calibrated`, the tool-loop
+  phase score distribution), rejected selections point at the candidate
+  set's relationship to the lock, and unprotected switches under
+  configured headers mean the client is not sending them. Each candidate
+  changes exactly one variable and carries a sidecar naming its trigger;
+  run the candidates through the route-replay gates
+  (`run --tier route-replay`) before anything reaches the live tier.
 - `recipe-lab propose-thresholds --base-config C --signal S --deltas=-0.1,0.1
   --output-dir D`
   Deterministic single-variable threshold candidates (baseline dropped,

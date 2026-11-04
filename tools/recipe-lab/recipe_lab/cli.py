@@ -1266,6 +1266,12 @@ def cmd_propose_session_policy(args: argparse.Namespace) -> int:
     _print_json(
         {
             "candidates": [c.summary() for c in candidates],
+            # Z6: causes that must not become protection knobs (drift
+            # calibration, candidate-set/lock checks, client-side identity)
+            # ride the report as handoffs instead of config candidates
+            "handoffs": session_policy_proposer.session_policy_handoffs(
+                base, replay_summary=summary
+            ),
             "files": [str(p) for p in paths],
         }
     )
@@ -3376,9 +3382,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_spp = sub.add_parser(
         "propose-session-policy",
-        help="AG6: diagnosis-triggered one-variable session-protection "
-        "candidates (stability weight, switch margin, agent identity header, "
-        "min turns before switch)",
+        help="AG6: cause-keyed one-variable session-protection candidates "
+        "(identity headers, stability weight, switch margin, agent identity "
+        "header); drift releases and rejected selections come back as "
+        "handoffs, not knobs",
     )
     p_spp.add_argument("--config", required=True, help="base config YAML to perturb")
     p_spp.add_argument(
@@ -3390,8 +3397,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_spp.add_argument(
         "--replay-summary",
         default=None,
-        help="AG3 route-replay summary JSON whose switches / rejected "
-        "selections trigger the tuning candidates",
+        help="AG3 route-replay summary JSON whose cause-split switches / "
+        "rejected selections trigger the tuning and identity candidates",
     )
     p_spp.add_argument(
         "--output-dir", required=True, help="directory for candidate config YAMLs"

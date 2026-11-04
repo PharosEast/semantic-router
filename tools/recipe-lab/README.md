@@ -76,7 +76,7 @@ pip install -e '.[dev]'
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
 | `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |
-| `propose-session-policy` | AG6：诊断触发的单变量会话保护候选（工具循环切换→提 stability_weight；来回切换→提 switch_margin；子 agent 未分开保持→加 agent 身份头；被拒请求→提 min_turns_before_switch）；候选先过 AG3 route-replay 门槛再进 live |
+| `propose-session-policy` | AG6/Z6：按原因分类的单变量会话保护候选（无保护切换→补身份头映射，W1/W2 类；锁外普通切换→提 stability_weight 与 switch_margin；子 agent 未分开保持→加 agent 身份头）。决策漂移超限→不调旋钮，交回阈值校准（propose-calibrated）；被拒请求→交回"候选集与锁的关系"检查；身份头已配仍无保护→交回客户端身份头修复（均以 `handoffs` 回报，不产配置）。候选先过 AG3 route-replay 门槛再进 live |
 | `run` | replay 层评估候选 → 台账 RANKED（A1/A5/C/G2；`--reload restart\|hot` H；`cost_model` 成本代理 E2） |
 | `ledger` | 台账 append / show / top（G1/G2） |
 | `verify` | 驱动 sr-bench 端到端：preview + AB/BA 多轮 → 三态裁决（I）；`driver: model_eval` 工作载改走 model_eval 驱动（C7） |

@@ -1,14 +1,18 @@
-"""AG6: the session-policy proposer - diagnosis-triggered one-variable
-candidates, and the golden flow (a high-switch diagnosis produces the
-stability candidate, and the raised candidate switches less on replay)."""
+"""AG6: the session-policy proposer - cause-keyed one-variable candidates
+(Z6), and the golden flow (an out-of-lock flap diagnosis produces the hold
+candidates, and the raised candidate switches less on replay)."""
 
 from __future__ import annotations
 
+import copy
 import sys
 
 import pytest
 import yaml
-from recipe_lab.proposers.session_policy import propose_session_policy
+from recipe_lab.proposers.session_policy import (
+    propose_session_policy,
+    session_policy_handoffs,
+)
 
 BASE_CONFIG = {
     "version": "v0.2",
@@ -36,14 +40,43 @@ BASE_CONFIG = {
     },
 }
 
-HIGH_SWITCH_SUMMARY = {
+CONFIG_WITHOUT_IDENTITY = copy.deepcopy(BASE_CONFIG)
+del CONFIG_WITHOUT_IDENTITY["global"]["router"]["learning"]["protection"]["identity"]
+
+# identity missing: every in-loop switch is one the protection never saw
+IDENTITY_FLAP_SUMMARY = {
     "records": 3,
     "sessions": 1,
     "model_switches": 2,
     "tool_loop_switches": 2,
+    "decision_drift_switches": 0,
     "selection_rejected": 0,
     "tool_loop_interrupted": 0,
     "mean_switches_per_session": 2.0,
+}
+
+# identity present: the loop hard-locked, the post-loop request flapped
+OUT_OF_LOCK_SUMMARY = {
+    "records": 4,
+    "sessions": 1,
+    "model_switches": 1,
+    "tool_loop_switches": 0,
+    "decision_drift_switches": 0,
+    "selection_rejected": 0,
+    "tool_loop_interrupted": 0,
+    "mean_switches_per_session": 1.0,
+}
+
+# every in-loop switch was a drift release (in-design, #5567)
+DRIFT_SUMMARY = {
+    "records": 6,
+    "sessions": 2,
+    "model_switches": 2,
+    "tool_loop_switches": 2,
+    "decision_drift_switches": 2,
+    "selection_rejected": 0,
+    "tool_loop_interrupted": 0,
+    "mean_switches_per_session": 1.0,
 }
 
 NOT_SEPARATE_DIAGNOSIS = {
@@ -65,29 +98,84 @@ def _variables_of(candidates):
 def test_no_evidence_proposes_nothing():
     assert propose_session_policy(BASE_CONFIG) == []
     assert propose_session_policy(BASE_CONFIG, replay_summary={}) == []
+    assert session_policy_handoffs(BASE_CONFIG, replay_summary={}) == []
 
 
-def test_tool_loop_switches_raise_stability_weight():
-    candidates = propose_session_policy(BASE_CONFIG, replay_summary=HIGH_SWITCH_SUMMARY)
+def test_unprotected_switches_propose_identity_headers():
+    # Z6: switches the protection never saw are an identity problem (W1/W2
+    # class), not a tuning-knob problem
+    candidates = propose_session_policy(
+        CONFIG_WITHOUT_IDENTITY, replay_summary=IDENTITY_FLAP_SUMMARY
+    )
     variables = _variables_of(candidates)
-    assert "stability_weight" in variables
-    candidate = next(c for c in candidates if c.variable == "stability_weight")
-    assert candidate.old == 1.0
-    assert candidate.new == 2.0
-    assert candidate.trigger["reason"] == "tool_loop_switches"
-    # exactly one variable changed in the candidate config
-    changed = _diff(BASE_CONFIG, candidate.config)
-    assert changed == [("global.router.learning.protection.tuning", "stability_weight")]
-    assert "stability_weight: 2" in yaml.safe_dump(candidate.config)
+    assert variables == ["identity.headers"]
+    candidate = candidates[0]
+    assert candidate.trigger["reason"] == "unprotected_tool_loop_switches"
+    assert candidate.new == {
+        "session": "x-session-id",
+        "conversation": "x-conversation-id",
+    }
+    # exactly one variable changed in the candidate config: the whole
+    # identity block is new (the base had none), per the leaf-level diff
+    changed = _diff(CONFIG_WITHOUT_IDENTITY, candidate.config)
+    assert changed == [("global.router.learning.protection", "identity")]
+    protection = candidate.config["global"]["router"]["learning"]["protection"]
+    assert protection["identity"]["headers"]["session"] == "x-session-id"
+    # the hold knobs stay untouched - the hard lock, not stability_weight,
+    # is what governs the tool loop
+    assert (
+        protection["tuning"]
+        == BASE_CONFIG["global"]["router"]["learning"]["protection"]["tuning"]
+    )
+    # a partially configured identity only adds the missing header
+    partial = copy.deepcopy(CONFIG_WITHOUT_IDENTITY)
+    partial["global"]["router"]["learning"]["protection"]["identity"] = {
+        "headers": {"session": "x-session-id"}
+    }
+    candidates = propose_session_policy(partial, replay_summary=IDENTITY_FLAP_SUMMARY)
+    assert candidates[0].new == {"conversation": "x-conversation-id"}
 
 
-def test_model_flips_raise_switch_margin():
-    summary = dict(HIGH_SWITCH_SUMMARY, tool_loop_switches=0)
-    candidates = propose_session_policy(BASE_CONFIG, replay_summary=summary)
-    assert "switch_margin" in _variables_of(candidates)
-    candidate = next(c for c in candidates if c.variable == "switch_margin")
-    assert candidate.old == 0.05
-    assert candidate.new == 0.1
+def test_configured_identity_hands_off_to_the_client():
+    # the headers are mapped but the switches still happened unprotected:
+    # the client is not sending them (W1/W2) - a handoff, never a knob
+    candidates = propose_session_policy(
+        BASE_CONFIG, replay_summary=IDENTITY_FLAP_SUMMARY
+    )
+    assert candidates == []
+    handoffs = session_policy_handoffs(
+        BASE_CONFIG, replay_summary=IDENTITY_FLAP_SUMMARY
+    )
+    assert [h["reason"] for h in handoffs] == ["unprotected_tool_loop_switches"]
+    assert "W1/W2" in handoffs[0]["note"]
+    # with the headers still unmapped the candidate path applies instead -
+    # no handoff yet
+    assert (
+        session_policy_handoffs(
+            CONFIG_WITHOUT_IDENTITY, replay_summary=IDENTITY_FLAP_SUMMARY
+        )
+        == []
+    )
+
+
+def test_out_of_lock_flaps_raise_margin_and_stability():
+    # Z6: the hold knobs govern ordinary (out-of-lock) scoring only - both
+    # candidates trigger together and each changes exactly one variable
+    candidates = propose_session_policy(BASE_CONFIG, replay_summary=OUT_OF_LOCK_SUMMARY)
+    assert _variables_of(candidates) == ["stability_weight", "switch_margin"]
+    stability, margin = candidates
+    assert stability.trigger["reason"] == "model_switches"
+    assert stability.old == 1.0
+    assert stability.new == 2.0
+    assert "hard lock" in stability.trigger["note"]
+    assert margin.old == 0.05
+    assert margin.new == 0.1
+    assert _diff(BASE_CONFIG, stability.config) == [
+        ("global.router.learning.protection.tuning", "stability_weight")
+    ]
+    assert _diff(BASE_CONFIG, margin.config) == [
+        ("global.router.learning.protection.tuning", "switch_margin")
+    ]
 
 
 def test_not_separate_separation_adds_the_agent_header():
@@ -104,12 +192,34 @@ def test_not_separate_separation_adds_the_agent_header():
     )
 
 
-def test_rejected_selections_raise_min_turns():
-    summary = dict(HIGH_SWITCH_SUMMARY, tool_loop_switches=0, selection_rejected=3)
+def test_drift_releases_are_a_calibration_handoff_not_a_knob():
+    # Z6/#5567: the drift transfer is in-design - over the per-task ceiling
+    # it points at threshold calibration, never at a protection knob
+    candidates = propose_session_policy(BASE_CONFIG, replay_summary=DRIFT_SUMMARY)
+    assert candidates == []
+    handoffs = session_policy_handoffs(BASE_CONFIG, replay_summary=DRIFT_SUMMARY)
+    assert [h["reason"] for h in handoffs] == ["decision_drift_rate"]
+    assert handoffs[0]["decision_drift_switches"] == 2
+    assert handoffs[0]["sessions"] == 2
+    assert "propose-calibrated" in handoffs[0]["note"]
+
+
+def test_rejected_selections_hand_off_to_the_candidate_set_check():
+    # Z6: rejected selections are a candidate-set/lock question, not
+    # min_turns_before_switch
+    summary = dict(
+        OUT_OF_LOCK_SUMMARY,
+        model_switches=0,
+        tool_loop_switches=0,
+        mean_switches_per_session=0.0,
+        selection_rejected=3,
+    )
     candidates = propose_session_policy(BASE_CONFIG, replay_summary=summary)
-    candidate = next(c for c in candidates if c.variable == "min_turns_before_switch")
-    assert candidate.old == 1
-    assert candidate.new == 2
+    assert _variables_of(candidates) == []
+    handoffs = session_policy_handoffs(BASE_CONFIG, replay_summary=summary)
+    assert [h["reason"] for h in handoffs] == ["selection_rejected"]
+    assert "candidate set" in handoffs[0]["note"]
+    assert "min_turns_before_switch" in handoffs[0]["note"]
 
 
 def test_exhausted_knobs_produce_no_candidate():
@@ -117,16 +227,12 @@ def test_exhausted_knobs_produce_no_candidate():
     raised["global"]["router"]["learning"]["protection"]["tuning"][
         "stability_weight"
     ] = 2.0
-    candidates = propose_session_policy(raised, replay_summary=HIGH_SWITCH_SUMMARY)
-    # the stability knob is at its raised value: no stability candidate even
-    # though the tool-loop switches still fire (nothing left to change)
-    assert "stability_weight" not in _variables_of(candidates)
-    # and with every knob raised there is nothing left to propose
     raised["global"]["router"]["learning"]["protection"]["tuning"][
         "switch_margin"
     ] = 0.2
-    summary = dict(HIGH_SWITCH_SUMMARY, selection_rejected=0)
-    assert propose_session_policy(raised, replay_summary=summary) == []
+    candidates = propose_session_policy(raised, replay_summary=OUT_OF_LOCK_SUMMARY)
+    # every hold knob is at its raised value: nothing left to change
+    assert candidates == []
 
 
 def _diff(base, candidate):
@@ -151,41 +257,46 @@ def _diff(base, candidate):
     sys.platform == "win32",
     reason="the runner's process-group teardown needs os.killpg (POSIX)",
 )
-def test_high_switch_diagnosis_candidate_switches_less_on_replay(tmp_path):
+def test_out_of_lock_flap_candidate_switches_less_on_replay(tmp_path):
     from pathlib import Path
 
     from tests.test_route_replay import _build_route_stack
 
     stack = _build_route_stack(tmp_path)
 
-    # the base candidate flaps mid-loop
-    base_config, base_env = stack("unprotected")
-    base_result = evaluate(base_config, base_env, tmp_path, "base")
-    assert base_result["summary"]["tool_loop_switches"] >= 1
-
-    # the high-switch evidence triggers the stability candidate
-    base_spec = yaml.safe_load(Path(base_config).read_text(encoding="utf-8"))
-    candidates = propose_session_policy(
-        base_spec, replay_summary=base_result["summary"]
+    # identity present: the loop hard-locked onto the baseline, and the
+    # post-loop request flapped under the low hold
+    base_config, base_env = stack("protected")
+    base_result = evaluate(
+        base_config, base_env, tmp_path, "base", identity="conv-ag6-base"
     )
-    stability = next(c for c in candidates if c.variable == "stability_weight")
-    assert stability.new == 2.0
+    summary = base_result["summary"]
+    assert summary["tool_loop_switches"] == 0
+    assert summary["model_switches"] == 1
 
-    # the raised candidate holds the lane through the tool loop
-    raised_config, raised_env = stack("unprotected", stability_weight=2.0)
-    raised = evaluate(raised_config, raised_env, tmp_path, "raised")
+    # the out-of-lock flap evidence triggers the hold candidates
+    base_spec = yaml.safe_load(Path(base_config).read_text(encoding="utf-8"))
+    candidates = propose_session_policy(base_spec, replay_summary=summary)
+    assert _variables_of(candidates) == ["stability_weight", "switch_margin"]
+
+    # the raised candidate holds the post-loop lane on replay
+    raised_config, raised_env = stack("protected", stability_weight=2.0)
+    raised = evaluate(
+        raised_config, raised_env, tmp_path, "raised", identity="conv-ag6-raised"
+    )
     assert raised["summary"]["tool_loop_switches"] == 0
+    assert raised["summary"]["model_switches"] == 0
 
 
-def evaluate(config, env, tmp_path, name):
+def evaluate(config, env, tmp_path, name, *, identity):
     from recipe_lab.runner import evaluate_route_replay
 
-    from tests.test_route_replay import _session_case
+    from tests.test_route_replay import _session_case_post_loop
 
     env = RunnerEnvLike(env, tmp_path, name)
     return evaluate_route_replay(
         candidate_config=config,
-        cases=[_session_case("s1", "conv-ag6")],
+        cases=[_session_case_post_loop("s1", identity)],
         env=env.env,
         router_model="vllm-sr/auto",
         request_timeout=30.0,
