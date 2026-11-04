@@ -426,7 +426,7 @@ def test_contract_truth_space_validation():
 # ---- integration: the probe over a fake router stack ----
 
 FAKE_ROUTE_REPLAY_ROUTER = """#!/usr/bin/env python3
-import hashlib, json, os, sys, threading
+import json, os, sys, threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import yaml
@@ -435,15 +435,20 @@ config_path = sys.argv[sys.argv.index("-config") + 1]
 cfg = yaml.safe_load(open(config_path, encoding="utf-8"))
 GATE = int(cfg["listeners"][0]["port"])
 API = int(sys.argv[sys.argv.index("-api-port") + 1])
+# "protected" = the client's identity is honored; "unprotected" simulates
+# identity missing, so the protection (and its traces) never engage.
 MODE = cfg.get("x-route-mode", "protected")
-# AG6: the fake router honours the real protection knob - a raised
-# stability weight holds the lane through the tool loop
+# Z6: the fake router models the real protection mechanism (upstream
+# #5567) - the tool loop is a hard lock independent of the tuning knobs,
+# a drifted decision releases the lock (traced decision_drift), and
+# switch_margin / stability_weight only widen the hold on ordinary
+# (out-of-lock) scoring.
 try:
-    WEIGHT = float(
-        cfg["global"]["router"]["learning"]["protection"]["tuning"]["stability_weight"]
-    )
+    tuning = cfg["global"]["router"]["learning"]["protection"]["tuning"]
+    WEIGHT = float(tuning.get("stability_weight", 1.0))
+    MARGIN = float(tuning.get("switch_margin", 0.05))
 except (KeyError, TypeError, ValueError):
-    WEIGHT = 1.0
+    WEIGHT, MARGIN = 1.0, 0.05
 STATE = os.environ["FAKE_STATE"]
 lock = threading.Lock()
 
@@ -475,28 +480,70 @@ class Handler(BaseHTTPRequestHandler):
             last.get("role") == "assistant" and last.get("tool_calls")
         )
         conversation = self.headers.get("x-conversation-id", "")
+        decision = "domain_other" if prompt.startswith("drift:") else "domain_code"
         with lock:
             state = json.load(open(STATE, encoding="utf-8"))
-            counter = state["turns"].get(conversation, 0)
-            state["turns"][conversation] = counter + 1
-            if MODE == "protected" or not in_tool_loop or WEIGHT >= 2.0:
-                model = "local/model-a"
-            else:
-                # an unprotected, low-stability candidate flaps onto the
-                # strong model mid-loop
-                model = "local/model-strong"
-            state["records"].append(
-                {
-                    "request_id": self.headers.get("x-request-id", ""),
-                    "prompt": prompt,
-                    "decision": "domain_code",
-                    "selected_model": model,
-                    "conversation_id": conversation,
-                    "session_id": self.headers.get("x-session-id", ""),
-                    "turn_index": counter,
-                    "timestamp": "2026-11-03T00:00:%02d" % counter,
-                }
+            conv = state["convs"].setdefault(
+                conversation, {"turns": 0, "model": "", "decision": ""}
             )
+            counter = conv["turns"]
+            conv["turns"] = counter + 1
+            identity = bool(conversation) and MODE == "protected"
+            drift = False
+            hard_locked = False
+            if not identity:
+                # protection skipped entirely: ordinary scoring everywhere -
+                # after the baseline turn the better-scoring strong model
+                # takes the lane unless the hold knobs are raised
+                if not conv["model"]:
+                    model = "local/model-a"
+                elif WEIGHT >= 2.0 or MARGIN >= 0.1:
+                    model = conv["model"]
+                else:
+                    model = "local/model-strong"
+            elif not conv["model"]:
+                # the first identified turn establishes the baseline
+                model = "local/model-a"
+            elif in_tool_loop and decision != conv["decision"]:
+                # Z6/#5567: classification moved to another decision - the
+                # lock releases and the new decision routes from its own
+                # candidates; the transfer is traced as decision_drift
+                model = "local/model-strong"
+                drift = True
+            elif in_tool_loop:
+                # the hard lock holds the admitting decision's model no
+                # matter what the tuning knobs say
+                model = conv["model"]
+                hard_locked = True
+            elif WEIGHT >= 2.0 or MARGIN >= 0.1:
+                # out-of-lock ordinary scoring: the raised hold knobs keep
+                # the lane
+                model = conv["model"]
+            else:
+                model = "local/model-strong"
+            if identity:
+                conv["model"] = model
+                if not conv["decision"]:
+                    conv["decision"] = decision
+            record = {
+                "request_id": self.headers.get("x-request-id", ""),
+                "prompt": prompt,
+                "decision": decision,
+                "selected_model": model,
+                "conversation_id": conversation,
+                "session_id": self.headers.get("x-session-id", ""),
+                "turn_index": counter,
+                "timestamp": "2026-11-03T00:00:%02d" % counter,
+            }
+            if identity:
+                # the protection trace rides the record only when the
+                # protection actually ran (identity present)
+                record["session_policy"] = {
+                    "phase": "tool_loop" if in_tool_loop else "user_turn",
+                    "decision_drift": drift,
+                    "hard_locked": hard_locked,
+                }
+            state["records"].append(record)
             json.dump(state, open(STATE, "w", encoding="utf-8"))
         out = json.dumps({"choices": [{"message": {"content": "ok"}}]}).encode()
         self._send(200, json.loads(out))
@@ -562,6 +609,48 @@ def _session_case(case_id: str, identity: str) -> dict:
     }
 
 
+def _session_case_drift(case_id: str, identity: str) -> dict:
+    """A recorded session whose second in-loop request classifies into
+    another decision: the lock releases (decision_drift, #5567) and the new
+    decision routes from its own candidates. The drifted request still sits
+    in the loop (its own tool call continues it), so its arriving phase is
+    the tool loop."""
+    case = _session_case(case_id, identity)
+    case["requests"][2] = {
+        "prompt": "drift: now plan the rollout",
+        "phase": TOOL_LOOP_PHASE,
+        "messages": [
+            {"role": "user", "content": "trace the rendering bug"},
+            {"role": "assistant", "tool_calls": [{"id": "t1"}]},
+            {"role": "tool", "tool_call_id": "t1", "content": "patched"},
+            {"role": "user", "content": "drift: now plan the rollout"},
+            {"role": "assistant", "tool_calls": [{"id": "t2"}]},
+            {"role": "tool", "tool_call_id": "t2", "content": "planning"},
+        ],
+    }
+    return case
+
+
+def _session_case_post_loop(case_id: str, identity: str) -> dict:
+    """A recorded session whose final turn is ordinary out-of-lock scoring:
+    one user turn, two in-loop requests (hard-locked with identity), then a
+    post-loop user request whose lane the tuning knobs govern."""
+    case = _session_case(case_id, identity)
+    case["requests"] = case["requests"] + [
+        {
+            "prompt": "summarize the fix",
+            "phase": USER_TURN_PHASE,
+            "messages": [
+                {"role": "user", "content": "trace the rendering bug"},
+                {"role": "assistant", "tool_calls": [{"id": "t1"}]},
+                {"role": "tool", "tool_call_id": "t1", "content": "patched"},
+                {"role": "user", "content": "summarize the fix"},
+            ],
+        }
+    ]
+    return case
+
+
 def _build_route_stack(tmp_path):
     """The fake route-replay stack builder (a plain helper, importable by
     other test modules - fixtures must not be called directly, which newer
@@ -572,9 +661,14 @@ def _build_route_stack(tmp_path):
     mock = tmp_path / "mock_backend.py"
     mock.write_text("import time\ntime.sleep(300)\n")
 
-    def make(mode: str, *, stability_weight: float = 1.0) -> tuple[Path, RunnerEnv]:
+    def make(
+        mode: str,
+        *,
+        stability_weight: float = 1.0,
+        switch_margin: float = 0.05,
+    ) -> tuple[Path, RunnerEnv]:
         state = tmp_path / f"state-{mode}.json"
-        state.write_text(json.dumps({"records": [], "turns": {}}), encoding="utf-8")
+        state.write_text(json.dumps({"records": [], "convs": {}}), encoding="utf-8")
         config = tmp_path / f"candidate-{mode}.yaml"
         config.write_text(
             "version: v0.2\n"
@@ -589,8 +683,13 @@ def _build_route_stack(tmp_path):
             "      protection:\n"
             "        enabled: true\n"
             "        scope: conversation\n"
+            "        identity:\n"
+            "          headers:\n"
+            "            session: x-session-id\n"
+            "            conversation: x-conversation-id\n"
             "        tuning:\n"
             f"          stability_weight: {stability_weight}\n"
+            f"          switch_margin: {switch_margin}\n"
         )
         env = RunnerEnv(
             router_bin=str(router),
@@ -644,3 +743,73 @@ def test_route_replay_detects_tool_loop_switches(route_stack, tmp_path, mode):
         assert summary["tool_loop_switches"] >= 1
         assert summary["model_shares"]["local/model-strong"] > 0
         assert gate.passed is False
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the runner's process-group teardown needs os.killpg (POSIX)",
+)
+def test_route_replay_hard_lock_holds_while_out_of_lock_follows_the_knobs(
+    route_stack, tmp_path
+):
+    # Z6: the tool loop is a hard lock independent of the tuning knobs -
+    # with identity present the in-loop requests hold the model, while the
+    # post-loop request's lane is ordinary scoring that a low hold lets flip
+    cases = [_session_case_post_loop("s1", "conv-replay-lock")]
+    config, env = route_stack("protected")
+    result = evaluate_route_replay(
+        candidate_config=config,
+        cases=cases,
+        env=env,
+        router_model="vllm-sr/auto",
+        request_timeout=30.0,
+        trial_timeout_s=60,
+        request_id_prefix="rl-rt-lock-",
+        gates={"max_unprotected_tool_loop_switches": 0},
+    )
+    summary = result["summary"]
+    # the loop stayed on the baseline model (hard lock), the post-loop
+    # request flapped: the same run shows both mechanisms decoupled
+    assert summary["tool_loop_switches"] == 0
+    assert summary["decision_drift_switches"] == 0
+    assert summary["model_switches"] == 1
+    assert summary["model_shares"]["local/model-strong"] == pytest.approx(0.25)
+    gate = {g.name: g for g in result["gate_results"]}[
+        "max_unprotected_tool_loop_switches"
+    ]
+    assert gate.passed is True
+
+
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="the runner's process-group teardown needs os.killpg (POSIX)",
+)
+def test_route_replay_drift_release_is_counted_separately(route_stack, tmp_path):
+    # Z6/#5567: a drifted in-loop request releases the lock and routes from
+    # the new decision's candidates - the transfer is traced decision_drift,
+    # stays out of the unprotected residual, and has its own per-task ceiling
+    cases = [_session_case_drift("s1", "conv-replay-drift")]
+    config, env = route_stack("protected")
+    result = evaluate_route_replay(
+        candidate_config=config,
+        cases=cases,
+        env=env,
+        router_model="vllm-sr/auto",
+        request_timeout=30.0,
+        trial_timeout_s=60,
+        request_id_prefix="rl-rt-drift-",
+        gates={
+            "max_unprotected_tool_loop_switches": 0,
+            "max_decision_drift_switches_per_task": 0.2,
+        },
+    )
+    summary = result["summary"]
+    assert summary["tool_loop_switches"] == 1
+    assert summary["decision_drift_switches"] == 1
+    gates = {g.name: g for g in result["gate_results"]}
+    # the release is in-design: the unprotected residual stays clean while
+    # the per-task drift rate (1 / 1 = 1.0) exceeds the 0.2 ceiling
+    assert gates["max_unprotected_tool_loop_switches"].value == 0.0
+    assert gates["max_unprotected_tool_loop_switches"].passed is True
+    assert gates["max_decision_drift_switches_per_task"].value == pytest.approx(1.0)
+    assert gates["max_decision_drift_switches_per_task"].passed is False
