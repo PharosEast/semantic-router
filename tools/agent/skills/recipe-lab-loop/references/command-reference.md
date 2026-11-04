@@ -263,7 +263,12 @@ proposals.
   so every lane is capability-filtered, ranked by the lambda-adjusted
   overall score and marked "default rule (unmeasured lane)" exactly like
   the built-in template path; privacy/security are pinned to the spec's
-  `local_models` with adaptation bypassed, not ranked). Session
+  `local_models` with adaptation bypassed, not ranked). The claude-code
+  contract matches the upstream agent-harness guide's identity mapping
+  (upstream #5369/#5726: Claude Code sends `x-claude-code-session-id`
+  instead of `x-session-id`, and `x-claude-code-agent-id` on subagent
+  requests - see the protection guide's "Agents that delegate to
+  subagents"). Session
   protection is written per client: claude-code protects the whole session
   keyed by the verified headers (x-claude-code-session-id, agent:
   x-claude-code-agent-id, from AG0-W2); other clients protect one
