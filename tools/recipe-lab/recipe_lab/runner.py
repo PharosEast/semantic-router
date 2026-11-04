@@ -481,13 +481,18 @@ def _post_messages(
     timeout: float,
     request_id: str | None = None,
     session_identity: str | None = None,
+    conversation_identity: bool = True,
 ) -> int:
     """Send one recorded request through the router, identity headers on.
 
     The route-replay tier replays a conversation in order, so every request
     carries the conversation's `x-session-id` and `x-conversation-id`
     (conversation-scoped protection binds to both, see AG1/W1) plus the
-    candidate-scoped `x-request-id` the replay store keeps verbatim.
+    candidate-scoped `x-request-id` the replay store keeps verbatim. A case
+    with `session_only_identity` replays a client that sends only the
+    session header (Z7: the missing-conversation-header scenario - the
+    protection's conversation identity resolves missing and the protection
+    skips the request entirely).
     """
     body = json.dumps(
         {"model": model, "max_tokens": 64, "messages": messages}
@@ -497,7 +502,8 @@ def _post_messages(
         headers["x-request-id"] = request_id
     if session_identity:
         headers["x-session-id"] = session_identity
-        headers["x-conversation-id"] = session_identity
+        if conversation_identity:
+            headers["x-conversation-id"] = session_identity
     request = urllib.request.Request(
         router_url + "/v1/chat/completions",
         data=body,
@@ -623,6 +629,7 @@ def probe_route_replay(
                     request_timeout,
                     request_id=request_id,
                     session_identity=identity,
+                    conversation_identity=not case.get("session_only_identity"),
                 )
         timings["request_s"] = time.monotonic() - request_started
 
