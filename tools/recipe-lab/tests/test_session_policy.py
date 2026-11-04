@@ -191,7 +191,7 @@ def evaluate(config, env, tmp_path, name):
         request_timeout=30.0,
         trial_timeout_s=60,
         request_id_prefix=f"rl-rt-{name}-",
-        gates={"max_tool_loop_switches": 0},
+        gates={"max_unprotected_tool_loop_switches": 0},
     )
 
 
