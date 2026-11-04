@@ -218,7 +218,7 @@ proposals.
 
 - `recipe-lab diagnose --records R --config C --output-dir D
   [--expect-rare d1,d2] [--rare-pct P] [--min-sample N]
-  [--utilization-warn U] [--source "..."]`
+  [--utilization-warn U] [--source "..."] [--agent-requests M]`
   Three checks over replay rows: decisions that never fire (dead) or fire
   under `--rare-pct` traffic share (rare; `--expect-rare` whitelists
   legitimately rare decisions such as security containment - reported,
@@ -226,7 +226,11 @@ proposals.
   (`--utilization-warn` flags a signal using less of its known range;
   `--min-sample` warns when the sample count is too small), and rule
   predicate sites no traffic ever satisfies (unreachable). `--records` is
-  the `collect-replays --unlabeled` output. Writes `diagnosis.json`
+  the `collect-replays --unlabeled` output. Z9: `--agent-requests` is the
+  probe's `agent-requests-<tag>.json` manifest - the client-recorded
+  sub-agent request ids join the protection traces' identity hashes so
+  sub-agent retention is judged without router changes (unjoinable or
+  empty manifests stay unverifiable). Writes `diagnosis.json`
   (recipe-lab-diagnosis-v1, input-hashed, byte-stable - the
   `next --diagnosis` input) and `diagnosis.md`.
 - `recipe-lab propose-calibrated --diagnosis D --base-config C --signal S

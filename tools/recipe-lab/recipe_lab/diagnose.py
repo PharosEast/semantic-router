@@ -373,12 +373,17 @@ def load_diagnostic_rows(path: str | Path) -> list[dict[str, Any]]:
     return rows
 
 
-def _agentic_evidence(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
+def _agentic_evidence(
+    rows: list[dict[str, Any]],
+    agent_requests: list[Any] | None = None,
+) -> dict[str, Any] | None:
     """AG4: the agentic evidence section, or None when the rows carry none.
 
     Present when any row carries a session phase, an agent marker, a
     session-policy block or a failed lifecycle - legacy single-turn rows
-    keep the historical diagnosis shape unchanged.
+    keep the historical diagnosis shape unchanged. `agent_requests` is the
+    client-side sub-agent manifest (Z9) that upgrades the separation check
+    from record markers to a request-id join.
     """
     has_evidence = any(
         row.get("phase")
@@ -391,7 +396,7 @@ def _agentic_evidence(rows: list[dict[str, Any]]) -> dict[str, Any] | None:
         return None
     return {
         "phase_distributions": phase_distributions(rows),
-        "agent_separation": agent_separation(rows),
+        "agent_separation": agent_separation(rows, agent_requests=agent_requests),
         "failures": failure_disclosure(rows),
     }
 
@@ -428,7 +433,11 @@ def phase_distributions(rows: list[dict[str, Any]]) -> dict[str, Any]:
                 # score-type decision signals only (decision:<name>); the
                 # per-choice keys (decision:<name>:<choice>) ride the
                 # full-signal section unchanged
-                if _numeric(value) and key.startswith("decision:") and key.count(":") == 1:
+                if (
+                    _numeric(value)
+                    and key.startswith("decision:")
+                    and key.count(":") == 1
+                ):
                     values_by_signal.setdefault(key, []).append(float(value))
         signals: dict[str, Any] = {}
         for key, values in sorted(values_by_signal.items()):
@@ -470,19 +479,120 @@ def _identity_missing(row: dict[str, Any]) -> bool:
     return True
 
 
-def agent_separation(rows: list[dict[str, Any]]) -> dict[str, Any]:
+def _protection_identity_hash(row: dict[str, Any]) -> str | None:
+    """The protection identity hash one judged row resolved to (Z9).
+
+    `identity.memory_key_hash` is the hash the protection actually holds
+    state under; None when the row has no trace or no hash (the protection
+    never resolved an identity for it).
+    """
+    policy = row.get("session_policy")
+    if not isinstance(policy, dict):
+        return None
+    identity = policy.get("identity")
+    if not isinstance(identity, dict):
+        return None
+    hash_value = identity.get("memory_key_hash")
+    return str(hash_value) if hash_value else None
+
+
+def agent_separation(
+    rows: list[dict[str, Any]],
+    *,
+    agent_requests: list[Any] | None = None,
+) -> dict[str, Any]:
     """AG4: do sub-agent requests keep their own protection identity?
 
-    An agent-marked request (record carries `agent_id`) that shares the
-    main conversation's identity - or carries none - is not kept separate:
-    conversation-scoped protection would fold the sub-agent's traffic into
-    the main agent's window. When no agent marker exists but identities are
-    missing outright, separate retention cannot hold either (the AG8
-    fixture case: the client sends no identity headers at all). With no
-    marker and every judged request identified, the check is unverifiable -
-    reported as a limitation, never asserted either way.
+    With a client-side manifest (`agent_requests` - the probe's
+    agent-requests-<tag>.json, Z9) the judgment joins those request ids to
+    the rows and compares each sub-agent request's `identity.memory_key_hash`
+    against the main traffic's: a sub-agent request sharing the main hash -
+    or carrying none - is not kept separate (conversation-scoped protection
+    would fold the sub-agent's traffic into the main agent's window). A
+    manifest id the replays cannot join, or a manifest without any sub-agent
+    request, is partial evidence: unverifiable, never asserted either way.
+
+    Without a manifest the record markers are the only evidence: an
+    agent-marked request that shares the main conversation's identity - or
+    carries none - is not kept separate. When no agent marker exists but
+    identities are missing outright, separate retention cannot hold either
+    (the AG8 fixture case: the client sends no identity headers at all).
+    With no marker and every judged request identified, the check is
+    unverifiable - reported as a limitation, never asserted either way.
     """
     judged = [row for row in rows if isinstance(row.get("session_policy"), dict)]
+    if agent_requests is not None:
+        wanted: list[str] = []
+        for entry in agent_requests:
+            request_id = entry.get("request_id") if isinstance(entry, dict) else entry
+            if str(request_id or "").strip():
+                wanted.append(str(request_id).strip())
+        if not wanted:
+            return {
+                "status": "unverifiable",
+                "manifest_requests": 0,
+                "reason": (
+                    "the client manifest names no sub-agent request; there is "
+                    "no sub-agent traffic to judge"
+                ),
+            }
+        by_id = {str(row.get("request_id") or ""): row for row in judged}
+        joined = [(request_id, by_id.get(request_id)) for request_id in wanted]
+        unjoinable = [rid for rid, row in joined if row is None]
+        if unjoinable:
+            return {
+                "status": "unverifiable",
+                "manifest_requests": len(wanted),
+                "unjoinable_request_ids": unjoinable,
+                "reason": (
+                    f"{len(unjoinable)} manifest request(s) joined no replay "
+                    "row with a protection trace - the evidence is partial"
+                ),
+            }
+        main_hashes = Counter(
+            hash_value
+            for row in judged
+            if str(row.get("request_id") or "") not in set(wanted)
+            for hash_value in [_protection_identity_hash(row)]
+            if hash_value
+        )
+        main_hash = main_hashes.most_common(1)[0][0] if main_hashes else None
+        if main_hash is None:
+            return {
+                "status": "unverifiable",
+                "manifest_requests": len(wanted),
+                "reason": (
+                    "no identified non-agent row to compare the sub-agent "
+                    "identity against"
+                ),
+            }
+        hashes = {rid: _protection_identity_hash(row) for rid, row in joined}
+        shared = sorted(
+            rid for rid, hash_value in hashes.items() if hash_value == main_hash
+        )
+        missing = sorted(
+            rid for rid, hash_value in hashes.items() if hash_value is None
+        )
+        if shared or missing:
+            return {
+                "status": "not_separate",
+                "manifest_requests": len(wanted),
+                "shared_identity_request_ids": shared,
+                "requests_missing_identity": len(missing),
+                "reason": (
+                    "sub-agent requests share the main protection identity "
+                    f"({len(shared)} request(s)) or carry none ({len(missing)} "
+                    "request(s))"
+                ),
+            }
+        return {
+            "status": "separate",
+            "manifest_requests": len(wanted),
+            "reason": (
+                "every manifest sub-agent request resolved to a protection "
+                "identity distinct from the main traffic"
+            ),
+        }
     agent_rows = [row for row in judged if row.get("agent_id")]
     missing = [row for row in judged if _identity_missing(row)]
     if agent_rows:
@@ -544,12 +654,8 @@ def failure_disclosure(rows: list[dict[str, Any]]) -> dict[str, Any]:
     diagnosis so a protection misconfiguration is visible before any
     proposal is made on top of it.
     """
-    failed = [
-        row for row in rows if str(row.get("lifecycle_state") or "") == "failed"
-    ]
-    reasons = Counter(
-        str(row.get("terminal_reason") or "unknown") for row in failed
-    )
+    failed = [row for row in rows if str(row.get("lifecycle_state") or "") == "failed"]
+    reasons = Counter(str(row.get("terminal_reason") or "unknown") for row in failed)
     return {
         "failed_requests": len(failed),
         "terminal_reasons": dict(sorted(reasons.items())),
@@ -570,6 +676,7 @@ def build_diagnosis(
     rare_pct: float = DEFAULT_RARE_PCT,
     utilization_warn: float = DEFAULT_UTILIZATION_WARN,
     min_sample: int = DEFAULT_MIN_SAMPLE,
+    agent_requests: list[Any] | None = None,
 ) -> dict[str, Any]:
     """Assemble the full diagnosis dict (pure function, byte-stable output).
 
@@ -577,13 +684,15 @@ def build_diagnosis(
     rare decisions, compressed score ranges, unreachable threshold groups,
     and finally the small-sample warning (traffic representativeness,
     sub-issue 7 §2.4: quantiles are only as good as the traffic behind them).
+    `agent_requests` is the client-side sub-agent manifest (Z9) feeding the
+    separation join.
     """
     coverage = decision_coverage(
         rows, config, expect_rare=expect_rare, rare_pct=rare_pct
     )
     distribution = signal_distribution(rows, config)
     reachability = threshold_reachability(rows, config)
-    agentic = _agentic_evidence(rows)
+    agentic = _agentic_evidence(rows, agent_requests=agent_requests)
 
     alerts: list[dict[str, Any]] = []
     for name in coverage["dead_decisions"]:
@@ -812,11 +921,7 @@ def render_markdown(diagnosis: dict[str, Any]) -> str:
                     f"| {entry['phase']} | {entry['requests']} | {decisions or '-'} |"
                 )
             signal_keys = sorted(
-                {
-                    key
-                    for entry in phases
-                    for key in (entry.get("signals") or {})
-                }
+                {key for entry in phases for key in (entry.get("signals") or {})}
             )
             for key in signal_keys:
                 lines += [

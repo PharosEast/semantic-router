@@ -879,6 +879,20 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
     expect_rare = [
         part.strip() for part in str(args.expect_rare).split(",") if part.strip()
     ]
+    agent_requests = None
+    if args.agent_requests:
+        try:
+            manifest = json.loads(Path(args.agent_requests).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"cannot read agent-requests manifest: {exc}") from exc
+        if isinstance(manifest, dict):
+            manifest = manifest.get("agent_requests")
+        if not isinstance(manifest, list):
+            raise SystemExit(
+                "agent-requests manifest must be a list or carry an "
+                "agent_requests list (the probe's agent-requests-<tag>.json)"
+            )
+        agent_requests = manifest
     diagnosis = build_diagnosis(
         rows,
         config,
@@ -891,6 +905,7 @@ def cmd_diagnose(args: argparse.Namespace) -> int:
         rare_pct=args.rare_pct,
         utilization_warn=args.utilization_warn,
         min_sample=args.min_sample,
+        agent_requests=agent_requests,
     )
     json_path, md_path = write_diagnosis(diagnosis, args.output_dir)
     _print_json(
@@ -2973,6 +2988,13 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=DEFAULT_UTILIZATION_WARN,
         help="warn when a known-range signal uses less of its range than this",
+    )
+    p_diag.add_argument(
+        "--agent-requests",
+        default=None,
+        help="Z9: the probe's agent-requests-<tag>.json manifest - joins the "
+        "client-recorded sub-agent request ids to the protection traces' "
+        "identity hashes to judge sub-agent retention",
     )
     p_diag.set_defaults(func=cmd_diagnose)
 

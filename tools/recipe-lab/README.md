@@ -70,7 +70,7 @@ pip install -e '.[dev]'
 | `bindings` | C4+C5 冷启动候选（模板路径，sub-issue-8 §2.2）：路由空间检查（无空间则出"不建议路由"报告、不生成候选）→ 每个 λ 一份 bindings（能力过滤 → 正确率 − λ×归一化成本排序 → 满足 `minimum_candidates`；未测量 lane 按默认规则并标注"未经实测"；能力无法满足的 lane 必须 `--exclude-decision` 显式排除）→ `recipe builtin init` 以 spec 的 providers_config 生成候选（评估副本关闭响应缓存）→ `config validate` 通过才落盘；旁车记模板哈希/逐 lane 依据/未实测与被排除 lane |
 | `bootstrap` | C4+C5 冷启动候选（**遗留 domain 模板路径**，sub-issue-8 §2.5，需显式 `--legacy-domain-template`，不计入完成条件）：每个 λ 调真实 `result_to_config.py` 出骨架（只吃 calib，Warning 即拒绝），补全成可运行配置（契约端点/按第一名分组的 `route-<模型>` 决策/流量优先级/缓存与 tools 关闭）并逐个过 `config validate` 后才落盘；Y2：候选的分类节（modules/embeddings）来自 `--classification-config`（与 observe-labels 的种子同源，骨架副本被丢弃），随后 dev split 经种子与每个候选各观测一次，标签一致率 < 99% 拒绝（exit 2），一致率与分类源哈希写入 provenance 旁车 |
 | `bank` | 构建 / 导入 / 应用 per-case/per-model 答案库（`contains` / `mcq` 判卷，I；`import` 直接转换 C3 画像的 dev judged.jsonl，C6） |
-| `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D） |
+| `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D）；`--agent-requests` 以 probe 的子 agent 清单按请求 id join 保护轨迹身份哈希，判定子 agent 是否独立保持（Z9，不可 join 或空清单保持 unverifiable） |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
 | `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |
