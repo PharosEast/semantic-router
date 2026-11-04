@@ -134,6 +134,20 @@ def _candidate_config(
             ],
         }
 
+    backend_refs = [
+        backend_ref("qwen/qwen3.6-rocm"),
+        backend_ref("google/gemini-2.5-flash-lite"),
+        backend_ref("google/gemini-3.1-pro"),
+    ]
+    # the recipe's modelCards name more models than this candidate provides;
+    # the router rejects a modelCard no provider model backs, so keep only
+    # the cards the mock backend actually serves
+    provided = {model["name"] for model in backend_refs}
+    model_cards = [
+        card
+        for card in fixture["routing"]["modelCards"]
+        if card.get("name") in provided
+    ]
     config = {
         "version": "v0.3",
         "listeners": [
@@ -167,15 +181,9 @@ def _candidate_config(
                 "system": {"decision_model": {"deployment": "primary"}},
             },
         },
-        "providers": {
-            "models": [
-                backend_ref("qwen/qwen3.6-rocm"),
-                backend_ref("google/gemini-2.5-flash-lite"),
-                backend_ref("google/gemini-3.1-pro"),
-            ]
-        },
+        "providers": {"models": backend_refs},
         "routing": {
-            "modelCards": fixture["routing"]["modelCards"],
+            "modelCards": model_cards,
             "signals": fixture["routing"]["signals"],
             "decisions": decisions,
         },
