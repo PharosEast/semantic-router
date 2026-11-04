@@ -85,7 +85,11 @@ from .adapters.router_replay import (
     fetch_replays,
     session_rows_for_run,
 )
-from .agentic import agentic_cost_summary, agentic_gate_results
+from .agentic import (
+    agentic_cost_summary,
+    agentic_gate_results,
+    replay_switch_evidence,
+)
 from .contract import (
     Constraint,
     ContractError,
@@ -1674,11 +1678,16 @@ def verify_live(
     # Z4: when the caller provided no rows, the last completed pair's own
     # fetched rows carry the evidence; a side without them (no endpoint,
     # failed fetch, non-completed run) stays unevaluated.
+    # Z5: the candidate arm's replay rows also classify its tool-loop
+    # switches by cause - the unprotected ceiling subtracts the drift
+    # releases from the continuity total, and the drift ceiling rates
+    # them per replay session.
     if replay_rows is None and last_replays is not None:
         replay_rows = last_replays[1]["rows"] if last_replays[1] else None
     if baseline_replay_rows is None and last_replays is not None:
         baseline_replay_rows = last_replays[0]["rows"] if last_replays[0] else None
     agentic_gates: list[Any] = []
+    candidate_switches = None
     if agentic:
         candidate_continuity = (
             _arm_continuity(last_sections[1], routing_arm=True)
@@ -1704,12 +1713,18 @@ def verify_live(
             if baseline_replay_rows is not None
             else None
         )
+        candidate_switches = (
+            replay_switch_evidence(list(replay_rows))
+            if replay_rows is not None
+            else None
+        )
         agentic_gates = agentic_gate_results(
             workload.resolved_agentic_gates(),
             candidate_continuity=candidate_continuity,
             baseline_continuity=baseline_continuity,
             candidate_events=candidate_events,
             baseline_events=baseline_events,
+            candidate_switches=candidate_switches,
         )
     # M2: the pairs' statistics merge conservatively and drive the paired
     # decision (min_cases reads the distinct-case count, not the sum over
@@ -1730,6 +1745,21 @@ def verify_live(
         agentic_gates=agentic_gates,
     )
     reasons = list(verdict.reasons)
+    # Z5: an exceeded decision-drift ceiling is a threshold-calibration
+    # signal - the drift transfer is in-design (#5567), so the remedy is
+    # recalibrating the drift threshold from the tool-loop phase's score
+    # distribution, not chasing a routing regression.
+    if any(
+        gate.name == "max_decision_drift_switches_per_task"
+        and gate.evaluated
+        and not gate.passed
+        for gate in agentic_gates
+    ):
+        reasons.append(
+            "decision-drift switch ceiling exceeded: recalibrate the drift "
+            "threshold from the tool-loop phase score distribution "
+            "(recipe-lab propose-calibrated)"
+        )
     reasons.extend(diagnostics)
     if undeclared:
         reasons.append(
@@ -1796,6 +1826,18 @@ def verify_live(
                     last_replays[0] if last_replays is not None else None
                 ),
             },
+            # Z5: the candidate arm's replay switch classification by cause
+            # (None when no replay rows reached the judgment).
+            "switch_evidence": (
+                {
+                    "tool_loop_switches": candidate_switches.tool_loop_switches,
+                    "decision_drift": candidate_switches.decision_drift,
+                    "sessions": candidate_switches.sessions,
+                    "unprotected": candidate_switches.unprotected,
+                }
+                if candidate_switches is not None
+                else None
+            ),
             "cost": agentic_cost_summary(pair_comparisons),
         }
     if not spec.gates:

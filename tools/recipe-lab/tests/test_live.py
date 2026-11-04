@@ -2678,6 +2678,21 @@ def test_verify_live_agentic_pass_flow_records_continuity(tmp_path):
         "mean_switches_per_task": 0.0,
         "model_switches_by_phase": {},
     }
+    # Z5: one clean session of replay rows - the switch gates read the
+    # drift split from it (zero switches, one task) alongside the
+    # event-count gates at zero.
+    replay_rows = [
+        {
+            "routed": "local/weak",
+            "request_id": "req-1",
+            "record_ts": "10",
+            "session": {
+                "conversation_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "session_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "turn_index": 1,
+            },
+        }
+    ]
     stub = VerifyStub(
         registry=[
             {
@@ -2713,10 +2728,8 @@ def test_verify_live_agentic_pass_flow_records_continuity(tmp_path):
         ],
         work_dir=tmp_path,
         workload=_agentic_workload(),
-        # AG7: empty replay record sets mean the replay-sourced stability
-        # gates evaluate over zero recorded sessions (both pass at 0)
-        replay_rows=[],
-        baseline_replay_rows=[],
+        replay_rows=replay_rows,
+        baseline_replay_rows=replay_rows,
     )
     assert result["verdict"] == "PASS"
     # AG1: the candidate arm's continuity sections ride the result verbatim
@@ -2730,7 +2743,14 @@ def test_verify_live_agentic_pass_flow_records_continuity(tmp_path):
         "max_mean_switches_per_task": "pass",
         "max_selection_rejected": "pass",
         "max_tool_loop_interrupted": "pass",
-        "max_tool_loop_switches": "pass",
+        "max_unprotected_tool_loop_switches": "pass",
+        "max_decision_drift_switches_per_task": "pass",
+    }
+    assert result["agentic"]["switch_evidence"] == {
+        "tool_loop_switches": 0.0,
+        "decision_drift": 0.0,
+        "sessions": 1,
+        "unprotected": 0.0,
     }
     assert result["agentic"]["cost"]["complete"] is False
 
@@ -2745,6 +2765,20 @@ def test_verify_live_agentic_tool_loop_switch_fails_the_verdict(tmp_path):
         "mean_switches_per_task": 1.0,
         "model_switches_by_phase": {"tool_loop": 2},
     }
+    # Z5: the replay rows record no drift releases, so both continuity
+    # tool-loop switches stay in the unprotected residual
+    replay_rows = [
+        {
+            "routed": "local/weak",
+            "request_id": "req-1",
+            "record_ts": "10",
+            "session": {
+                "conversation_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "session_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "turn_index": 1,
+            },
+        }
+    ]
     stub = VerifyStub(
         registry=[
             {
@@ -2780,15 +2814,133 @@ def test_verify_live_agentic_tool_loop_switch_fails_the_verdict(tmp_path):
         ],
         work_dir=tmp_path,
         workload=_agentic_workload(),
-        replay_rows=[],
-        baseline_replay_rows=[],
+        replay_rows=replay_rows,
+        baseline_replay_rows=replay_rows,
     )
     # the stability veto outranks the paired improvement (0.80 -> 0.90)
     assert result["verdict"] == "FAIL"
-    assert result["agentic"]["gates"]["max_tool_loop_switches"] == "fail"
+    assert result["agentic"]["gates"]["max_unprotected_tool_loop_switches"] == "fail"
     assert any(
         "agentic stability gate exceeded" in reason for reason in result["reasons"]
     )
+    assert result["agentic"]["switch_evidence"] == {
+        "tool_loop_switches": 0.0,
+        "decision_drift": 0.0,
+        "sessions": 1,
+        "unprotected": 0.0,
+    }
+
+
+def test_verify_live_agentic_drift_ceiling_points_at_calibration(tmp_path):
+    # Z5: drift releases are in-design (#5567) - exceeding the per-task
+    # drift ceiling still fails the verdict, but with a clean unprotected
+    # residual the reason points at threshold calibration, not a routing
+    # regression.
+    continuity = {
+        "session_mode": "session_aware",
+        "multi_request_tasks": 2,
+        "model_switches": 2,
+        "switched_tasks": 2,
+        "unswitched_tasks": 0,
+        "mean_switches_per_task": 1.0,
+        "model_switches_by_phase": {"tool_loop": 2},
+    }
+    replay_rows = [
+        {
+            "routed": "local/weak",
+            "request_id": "req-1",
+            "record_ts": "10",
+            "session": {
+                "conversation_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "session_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "turn_index": 1,
+            },
+        },
+        {
+            "routed": "local/strong",
+            "request_id": "req-2",
+            "record_ts": "11",
+            "session": {
+                "conversation_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "session_id": "run-cand-1-deadbeefcafe0123456789ab",
+                "turn_index": 1,
+            },
+            "session_policy": {"phase": "tool_loop", "decision_drift": True},
+        },
+        {
+            "routed": "local/weak",
+            "request_id": "req-3",
+            "record_ts": "20",
+            "session": {
+                "conversation_id": "run-cand-1-cafebabecafe0123456789cd",
+                "session_id": "run-cand-1-cafebabecafe0123456789cd",
+                "turn_index": 1,
+            },
+        },
+        {
+            "routed": "local/strong",
+            "request_id": "req-4",
+            "record_ts": "21",
+            "session": {
+                "conversation_id": "run-cand-1-cafebabecafe0123456789cd",
+                "session_id": "run-cand-1-cafebabecafe0123456789cd",
+                "turn_index": 1,
+            },
+            "session_policy": {"phase": "tool_loop", "decision_drift": True},
+        },
+    ]
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+        compare_values={
+            **_compare_values(0.80, 0.90),
+            "candidate_targets": [{"id": "mom-router", "continuity": continuity}],
+        },
+    )
+    stub.setup_response = _SETUP_READY
+    stub.baseline_doc["manifest"]["targets"] = [
+        {
+            "id": "mom-router",
+            "kind": "mom",
+            "config_hash": _MOM_CONFIG_HEX,
+            "session_mode": "session_aware",
+        }
+    ]
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+        replay_rows=replay_rows,
+        baseline_replay_rows=replay_rows,
+    )
+    assert result["verdict"] == "FAIL"
+    # both continuity switches were drift releases: the unprotected
+    # residual is clean, the per-task drift rate (2 / 2 = 1.0 > 0.2) failed
+    assert result["agentic"]["gates"]["max_unprotected_tool_loop_switches"] == "pass"
+    assert result["agentic"]["gates"]["max_decision_drift_switches_per_task"] == "fail"
+    assert any(
+        "recalibrate the drift threshold" in reason for reason in result["reasons"]
+    )
+    assert result["agentic"]["switch_evidence"] == {
+        "tool_loop_switches": 2.0,
+        "decision_drift": 2.0,
+        "sessions": 2,
+        "unprotected": 0.0,
+    }
 
 
 def test_verify_live_agentic_gates_without_replay_records_stay_incomplete(
@@ -2989,6 +3141,14 @@ def test_verify_live_agentic_fetches_arm_replays_by_session_id(tmp_path, monkeyp
         "run_id": "run-base-trial-1",
         "endpoint": "http://127.0.0.1:8080",
         "rows": 2,
+    }
+    # Z5: the candidate arm's switch classification rides the result too -
+    # two sessions, no routed changes, nothing drift-released
+    assert result["agentic"]["switch_evidence"] == {
+        "tool_loop_switches": 0.0,
+        "decision_drift": 0.0,
+        "sessions": 2,
+        "unprotected": 0.0,
     }
     assert any(
         "agentic stability gate exceeded" in reason for reason in result["reasons"]

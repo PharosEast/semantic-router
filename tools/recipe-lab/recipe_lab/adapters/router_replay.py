@@ -295,22 +295,27 @@ def session_rows_for_run(
     run-id prefix (other traffic on the same router stays out) and rows
     keep the shape session attribution judges - routed model, request id,
     timeline / lifecycle / session evidence. No case join: the agentic
-    stability gates count session events, not graded answers.
+    stability gates count session events, not graded answers. Z5: the
+    record's session-policy protection trace (`decision_drift` / `phase`)
+    rides beside the session evidence so the switch gates can split the
+    switches by cause; records without a trace keep their shape.
     """
     rows: list[dict[str, Any]] = []
     for record in records:
         if not _record_in_run(record, run_id):
             continue
-        rows.append(
-            {
-                "routed": _record_field(record, "selected_model", "SelectedModel")
-                or "",
-                "request_id": str(
-                    _record_field(record, "request_id", "RequestID") or ""
-                ),
-                **_record_evidence(record),
-            }
-        )
+        session_policy = _record_field(record, "session_policy", "SessionPolicy")
+        row: dict[str, Any] = {
+            "routed": _record_field(record, "selected_model", "SelectedModel")
+            or "",
+            "request_id": str(
+                _record_field(record, "request_id", "RequestID") or ""
+            ),
+            **_record_evidence(record),
+        }
+        if isinstance(session_policy, dict):
+            row["session_policy"] = session_policy
+        rows.append(row)
     return rows
 
 

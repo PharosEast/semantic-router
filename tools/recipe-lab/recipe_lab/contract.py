@@ -255,18 +255,28 @@ AGENTIC_BENCHMARKS = {"terminal-bench-2.1", "tau3"}
 # full set (defaults below); a workload may override values, not the set.
 # An exceeded ceiling vetoes the live verdict with FAIL; `baseline` as a
 # value (only valid for max_tool_loop_interrupted) pins the baseline arm's
-# measured interruption count.
+# measured interruption count. Z5: upstream #5567 releases the tool-loop
+# lock when classification drifts to a different decision, so a raw
+# tool-loop switch count cannot be a zero ceiling - the drift transfer is
+# in-design. `max_unprotected_tool_loop_switches` caps the continuity
+# tool-loop total minus the replay drift releases (the residual the
+# identity-missing / bypassed switches live in), and
+# `max_decision_drift_switches_per_task` caps the drift transfers per
+# replay session; exceeding the drift ceiling points at threshold
+# calibration (propose-calibrated), not a routing regression.
 AGENTIC_GATE_NAMES = (
-    "max_tool_loop_switches",
+    "max_unprotected_tool_loop_switches",
     "max_selection_rejected",
     "max_tool_loop_interrupted",
     "max_mean_switches_per_task",
+    "max_decision_drift_switches_per_task",
 )
 DEFAULT_AGENTIC_GATES: dict[str, float | str] = {
-    "max_tool_loop_switches": 0,
+    "max_unprotected_tool_loop_switches": 0,
     "max_selection_rejected": 0,
     "max_tool_loop_interrupted": "baseline",
     "max_mean_switches_per_task": 1.0,
+    "max_decision_drift_switches_per_task": 0.2,
 }
 WORKLOAD_ROLES = {"tune", "transfer"}
 # M5: default auto "not worse" guard per workload - the workload's paired

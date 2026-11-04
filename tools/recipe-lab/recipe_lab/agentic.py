@@ -3,15 +3,25 @@
 An agentic workload is judged on task success rate through the M2 paired
 machinery like every other workload; three lenses are added on top:
 
-- Stability hard gates: tool-loop switches, rejected (503) selections,
-  tool-loop interruptions and the per-task switch average are ceilings -
-  an exceeded gate vetoes the verdict with FAIL, an unevaluable gate keeps
-  the verdict INCONCLUSIVE (missing evidence is never counted as zero).
-  Switch evidence comes from sr-bench's continuity section
-  (`model_switches_by_phase`, `mean_switches_per_task`); rejected and
-  interrupted evidence comes from session attribution over router replay
-  records (`session_attribution.analyze_sessions`, the attribute-session
-  judgment reused verbatim).
+- Stability hard gates: unprotected tool-loop switches, rejected (503)
+  selections, tool-loop interruptions and the per-task switch average are
+  ceilings - an exceeded gate vetoes the verdict with FAIL, an unevaluable
+  gate keeps the verdict INCONCLUSIVE (missing evidence is never counted
+  as zero). Z5: upstream #5567 releases the tool-loop lock when
+  classification drifts to a different decision, so a raw tool-loop
+  switch count cannot be a zero ceiling - the drift transfer is in-design.
+  The switch gate splits by cause: `max_unprotected_tool_loop_switches`
+  caps the continuity tool-loop total minus the drift-released switches
+  (the residual the identity-missing and bypassed switches live in, since
+  only sr-bench's continuity sees those), and
+  `max_decision_drift_switches_per_task` caps the drift transfers per
+  replay session - exceeding it points at threshold calibration, not a
+  routing regression. Continuity evidence comes from sr-bench's
+  continuity section (`model_switches_by_phase`, `mean_switches_per_task`);
+  the drift split and the rejected / interrupted evidence come from
+  session attribution over the arm's own replay records
+  (`session_attribution.analyze_sessions` for events, the protection
+  traces' `decision_drift` for the cause).
 - The R arm (random mixture) is computed per task (per session): the
   candidate arm's per-model task shares weight the reference arms'
   per-task results; the point delta is analytic and the interval is a
@@ -104,12 +114,127 @@ def _mean_switches(continuity: Mapping[str, Any] | None) -> float | None:
     return _number(continuity.get("mean_switches_per_task"))
 
 
-def _event_count(
-    events: Mapping[str, int] | None, event_class: str
-) -> float | None:
+def _event_count(events: Mapping[str, int] | None, event_class: str) -> float | None:
     if events is None:
         return None
     return float(events.get(event_class, 0))
+
+
+@dataclass(frozen=True)
+class SwitchEvidence:
+    """Replay-side switch classification by cause (Z5).
+
+    `tool_loop_switches` counts the session-ordered routed-model changes
+    whose *arriving* request sat in the tool-loop phase (the same arriving
+    rule the continuity section counts by); `decision_drift` counts those
+    the protection trace released as decision drift (an in-design
+    transfer, #5567); `sessions` is the distinct session count the rows
+    cover (one sr-bench task = one session). The unprotected residual is
+    the total minus the drift-released switches - the switches whose
+    protection was missing entirely (no session identity, bypassed
+    provider state, observe mode) are invisible to the replay rows and
+    survive only in the continuity total, so the residual is what the
+    zero ceiling judges.
+    """
+
+    tool_loop_switches: float
+    decision_drift: float
+    sessions: int
+
+    @property
+    def unprotected(self) -> float:
+        return self.tool_loop_switches - self.decision_drift
+
+
+def _switch_session_key(row: Mapping[str, Any]) -> str | None:
+    """The conversation key one replay row belongs to (Z5).
+
+    Same convention as session attribution: the row's session evidence
+    names the conversation first, the session id second. One conversation
+    is one sr-bench task.
+    """
+    session = row.get("session")
+    if not isinstance(session, Mapping):
+        return None
+    for key in ("conversation_id", "session_id"):
+        value = session.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _switch_order(row: Mapping[str, Any]) -> tuple[int, str, str]:
+    """The request order inside one session (session attribution's order)."""
+    session = row.get("session")
+    turn_index = session.get("turn_index") if isinstance(session, Mapping) else 0
+    return (
+        turn_index,
+        str(row.get("record_ts") or ""),
+        str(row.get("request_id") or ""),
+    )
+
+
+def _arriving_policy(row: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    """The arriving request's protection trace, when the record carried one."""
+    policy = row.get("session_policy")
+    return policy if isinstance(policy, Mapping) else None
+
+
+def replay_switch_evidence(
+    rows: Sequence[Mapping[str, Any]] | None,
+) -> SwitchEvidence | None:
+    """Classify one arm's replay rows into switches by cause (Z5).
+
+    Rows are the `session_rows_for_run` output of one arm run. Per session
+    (conversation), requests sort by (turn_index, record_ts, request_id) -
+    session attribution's order - and adjacent routed-model changes count
+    as switches when the arriving request's protection trace names the
+    tool-loop phase. A trace marked `decision_drift` classifies the switch
+    as a drift transfer; without a trace the arriving phase is unknown and
+    the change stays out (the continuity total still sees it, so the
+    residual gate absorbs it on the unprotected side). Rows without
+    session identity or a turn index cannot be ordered into a task and
+    stay out of the session count. None rows mean no evidence was
+    fetched; empty rows are evidence of zero recorded sessions, not
+    missing evidence.
+    """
+    if rows is None:
+        return None
+    sessions: dict[str, list[Mapping[str, Any]]] = {}
+    for row in rows:
+        key = _switch_session_key(row)
+        if key is None:
+            continue
+        session = row.get("session")
+        turn_index = session.get("turn_index") if isinstance(session, Mapping) else None
+        # not an orderable session request (session attribution's rule)
+        if isinstance(turn_index, bool) or not isinstance(turn_index, int):
+            continue
+        sessions.setdefault(key, []).append(row)
+    tool_loop_switches = 0.0
+    decision_drift = 0.0
+    for conversation in sorted(sessions):
+        routed = [
+            row
+            for row in sorted(sessions[conversation], key=_switch_order)
+            if str(row.get("routed") or "")
+        ]
+        for previous, arriving in zip(routed, routed[1:]):
+            if str(previous.get("routed") or "") == str(arriving.get("routed") or ""):
+                continue
+            policy = _arriving_policy(arriving)
+            if policy is None:
+                continue  # arriving phase unknown; continuity still counts it
+            if policy.get("phase") != TOOL_LOOP_PHASE:
+                continue
+            tool_loop_switches += 1
+            if policy.get("decision_drift") is True:
+                decision_drift += 1
+    return SwitchEvidence(
+        tool_loop_switches=tool_loop_switches,
+        decision_drift=decision_drift,
+        sessions=len(sessions),
+    )
 
 
 def agentic_gate_results(
@@ -119,28 +244,43 @@ def agentic_gate_results(
     baseline_continuity: Mapping[str, Any] | None = None,
     candidate_events: Mapping[str, int] | None = None,
     baseline_events: Mapping[str, int] | None = None,
+    candidate_switches: SwitchEvidence | None = None,
 ) -> list[AgenticGateResult]:
     """Resolve the agentic stability ceilings against the measured evidence.
 
     `candidate_events` / `baseline_events` are the session-attribution
     `event_counts` of the candidate and baseline arms (None = no replay
     records were provided, so the replay-sourced gates stay unevaluated).
-    A `baseline` bound resolves against the baseline arm's measured value;
-    a missing baseline value keeps the gate unevaluated, never a pass.
+    `candidate_switches` is the arm run's replay switch classification
+    (Z5): the unprotected-switch gate subtracts its drift count from the
+    continuity tool-loop total, and the drift gate divides it by the
+    replay session count (one task = one session; zero sessions keep the
+    per-task rate unevaluated). A `baseline` bound resolves against the
+    baseline arm's measured value; a missing baseline value keeps the
+    gate unevaluated, never a pass.
     """
     results: list[AgenticGateResult] = []
     for name in sorted(gates):
         bound_raw = gates[name]
-        if name == "max_tool_loop_switches":
-            value = _phase_tool_loop_switches(candidate_continuity)
+        if name == "max_unprotected_tool_loop_switches":
+            total = _phase_tool_loop_switches(candidate_continuity)
+            if candidate_switches is None or total is None:
+                value = None
+            else:
+                value = total - candidate_switches.decision_drift
+        elif name == "max_decision_drift_switches_per_task":
+            if candidate_switches is None or candidate_switches.sessions <= 0:
+                value = None
+            else:
+                value = candidate_switches.decision_drift / (
+                    candidate_switches.sessions
+                )
         elif name == "max_mean_switches_per_task":
             value = _mean_switches(candidate_continuity)
         elif name == "max_selection_rejected":
             value = _event_count(candidate_events, SESSION_CLASS_SELECTION_FAILED)
         elif name == "max_tool_loop_interrupted":
-            value = _event_count(
-                candidate_events, SESSION_CLASS_TOOL_LOOP_INTERRUPTED
-            )
+            value = _event_count(candidate_events, SESSION_CLASS_TOOL_LOOP_INTERRUPTED)
         else:  # contract validation keeps unknown names out; stay unevaluated
             value = None
         if bound_raw == "baseline":
@@ -256,7 +396,9 @@ def session_random_mix_stats(
     expectation need not be). No pairing yields None - missing evidence is
     never counted as zero.
     """
-    aliases = sorted(a for a, p in shares.items() if isinstance(p, (int, float)) and p > 0)
+    aliases = sorted(
+        a for a, p in shares.items() if isinstance(p, (int, float)) and p > 0
+    )
     if not aliases or not candidate_task_scores:
         return None
     needed_refs: dict[str, dict[str, float]] = {}
