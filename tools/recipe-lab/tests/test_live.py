@@ -2846,6 +2846,228 @@ def test_verify_live_agentic_gates_without_replay_records_stay_incomplete(
     )
 
 
+def test_verify_live_agentic_fetches_arm_replays_by_session_id(tmp_path, monkeypatch):
+    # Z4: with the arms' router management endpoints, verify pulls the
+    # completed arm runs' replay records itself - the run's session
+    # identities filter the router's records, the baseline pin resolves
+    # from the baseline arm's own rows, and a rejected selection in the
+    # candidate arm vetoes the verdict (the paired improvement 0.80 ->
+    # 0.86 never masks it).
+    from recipe_lab.adapters.router_replay import session_rows_for_run
+
+    fetched: list[str] = []
+
+    def fake_fetch(url: str):
+        fetched.append(url)
+        if "8081" in url:  # candidate arm router
+            return [
+                {
+                    "request_id": "req-c1",
+                    "lifecycle_state": "failed",
+                    "terminal_reason": "selection_rejected",
+                    "response_status": 503,
+                    "timestamp": "10",
+                    "conversation_id": "run-cand-1-deadbeefcafe0123456789ab",
+                    "session_id": "run-cand-1-deadbeefcafe0123456789ab",
+                    "turn_index": 1,
+                },
+                {
+                    "request_id": "req-c2",
+                    "selected_model": "local/strong",
+                    "timestamp": "11",
+                    "conversation_id": "run-cand-1-deadbeefcafe0123456789ab",
+                    "session_id": "run-cand-1-deadbeefcafe0123456789ab",
+                    "turn_index": 1,
+                    "session_action": "resumed",
+                },
+                {
+                    "request_id": "req-c3",
+                    "selected_model": "local/strong",
+                    "timestamp": "20",
+                    "conversation_id": "run-cand-1-cafebabecafe0123456789cd",
+                    "turn_index": 2,
+                },
+                # other traffic on the same router must stay out of the judgment
+                {
+                    "request_id": "req-foreign",
+                    "selected_model": "local/weak",
+                    "lifecycle_state": "failed",
+                    "timestamp": "30",
+                    "conversation_id": "run-other-1-deadbeefcafe0123456789ef",
+                    "turn_index": 1,
+                },
+            ]
+        return [  # baseline arm router
+            {
+                "request_id": "req-b1",
+                "lifecycle_state": "failed",
+                "timestamp": "5",
+                "conversation_id": "run-base-trial-1-deadbeefcafe0123456789ab",
+                "session_id": "run-base-trial-1-deadbeefcafe0123456789ab",
+                "turn_index": 1,
+            },
+            {
+                "request_id": "req-b2",
+                "selected_model": "local/weak",
+                "timestamp": "6",
+                "conversation_id": "run-base-trial-1-deadbeefcafe0123456789ab",
+                "turn_index": 1,
+            },
+        ]
+
+    monkeypatch.setattr("recipe_lab.live.fetch_replays", fake_fetch)
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+        compare_values={
+            **_compare_values(0.80, 0.86),
+            "candidate_targets": [
+                {
+                    "id": "mom-router",
+                    "continuity": {
+                        "session_mode": "session_aware",
+                        "multi_request_tasks": 2,
+                        "model_switches": 0,
+                        "mean_switches_per_task": 0.0,
+                        "model_switches_by_phase": {},
+                    },
+                }
+            ],
+        },
+    )
+    stub.setup_response = _SETUP_READY
+    stub.baseline_doc["manifest"]["targets"] = [
+        {
+            "id": "mom-router",
+            "kind": "mom",
+            "config_hash": _MOM_CONFIG_HEX,
+            "session_mode": "session_aware",
+        }
+    ]
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+        candidate_management_endpoint="http://127.0.0.1:8081",
+        baseline_management_endpoint="http://127.0.0.1:8080",
+    )
+    # one fetch per completed MoM arm run: baseline arm first, then candidate
+    assert fetched == ["http://127.0.0.1:8080", "http://127.0.0.1:8081"]
+    assert result["verdict"] == "FAIL"
+    gates = {g["name"]: g for g in result["agentic"]["gates_detail"]}
+    assert gates["max_selection_rejected"] == {
+        "name": "max_selection_rejected",
+        "value": 1.0,
+        "bound": 0.0,
+    }
+    assert gates["max_tool_loop_interrupted"] == {
+        "name": "max_tool_loop_interrupted",
+        "value": 1.0,
+        "bound": 1.0,  # the baseline pin resolved from the baseline arm's rows
+    }
+    evidence = result["agentic"]["replay_evidence"]
+    assert evidence["candidate"] == {
+        "run_id": "run-cand-1",
+        "endpoint": "http://127.0.0.1:8081",
+        "rows": 3,  # the foreign record stayed out
+    }
+    assert evidence["baseline"] == {
+        "run_id": "run-base-trial-1",
+        "endpoint": "http://127.0.0.1:8080",
+        "rows": 2,
+    }
+    assert any(
+        "agentic stability gate exceeded" in reason for reason in result["reasons"]
+    )
+    # the filter helper itself: session identity prefix only, no digest math
+    rows = session_rows_for_run(fake_fetch("http://127.0.0.1:8081"), "run-cand-1")
+    assert [row["request_id"] for row in rows] == ["req-c1", "req-c2", "req-c3"]
+    assert "session_action" not in rows[0]["session"]
+
+
+def test_verify_live_agentic_replay_fetch_failure_stays_incomplete(
+    tmp_path, monkeypatch
+):
+    # Z4: a failed fetch is a diagnostic - the replay-sourced gates stay
+    # unevaluated and the verdict stays INCONCLUSIVE, never a pass.
+    from recipe_lab.adapters.router_replay import ReplayFetchError
+
+    def broken_fetch(url: str):
+        raise ReplayFetchError(f"management api unreachable: {url}")
+
+    monkeypatch.setattr("recipe_lab.live.fetch_replays", broken_fetch)
+    stub = VerifyStub(
+        registry=[
+            {
+                "id": "mom-router",
+                "kind": "mom",
+                "mode": "live",
+                "config_hash": _MOM_CONFIG_HEX,
+                "session_mode": "session_aware",
+            }
+        ],
+        compare_values={
+            **_compare_values(0.80, 0.86),
+            "candidate_targets": [
+                {
+                    "id": "mom-router",
+                    "continuity": {
+                        "session_mode": "session_aware",
+                        "multi_request_tasks": 2,
+                        "model_switches": 0,
+                        "mean_switches_per_task": 0.0,
+                        "model_switches_by_phase": {},
+                    },
+                }
+            ],
+        },
+    )
+    stub.setup_response = _SETUP_READY
+    stub.baseline_doc["manifest"]["targets"] = [
+        {
+            "id": "mom-router",
+            "kind": "mom",
+            "config_hash": _MOM_CONFIG_HEX,
+            "session_mode": "session_aware",
+        }
+    ]
+    result = verify_live(
+        spec=_verify_spec(),
+        cli=stub,
+        baseline_run_id="run-base",
+        targets=["mom-router"],
+        repetitions=1,
+        measurements=[
+            {"name": "pii-recall-floor", "candidate": 0.97, "baseline": 0.96}
+        ],
+        work_dir=tmp_path,
+        workload=_agentic_workload(),
+        candidate_management_endpoint="http://127.0.0.1:8081",
+        baseline_management_endpoint="http://127.0.0.1:8080",
+    )
+    assert result["verdict"] == "INCONCLUSIVE"
+    assert result["agentic"]["gates"]["max_selection_rejected"] == "incomplete"
+    assert result["agentic"]["gates"]["max_tool_loop_interrupted"] == "incomplete"
+    evidence = result["agentic"]["replay_evidence"]
+    assert evidence["candidate"]["rows"] is None
+    assert "failed" in evidence["candidate"]["note"]
+    assert any("replay fetch from" in reason for reason in result["reasons"])
+
+
 def test_verify_live_agentic_cost_side_by_side(tmp_path):
     comparison_entry = {
         "baseline_total_cost_usd": 5.0,

@@ -345,6 +345,23 @@ proposals.
     section (the P3 interval). Missing evidence - no `model` in the
     records, a routed model outside `spec.models`, an unmeasured needed
     reference - keeps R unevaluable with a reason, never guessed.
+  - Agentic workloads (Z4): the stability hard gates (rejected selections,
+    tool-loop interruptions) judge the arms' own router replay records -
+    their only evidence source. After each completed MoM arm run, verify
+    pulls the run's replay records from the arm router's management API
+    (session identities `<run_id>-<digest>` filter the router's records)
+    and the gates consume the last completed pair's rows - the same pair
+    whose continuity sections carry the switch evidence. Required flags:
+    `--candidate-management-endpoint U` (candidate arm's router), plus
+    `--baseline-management-endpoint U` (baseline arm's router) while
+    `max_tool_loop_interrupted` pins `baseline` (its default); a missing
+    endpoint fails the CLI before anything is spent on runs. A failed
+    fetch is a diagnostic - the gates stay unevaluated, never a pass.
+    Single-model reference arms never pass a router and have no replays:
+    a comparison without a comparable baseline router (cold start)
+    declares a numeric ceiling (e.g. 0) instead of the `baseline` pin.
+    The result's `agentic` block names each side's `replay_evidence`
+    (run id, endpoint, rows).
 - `recipe-lab live-verdict --spec S [--split dev|calib|frozen_test] --final?
   --baseline-run-id A --candidate-run-id B [--guard-measurements M]
   [--candidate J] [--insight-refs R]

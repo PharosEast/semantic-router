@@ -268,6 +268,21 @@ INCONCLUSIVE 与工具/用法错误 2（`verdict_exit_code`）。`--candidate-ta
 结果与台账 `candidate.config_sha256` 记录该哈希，`--final` 产出带
 `final: true` 的台账晋升记录。
 
+### agentic 工作载的 replay 证据（Z4）
+
+`kind: agentic` 工作载的稳定性硬门槛（被拒请求、工具循环中断）以臂自身
+路由器的 replay 记录为唯一证据源：每个完成的 MoM 臂 run 结束后，verify
+按该 run 的会话身份（`<run_id>-<digest>`，sr-bench engine 逐任务派发）
+从该臂路由器的管理 API 拉取 replay 并过滤，门槛消费与 continuity 证据
+同源的"最后完成对"。因此 `--candidate-management-endpoint`（候选臂路由器）
+必填；`max_tool_loop_interrupted` 默认钉 baseline，还需
+`--baseline-management-endpoint`（baseline 臂路由器）——缺失即 CLI 快速
+失败，绝不花算力跑注定 INCONCLUSIVE 的裁决。拉取失败只记诊断：证据缺失
+保持未评估，绝不是 PASS。单模型参照臂不经过路由器、没有 replay：没有
+可比 baseline router 的比较（冷启动）应把 `max_tool_loop_interrupted`
+声明为数值上限（如 0），不要钉 baseline。结果的 `agentic` 块以
+`replay_evidence` 记录两侧各判了哪个 run 的行（run id、端点、行数）。
+
 ### model_eval 驱动（C7）
 
 工作载声明 `driver: model_eval` 时，verify 完全绕开 sr-bench：每个臂都是

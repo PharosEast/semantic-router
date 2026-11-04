@@ -80,6 +80,11 @@ from pathlib import Path
 from typing import Any
 
 from . import abba
+from .adapters.router_replay import (
+    ReplayFetchError,
+    fetch_replays,
+    session_rows_for_run,
+)
 from .agentic import agentic_cost_summary, agentic_gate_results
 from .contract import (
     Constraint,
@@ -1115,6 +1120,44 @@ def _submit_baseline_manifest(
     return run_id
 
 
+def _arm_replay_rows(
+    endpoint: str | None,
+    run_id: str | None,
+) -> tuple[list[dict[str, Any]] | None, str | None]:
+    """One MoM arm run's session rows from its arm router (Z4).
+
+    Fetches the arm router's replay records and filters them to the run's
+    session identities. Returns (rows, note): a missing endpoint or run id
+    means no evidence was requested ((None, None)); a failed fetch
+    returns (None, reason) so the gates stay unevaluated, never a pass.
+    """
+    if not endpoint or not run_id:
+        return None, None
+    try:
+        records = fetch_replays(endpoint)
+    except ReplayFetchError as exc:
+        return None, f"replay fetch from {endpoint} failed: {exc}"
+    return session_rows_for_run(records, run_id), None
+
+
+def _replay_echo(entry: dict[str, Any] | None) -> dict[str, Any] | None:
+    """Provenance of the replay rows one gate side consumed (Z4).
+
+    The result names the run and endpoint the rows were pulled from and
+    how many rows entered the judgment; a failed fetch keeps its note.
+    """
+    if entry is None:
+        return None
+    echo: dict[str, Any] = {
+        "run_id": entry["run_id"],
+        "endpoint": entry["endpoint"],
+        "rows": len(entry["rows"]) if entry["rows"] is not None else None,
+    }
+    if entry.get("note"):
+        echo["note"] = entry["note"]
+    return echo
+
+
 def verify_live(
     *,
     spec: ExperimentSpec,
@@ -1131,6 +1174,8 @@ def verify_live(
     workload: Workload | None = None,
     replay_rows: Sequence[dict[str, Any]] | None = None,
     baseline_replay_rows: Sequence[dict[str, Any]] | None = None,
+    candidate_management_endpoint: str | None = None,
+    baseline_management_endpoint: str | None = None,
 ) -> dict[str, Any]:
     """Drive sr-bench for one candidate and decide the live verdict (I).
 
@@ -1181,6 +1226,19 @@ def verify_live(
     their evidence stay unevaluated (INCONCLUSIVE, never a pass). The
     result's `agentic` block records the gate outcomes and the pairs'
     actual-vs-cache-neutral cost side by side.
+
+    Z4: when the replay rows are not provided, an agentic verify pulls
+    them itself - after each completed MoM arm run, the arm's router
+    management endpoint (`candidate_management_endpoint` /
+    `baseline_management_endpoint`) is fetched and filtered to that run's
+    session identities (`<run_id>-<digest>` per task, sr-bench engine), so
+    the gates judge the run's own replay records. The gates consume the
+    last completed pair's rows, the same pair whose continuity sections
+    carry the switch evidence. Single-model reference arms never pass a
+    router and have no replays: comparisons whose baseline side is not a
+    comparable router config declare a numeric ceiling for
+    `max_tool_loop_interrupted` instead of the `baseline` pin. A failed
+    fetch is a diagnostic - the gates stay unevaluated, never a pass.
     """
     if repetitions < 1:
         raise ContractError("verify needs at least one repetition")
@@ -1315,6 +1373,12 @@ def verify_live(
 
     # AB/BA pairs: both arms live, alternating execution order per repetition
     trials: dict[int, dict[str, Any]] = {}
+    # Z4: per-arm-run replay evidence ({run_id, endpoint, rows, note}),
+    # keyed (rep, label); the gates consume the last completed pair's
+    # entries - the same pair whose continuity sections carry the switch
+    # evidence.
+    arm_replays: dict[tuple[int, str], dict[str, Any]] = {}
+    last_replays: tuple[Any, Any] | None = None
     for label, rep in abba.schedule(repetitions):
         arm = trials.setdefault(rep, {})
         if label == abba.BASELINE:
@@ -1323,6 +1387,25 @@ def verify_live(
             run = cli.candidate_plan(baseline_run_id, targets=targets, mode="live")
         arm[label] = {"run_id": run.get("id"), "status": run.get("status")}
         bench_refs.append(run.get("id"))
+        # Z4: after each completed MoM arm run, pull the run's replay
+        # records from the arm's router so the agentic stability gates
+        # judge the run's own session evidence.
+        if agentic and run.get("status") == "completed":
+            endpoint = (
+                candidate_management_endpoint
+                if label == abba.CANDIDATE
+                else baseline_management_endpoint
+            )
+            if endpoint:
+                arm_rows, note = _arm_replay_rows(endpoint, run.get("id"))
+                if note:
+                    diagnostics.append(f"pair {rep} {label} arm: {note}")
+                arm_replays[(rep, label)] = {
+                    "run_id": run.get("id"),
+                    "endpoint": endpoint,
+                    "rows": arm_rows,
+                    "note": note,
+                }
 
     # per-pair compare + metric/constraint pairing
     metric_key = spec.objective.metric_key
@@ -1391,6 +1474,10 @@ def verify_live(
             )
         )
         last_sections = (base_sec, cand_sec)
+        last_replays = (
+            arm_replays.get((rep, abba.BASELINE)),
+            arm_replays.get((rep, abba.CANDIDATE)),
+        )
         continuity_rows.extend(_continuity_rows(comparison, rep))
         baseline_value, candidate_value = _pair_metrics(
             comparison, metric_key, incomplete
@@ -1584,6 +1671,13 @@ def verify_live(
     # from session attribution over the provided router replay records
     # (None = not provided, those gates stay unevaluated - missing
     # evidence is never a pass).
+    # Z4: when the caller provided no rows, the last completed pair's own
+    # fetched rows carry the evidence; a side without them (no endpoint,
+    # failed fetch, non-completed run) stays unevaluated.
+    if replay_rows is None and last_replays is not None:
+        replay_rows = last_replays[1]["rows"] if last_replays[1] else None
+    if baseline_replay_rows is None and last_replays is not None:
+        baseline_replay_rows = last_replays[0]["rows"] if last_replays[0] else None
     agentic_gates: list[Any] = []
     if agentic:
         candidate_continuity = (
@@ -1692,6 +1786,16 @@ def verify_live(
                 for g in agentic_gates
             },
             "gates_detail": [g.to_dict() for g in agentic_gates],
+            # Z4: which run's replay rows each gate side judged (None when
+            # the side never produced rows).
+            "replay_evidence": {
+                "candidate": _replay_echo(
+                    last_replays[1] if last_replays is not None else None
+                ),
+                "baseline": _replay_echo(
+                    last_replays[0] if last_replays is not None else None
+                ),
+            },
             "cost": agentic_cost_summary(pair_comparisons),
         }
     if not spec.gates:

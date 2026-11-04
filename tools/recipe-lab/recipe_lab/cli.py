@@ -1943,6 +1943,36 @@ def cmd_verify(args: argparse.Namespace) -> int:
             store=args.srbench_store,
             timeout_s=args.timeout,
         )
+        # Z4: the replay-sourced stability gates judge the arms' own router
+        # replay records, and the CLI is their only source - an agentic
+        # verify without the management endpoints could never evaluate
+        # them, so fail fast before anything is spent on runs.
+        if workload.kind == "agentic":
+            resolved_gates = workload.resolved_agentic_gates()
+            if (
+                any(
+                    gate in resolved_gates
+                    for gate in ("max_selection_rejected", "max_tool_loop_interrupted")
+                )
+                and not args.candidate_management_endpoint
+            ):
+                raise ContractError(
+                    "agentic verify needs --candidate-management-endpoint (the "
+                    "candidate arm's router management base URL): the "
+                    "replay-sourced stability gates judge the arm's own "
+                    "replay records"
+                )
+            if (
+                resolved_gates.get("max_tool_loop_interrupted") == "baseline"
+                and not args.baseline_management_endpoint
+            ):
+                raise ContractError(
+                    'agentic gate max_tool_loop_interrupted pins "baseline": '
+                    "pass --baseline-management-endpoint (the baseline arm's "
+                    "router management base URL), or declare a numeric "
+                    "ceiling instead when the comparison has no comparable "
+                    "baseline router (cold start)"
+                )
         try:
             result = verify_live(
                 spec=spec,
@@ -1956,6 +1986,8 @@ def cmd_verify(args: argparse.Namespace) -> int:
                 workload_split=args.split,
                 run_cache=run_cache,
                 workload=workload,
+                candidate_management_endpoint=args.candidate_management_endpoint,
+                baseline_management_endpoint=args.baseline_management_endpoint,
             )
         except (ContractError, RuntimeError) as exc:
             raise SystemExit(f"verify error: {exc}") from exc
@@ -3189,10 +3221,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_verify.add_argument(
         "--candidate-management-endpoint",
         default=None,
-        help="model_eval driver: router management base URL of the router "
-        "serving the candidate config (e.g. http://127.0.0.1:8080); its "
-        "replay records provide the routing distribution behind the random "
-        "mix R - without it the mix is not evaluable",
+        help="router management base URL of the router serving the candidate "
+        "(e.g. http://127.0.0.1:8080); model_eval driver: its replay records "
+        "provide the routing distribution behind the random mix R - without "
+        "it the mix is not evaluable; sr-bench driver (agentic): its replay "
+        "records judge the candidate arm's stability gates (Z4)",
+    )
+    p_verify.add_argument(
+        "--baseline-management-endpoint",
+        default=None,
+        help="sr-bench driver (agentic): router management base URL of the "
+        "router serving the baseline config; its replay records resolve the "
+        "max_tool_loop_interrupted baseline pin (Z4)",
     )
     p_verify.add_argument(
         "--router-model",

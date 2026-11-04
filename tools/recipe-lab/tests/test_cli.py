@@ -1171,6 +1171,103 @@ def test_verify_model_eval_requires_tasks_and_flags(tmp_path, capsys):
     assert "--model-eval-dir" in capsys.readouterr().err
 
 
+def _write_agentic_srbench_spec(tmp_path):
+    """Spec whose single workload is an sr-bench agentic workload (Z4)."""
+    dev = tmp_path / "dev.jsonl"
+    dev.write_bytes(b'{"case_id":"t1","prompt":"q","truth":"A"}\n')
+    spec = copy.deepcopy(VALID_SPEC)
+    spec.pop("workload", None)
+    spec["workloads"] = [
+        {
+            "name": "agentic-wl",
+            "kind": "agentic",
+            "benchmark": "terminal-bench-2.1",
+            "profile": "quick",
+            "splits": {
+                "dev": {
+                    "manifest": "dev.jsonl",
+                    "content_hash": "sha256:"
+                    + hashlib.sha256(dev.read_bytes()).hexdigest(),
+                }
+            },
+        }
+    ]
+    spec_path = tmp_path / "spec-agentic.yaml"
+    spec_path.write_text(yaml.safe_dump(spec), encoding="utf-8")
+    return str(spec_path)
+
+
+def _agentic_verify_args(spec_path, tmp_path):
+    return [
+        "verify",
+        "--spec",
+        spec_path,
+        "--candidate",
+        str(tmp_path / "candidate.json"),
+        "--repetitions",
+        "1",
+        "--work-dir",
+        str(tmp_path / "work"),
+    ]
+
+
+def test_verify_agentic_requires_arm_management_endpoints(
+    tmp_path, capsys, monkeypatch
+):
+    # Z4: the replay-sourced stability gates have exactly one evidence
+    # source - the arms' own router replay records - so an agentic verify
+    # without the management endpoints fails before anything is spent on
+    # runs, and the interrupted gate's default baseline pin additionally
+    # needs the baseline arm's router.
+    import recipe_lab.cli as cli_module
+
+    spec_path = _write_agentic_srbench_spec(tmp_path)
+    candidate = tmp_path / "candidate.json"
+    candidate.write_text(
+        json.dumps({"kind": "config", "srbench_targets": ["mom-router"]}),
+        encoding="utf-8",
+    )
+    rc = main(_agentic_verify_args(spec_path, tmp_path))
+    assert rc == EXIT_CONTRACT_ERROR
+    err = capsys.readouterr().err
+    assert "--candidate-management-endpoint" in err
+
+    rc = main(
+        [
+            *_agentic_verify_args(spec_path, tmp_path),
+            "--candidate-management-endpoint",
+            "http://127.0.0.1:8081",
+        ]
+    )
+    assert rc == EXIT_CONTRACT_ERROR
+    err = capsys.readouterr().err
+    assert "--baseline-management-endpoint" in err
+    assert "max_tool_loop_interrupted" in err
+
+    # both endpoints clear the CLI gate and reach verify_live verbatim
+    captured: dict = {}
+
+    def fake_verify(**kwargs):
+        captured.update(kwargs)
+        return {"verdict": "PASS"}
+
+    monkeypatch.setattr(cli_module, "verify_live", fake_verify)
+    assert (
+        main(
+            [
+                *_agentic_verify_args(spec_path, tmp_path),
+                "--candidate-management-endpoint",
+                "http://127.0.0.1:8081",
+                "--baseline-management-endpoint",
+                "http://127.0.0.1:8080",
+            ]
+        )
+        == 0
+    )
+    assert captured["candidate_management_endpoint"] == "http://127.0.0.1:8081"
+    assert captured["baseline_management_endpoint"] == "http://127.0.0.1:8080"
+
+
 def test_verify_model_eval_rejects_unbound_tasks(tmp_path, capsys):
     # Y3: --tasks must be byte-identical to the contract's declared
     # rendering - a different task file is refused even when it is a

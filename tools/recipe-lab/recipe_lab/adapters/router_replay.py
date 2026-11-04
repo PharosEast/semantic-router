@@ -224,6 +224,96 @@ def _record_field(record: dict, *names: str) -> Any:
     return None
 
 
+def _record_evidence(record: dict[str, Any]) -> dict[str, Any]:
+    """The record-side tail every attribution row carries.
+
+    Session evidence (conversation_id / turn_index / session_action /
+    selection_reasoning) is carried through verbatim when the record has
+    it; missing fields stay absent so single-turn records keep their
+    shape. The record timeline (record_ts) and lifecycle evidence
+    (lifecycle_state / terminal_reason / response_status) are carried the
+    same way: session attribution orders one user turn's fan-out requests
+    by record_ts, and a lifecycle_state=failed record is the direct
+    evidence of an interrupted tool loop (requires the rejection-recording
+    router fix).
+    """
+    evidence: dict[str, Any] = {}
+    record_ts = _record_field(record, "timestamp", "Timestamp")
+    if record_ts is not None:
+        evidence["record_ts"] = str(record_ts)
+    lifecycle_state = _record_field(record, "lifecycle_state", "LifecycleState")
+    if lifecycle_state:
+        evidence["lifecycle_state"] = str(lifecycle_state)
+    terminal_reason = _record_field(record, "terminal_reason", "TerminalReason")
+    if terminal_reason:
+        evidence["terminal_reason"] = str(terminal_reason)
+    response_status = _record_field(record, "response_status", "ResponseStatus")
+    if response_status is not None:
+        evidence["response_status"] = response_status
+    session_evidence = {
+        "conversation_id": _record_field(record, "conversation_id", "ConversationID"),
+        "session_id": _record_field(record, "session_id", "SessionID"),
+        "turn_index": _record_field(record, "turn_index", "TurnIndex"),
+        "session_action": _record_field(record, "session_action", "SessionAction"),
+        "selection_reasoning": _record_field(
+            record, "selection_reasoning", "SelectionReasoning"
+        ),
+    }
+    if any(value is not None for value in session_evidence.values()):
+        evidence["session"] = {
+            k: v for k, v in session_evidence.items() if v is not None
+        }
+    return evidence
+
+
+def _record_in_run(record: dict[str, Any], run_id: str) -> bool:
+    """Whether one replay record belongs to an sr-bench run.
+
+    Session-aware runs send one identity pair per task:
+    session_id = conversation_id = `<run_id>-<digest([case, target])[:24]>`
+    (src/vllm-sr/cli/sr_bench/engine.py), so the run-id prefix identifies
+    the run's records without recomputing any digest. Run ids are unique
+    per run, and one run's task identities only extend the prefix.
+    """
+    prefix = f"{run_id}-"
+    return any(
+        isinstance(value, str) and value.startswith(prefix)
+        for value in (
+            _record_field(record, "conversation_id", "ConversationID"),
+            _record_field(record, "session_id", "SessionID"),
+        )
+    )
+
+
+def session_rows_for_run(
+    records: list[dict[str, Any]], run_id: str
+) -> list[dict[str, Any]]:
+    """Session-attribution rows of one sr-bench arm run (Z4).
+
+    verify_live judges an agentic arm over the run's own replay records:
+    this filter keeps the records whose session identity carries the
+    run-id prefix (other traffic on the same router stays out) and rows
+    keep the shape session attribution judges - routed model, request id,
+    timeline / lifecycle / session evidence. No case join: the agentic
+    stability gates count session events, not graded answers.
+    """
+    rows: list[dict[str, Any]] = []
+    for record in records:
+        if not _record_in_run(record, run_id):
+            continue
+        rows.append(
+            {
+                "routed": _record_field(record, "selected_model", "SelectedModel")
+                or "",
+                "request_id": str(
+                    _record_field(record, "request_id", "RequestID") or ""
+                ),
+                **_record_evidence(record),
+            }
+        )
+    return rows
+
+
 def _case_row(record: dict[str, Any], case: CaseJoin, *, family: str) -> dict[str, Any]:
     """Build one attribution input row from a record joined with its case.
 
@@ -250,29 +340,7 @@ def _case_row(record: dict[str, Any], case: CaseJoin, *, family: str) -> dict[st
         or {},
         "decision_tier": _record_field(record, "decision_tier", "DecisionTier"),
     }
-    record_ts = _record_field(record, "timestamp", "Timestamp")
-    if record_ts is not None:
-        row["record_ts"] = str(record_ts)
-    lifecycle_state = _record_field(record, "lifecycle_state", "LifecycleState")
-    if lifecycle_state:
-        row["lifecycle_state"] = str(lifecycle_state)
-    terminal_reason = _record_field(record, "terminal_reason", "TerminalReason")
-    if terminal_reason:
-        row["terminal_reason"] = str(terminal_reason)
-    response_status = _record_field(record, "response_status", "ResponseStatus")
-    if response_status is not None:
-        row["response_status"] = response_status
-    session_evidence = {
-        "conversation_id": _record_field(record, "conversation_id", "ConversationID"),
-        "session_id": _record_field(record, "session_id", "SessionID"),
-        "turn_index": _record_field(record, "turn_index", "TurnIndex"),
-        "session_action": _record_field(record, "session_action", "SessionAction"),
-        "selection_reasoning": _record_field(
-            record, "selection_reasoning", "SelectionReasoning"
-        ),
-    }
-    if any(value is not None for value in session_evidence.values()):
-        row["session"] = {k: v for k, v in session_evidence.items() if v is not None}
+    row.update(_record_evidence(record))
     return row
 
 
