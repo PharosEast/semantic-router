@@ -3,13 +3,13 @@
 The fake-router tests (test_route_replay.py) validate the evidence
 plumbing; this one validates the chain end to end on a router built from
 the stack top: recorded sessions replayed through `run --tier route-replay`,
-the agent recipe's decisions classifying through the real d3-lite model,
+the agent recipe's decisions classifying through the real decision model,
 session protection holding the tool loop, and the Z5 cause split computing
 from the replay records' own protection traces.
 
 Three candidates replay the same recorded session (one code task whose
 tool loop is joined mid-way by two deliberately general requests - the
-drift prompts are unambiguous so d3-lite classifies them general):
+drift prompts are unambiguous so they classify general):
 
 - protected: the agent recipe with conversation-scoped protection on -
   the in-loop requests hard-lock onto the baseline model, the general
@@ -27,10 +27,10 @@ drift prompts are unambiguous so d3-lite classifies them general):
   request entirely, and the gate fails exactly like the disabled one.
 
 Skips unless RECIPE_LAB_ROUTER_BIN points at a router built from the
-stack top; the classifier artifact (vllm-sr/d3-lite) downloads through
-RECIPE_LAB_HF_HOME. The general-in-loop classification is the one
-model-behavior dependency: the prompts are deliberately unambiguous, and
-the H20 run verifies it.
+stack top; the classifier artifact (vllm-sr/Vela-2.0-0.8B, the AG8
+real-stack decision model) downloads through RECIPE_LAB_HF_HOME. The
+general-in-loop classification is the one model-behavior dependency: the
+prompts are deliberately unambiguous, and the H20 run verifies it.
 """
 
 from __future__ import annotations
@@ -175,7 +175,9 @@ def _candidate_config(
                 "deployments": {
                     "primary": {
                         "provider": "model_runtime",
-                        "artifact": "vllm-sr/d3-lite",
+                        # the AG8 real-stack decision model; the d3 family's
+                        # CPU golden check is not ready to gate readiness here
+                        "artifact": "vllm-sr/Vela-2.0-0.8B",
                     }
                 },
                 "system": {"decision_model": {"deployment": "primary"}},
