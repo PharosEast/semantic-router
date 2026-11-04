@@ -72,7 +72,7 @@ pip install -e '.[dev]'
 | `bank` | 构建 / 导入 / 应用 per-case/per-model 答案库（`contains` / `mcq` 判卷，I；`import` 直接转换 C3 画像的 dev judged.jsonl，C6） |
 | `diagnose` | 无需标注的分布诊断：死/稀有决策、信号分布、不可达位点（D）；agentic 行携带相位/agent 标记时追加 "Agentic session evidence" 段（分相位分布、子 agent 分开保持、失败披露，AG4）；`--agent-requests` 以 probe 的子 agent 清单按请求 id join 保护轨迹身份哈希，判定子 agent 是否独立保持（Z9，不可 join 或空清单保持 unverifiable） |
 | `profile-agentic` | AG5：汇总各模型单模型 sr-bench run 报告 → agentic 画像（成功率+区间/每任务成本实际与对照/调用数/时延/截断率，缺失字段显式 missing） |
-| `bootstrap-agentic` | AG5 agentic 冷启动：以 agent recipe 模板 + 画像 + 客户端身份契约生成候选（lane 分配规则：复杂→最强、中等→容差内最便宜、简单/兜底→最便宜、隐私/安全→local_models 且 bypass；claude-code 写 session 作用域 + x-claude-code-session-id/agent 头，其余写会话双头；自适应关、进度门 observe、candidate_requirements 声明能力）；旁车记录每条 lane 的选择理由与画像证据 |
+| `bootstrap-agentic` | AG5/Z10 agentic 冷启动：以 agent recipe 模板 + 画像 + 客户端身份契约生成候选。选型走共用核心（`bindings.plan_lane` 的未测量 lane 分支：能力过滤 + λ 调整总体分排序 + "默认规则，未经实测"标注——agentic 画像只测模型不测 lane，`--lambda` 默认 0；隐私/安全 → local_models 且 bypass，不参与排序）；claude-code 写 session 作用域 + x-claude-code-session-id/agent 头，其余写会话双头；自适应关、进度门 observe、candidate_requirements 声明能力；旁车记录每条 lane 的依据与画像证据 |
 | `propose-thresholds` | 扰动单个决策信号阈值 |
 | `propose-rule-thresholds` | 移动一个信号的所有规则级谓词位点（C） |
 | `propose-calibrated` | 按观测分布分位点提议规则阈值（D） |

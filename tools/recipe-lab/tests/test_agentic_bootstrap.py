@@ -1,11 +1,10 @@
-"""AG5: agentic cold start - profile aggregation, lane assignment, client
-identity contract. The golden test synthesizes a three-model profile and
-asserts the lane rules, the claude-code identity headers and the privacy
-lane's bypass."""
+"""AG5: agentic cold start - profile aggregation, the shared unmeasured-lane
+selection (Z10), and the client identity contract. The golden test
+synthesizes a three-model profile and asserts the shared ranking, the
+claude-code identity headers and the privacy lane's bypass."""
 
 from __future__ import annotations
 
-import copy
 import json
 
 import pytest
@@ -14,7 +13,6 @@ from recipe_lab.agentic_bootstrap import (
     PROFILE_KIND,
     bootstrap_agentic_config,
     profile_from_reports,
-    select_models,
 )
 
 
@@ -80,56 +78,81 @@ def test_profile_flags_missing_evidence_instead_of_zero():
     assert "cost_per_task_usd" in entry["missing"]
 
 
-# ---- lane assignment rules ----
+# ---- the shared unmeasured-lane selection (Z10) ----
 
 
-def test_lane_assignment_follows_the_rules(three_model_profile):
-    assignment = select_models(
-        three_model_profile, medium_tolerance_pp=5.0, local_models=["local/private"]
+def test_ranked_lanes_take_the_lambda_adjusted_model(three_model_profile):
+    # Z10: the agentic profile measures models, not lanes - every ranked
+    # lane goes through the shared selection core's unmeasured branch. At
+    # lambda 0 the strongest model wins every ranked lane.
+    lanes = {
+        lane["decision"]: lane
+        for lane in _bootstrap_sidecar(three_model_profile)["lanes"]
+    }
+    assert lanes["domain_code_complex"]["model"] == "local/strong"
+    assert lanes["simple_general"]["model"] == "local/strong"
+    # the shared unmeasured marking, not a hand-rolled rule
+    assert "default rule (unmeasured lane)" in lanes["domain_code_complex"]["basis"]
+    assert lanes["domain_code_complex"]["untested"] is True
+    assert lanes["domain_code_complex"]["scores"]["local/strong"][
+        "overall_accuracy"
+    ] == pytest.approx(0.90)
+
+
+def _bootstrap_sidecar(profile, **kwargs):
+    template = _template()
+    _, sidecar = bootstrap_agentic_config(
+        template, profile, client="generic", local_models=["local/private"], **kwargs
     )
-    models = assignment["models"]
-    # complex lanes: the highest success rate
-    assert models["complex"] == "local/strong"
-    # medium: within 5pp of the best (strong 0.90, mid 0.86) and cheapest
-    assert models["medium"] == "local/mid"
-    # simple and fallback: the cheapest model
-    assert models["cheap"] == "local/cheap"
-    # privacy/security: the contract's local model
-    assert models["local"] == "local/private"
+    return sidecar
 
 
-def test_medium_lane_skips_unpriced_models(three_model_profile):
-    profile = copy.deepcopy(three_model_profile)
-    for entry in profile["models"]:
-        if entry["model"] == "local/mid":
-            entry["cost_per_task_usd"] = None
-            entry["missing"] = ["cost_per_task_usd"]
-    assignment = select_models(profile, medium_tolerance_pp=5.0)
-    # the tolerant-but-unpriced model cannot be price-compared: the lane
-    # takes the strongest priced model within the tolerance instead
-    assert assignment["models"]["medium"] == "local/strong"
-
-    # with no priced model at all, both price-driven lanes fall back to the
-    # strongest model with an explicit note (unknown cost is never cheap)
-    unpriced = copy.deepcopy(three_model_profile)
-    for entry in unpriced["models"]:
-        entry["cost_per_task_usd"] = None
-        entry["missing"] = ["cost_per_task_usd"]
-    fallback = select_models(unpriced, medium_tolerance_pp=5.0)
-    assert fallback["models"]["medium"] == "local/strong"
-    assert "never treated as cheap" in fallback["reasons"]["medium"]["note"]
-    assert fallback["models"]["cheap"] == "local/strong"
-    assert "note" in fallback["reasons"]["cheap"]
+def _template():
+    return {
+        "version": "v0.3",
+        "global": {
+            "router": {
+                "learning": {
+                    "adaptation": {"enabled": True},
+                    "protection": {"enabled": True, "scope": "conversation"},
+                }
+            }
+        },
+        "model_catalog": {"system": {"decision_model": {"deployment": "p"}}},
+        "routing": {"modelCards": []},
+        "decisions": [
+            {"name": "domain_code_complex", "modelRefs": [{"model": "template/a"}]},
+            {"name": "simple_general", "modelRefs": [{"model": "template/a"}]},
+            {"name": "local_privacy_policy", "modelRefs": [{"model": "template/a"}]},
+        ],
+    }
 
 
-def test_stem_lane_uses_the_mcq_picture_when_declared(three_model_profile):
-    assignment = select_models(
-        three_model_profile, mcq_order=["local/strong", "local/mid"]
+def test_lambda_flips_the_ranking_to_the_cheap_model(three_model_profile):
+    # normalized costs (max 5.0): cheap 0.1, mid 0.4, strong 1.0 - at
+    # lambda 1 the cheap model's adjusted score (0.5) beats the strong
+    # model's (-0.1) on every ranked lane
+    lanes = {
+        lane["decision"]: lane
+        for lane in _bootstrap_sidecar(three_model_profile, lam=1.0)["lanes"]
+    }
+    assert lanes["domain_code_complex"]["model"] == "local/cheap"
+    assert lanes["simple_general"]["model"] == "local/cheap"
+
+
+def test_unpriced_models_rank_as_free_only_at_lambda_zero(three_model_profile):
+    # missing cost is "cannot be price-compared": the shared core refuses a
+    # lambda > 0 over an unpriced candidate rather than ranking it as free
+    profile = profile_from_reports(
+        [
+            _report("local/cheap", rate=0.60, cost=0.5),
+            _report("local/mid", rate=0.86, cost=2.0),
+        ]
     )
-    assert assignment["models"]["stem"] == "local/strong"
-    assert "MCQ picture" in assignment["reasons"]["stem"]["note"]
-    fallback = select_models(three_model_profile)
-    assert fallback["models"]["stem"] == fallback["models"]["medium"]
+    profile["models"][1]["cost_per_task_usd"] = None
+    profile["models"][1]["missing"] = ["cost_per_task_usd"]
+    with pytest.raises(Exception, match="cost"):
+        _bootstrap_sidecar(profile, lam=1.0)
 
 
 # ---- golden test: template rewrite ----
@@ -196,10 +219,10 @@ def test_golden_bootstrap_writes_lanes_identity_and_bypass(
         local_models=["local/private"],
     )
     by_name = {d["name"]: d for d in config["decisions"]}
-    # lane assignment followed the rules
+    # the ranked lanes all take the shared ranking's winner at lambda 0
     assert by_name["domain_code_complex"]["modelRefs"][0]["model"] == "local/strong"
-    assert by_name["medium_general"]["modelRefs"][0]["model"] == "local/mid"
-    assert by_name["simple_general"]["modelRefs"][0]["model"] == "local/cheap"
+    assert by_name["medium_general"]["modelRefs"][0]["model"] == "local/strong"
+    assert by_name["simple_general"]["modelRefs"][0]["model"] == "local/strong"
     # the privacy lane is exempt from learning and pinned to the local model
     privacy = by_name["local_privacy_policy"]
     assert privacy["modelRefs"][0]["model"] == "local/private"
@@ -226,12 +249,14 @@ def test_golden_bootstrap_writes_lanes_identity_and_bypass(
     assert (
         config["model_catalog"]["system"]["decision_model"]["deployment"] == "primary"
     )
-    # the sidecar carries every lane's rule and evidence
+    # the sidecar carries every lane's basis and evidence
     lanes = {lane["decision"]: lane for lane in sidecar["lanes"]}
     assert lanes["domain_code_complex"]["model"] == "local/strong"
-    assert lanes["domain_code_complex"]["lane"] == "complex"
+    assert lanes["domain_code_complex"]["untested"] is True
+    assert lanes["local_privacy_policy"]["basis"].startswith("contract-declared local")
     assert sidecar["client"] == "claude-code"
     assert sidecar["adaptation_enabled"] is False
+    assert sidecar["lambda"] == 0.0
 
 
 def test_golden_bootstrap_neutral_client_uses_conversation_scope(

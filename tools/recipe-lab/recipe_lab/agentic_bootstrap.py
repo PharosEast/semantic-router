@@ -10,15 +10,18 @@ evidence behind it in a sidecar.
   interval, per-task actual and cache-neutral cost, calls per task,
   latency and the truncation rate. Unknown fields stay None - missing
   evidence is never counted as zero.
-- Lane assignment over the template's decisions follows §3.5.6: the
-  complex coding and complex-general lanes take the strongest model (best
-  success rate, ties broken cheaper); the medium lanes take the cheapest
-  model within `medium_tolerance_pp` of the best (models without a cost
-  cannot be price-compared and stay out); the simple lane and the fallback
-  take the cheapest model; the privacy and security lanes take the
-  contract's local models with `adaptations.mode: bypass`; the
-  legal-health and STEM lanes use the MCQ picture when one exists, else
-  the medium lane's model.
+- Lane assignment reuses the template path's shared selection core
+  (`bindings.plan_lane`, Z10): the agentic profile measures models, not
+  lanes, so every template lane is an *unmeasured* lane in the sub-issue-8
+  §2.2 sense - the candidates are capability-filtered, ranked by the
+  lambda-adjusted overall score, and the sidecar marks every choice
+  "default rule (unmeasured lane)" exactly as the built-in template path
+  does. The hand-rolled per-lane rule zoo this module once carried had no
+  lane evidence behind it and disagreed with the template path on
+  capability filtering, cost ranking and the untested marking.
+- The privacy and security lanes are not a ranking decision: they are
+  pinned to the contract's local models with `adaptations.mode: bypass`
+  (traffic that must never leave the deployment).
 - Session protection is written per client: claude-code protects the
   whole declared agent session keyed by the verified client headers
   (x-claude-code-session-id, agent: x-claude-code-agent-id, from AG0-W2);
@@ -35,11 +38,13 @@ from __future__ import annotations
 
 import copy
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any
+
+from .bindings import plan_lane
 
 PROFILE_KIND = "recipe-lab-agentic-profile-v1"
 BOOTSTRAP_KIND = "recipe-lab-agentic-bootstrap-v1"
-DEFAULT_MEDIUM_TOLERANCE_PP = 5.0
 
 CLIENTS = ("claude-code", "openai-chat", "generic")
 # AG0-W2: Claude Code natively sends x-claude-code-session-id and (on
@@ -63,29 +68,21 @@ CLIENT_IDENTITY_HEADERS = {
     },
 }
 
-# template decision -> lane rule. "keep" decisions are rewritten by nobody
+# template decision -> lane kind. "keep" decisions are rewritten by nobody
 # (the omni visual-language lane is a hard modality route, not a profile
-# choice).
+# choice); "local" decisions are pinned, not ranked.
 LANE_DECISIONS: dict[str, str] = {
-    "domain_code_complex": "complex",
-    "complex_general": "complex",
-    "domain_code": "medium",
-    "domain_business": "medium",
-    "medium_general": "medium",
-    "domain_stem_research": "stem",
-    "domain_legal_health": "stem",
-    "simple_math_fast_path": "cheap",
-    "simple_general": "cheap",
+    "domain_code_complex": "ranked",
+    "complex_general": "ranked",
+    "domain_code": "ranked",
+    "domain_business": "ranked",
+    "medium_general": "ranked",
+    "domain_stem_research": "ranked",
+    "domain_legal_health": "ranked",
+    "simple_math_fast_path": "ranked",
+    "simple_general": "ranked",
     "local_security_containment": "local",
     "local_privacy_policy": "local",
-}
-
-_LANE_RULE_TEXT = {
-    "complex": "highest task success rate",
-    "medium": ("cheapest within medium_tolerance_pp of the best success rate"),
-    "cheap": "cheapest model",
-    "local": "contract-declared local model (privacy/security bypass)",
-    "stem": "MCQ picture order when available, else the medium lane",
 }
 
 
@@ -200,115 +197,43 @@ def validate_profile(profile: Mapping[str, Any]) -> list[dict[str, Any]]:
     return list(models)
 
 
-def select_models(
-    profile: Mapping[str, Any],
-    *,
-    medium_tolerance_pp: float = DEFAULT_MEDIUM_TOLERANCE_PP,
-    local_models: Sequence[str] = (),
-    mcq_order: Sequence[str] = (),
-) -> dict[str, Any]:
-    """AG5 lane assignment: which model serves each lane rule.
+def _binding_stats(profile: Mapping[str, Any]) -> dict[str, Any]:
+    """The profile in the shape the shared selection core reads (Z10).
 
-    Returns {"models": {lane -> model}, "reasons": {lane -> {...}}} with
-    the rule text and the evidence the choice read. Deterministic: ties
-    break toward the cheaper model, then the name.
+    `bindings.plan_lane` consumes the C3 profile's calib stats. The agentic
+    profile measures models, not lanes, so the adapter synthesizes an
+    empty-labels calib block: every lane stays unmeasured and the ranking
+    reads the models' overall success rate and per-task cost.
     """
-    entries = validate_profile(profile)
-    priced = sorted(
-        (m for m in entries if _number(m.get("cost_per_task_usd")) is not None),
-        key=lambda m: (
-            _number(m.get("cost_per_task_usd")),
-            -(_number(m.get("success_rate")) or 0.0),
-            str(m.get("model")),
-        ),
-    )
-    ranked = sorted(
-        entries,
-        key=lambda m: (
-            -(_number(m.get("success_rate")) or 0.0),
-            (
-                _number(m.get("cost_per_task_usd"))
-                if _number(m.get("cost_per_task_usd")) is not None
-                else float("inf")
-            ),
-            str(m.get("model")),
-        ),
-    )
-    best = ranked[0]
-    best_rate = _number(best.get("success_rate")) or 0.0
-    complex_model = str(best["model"])
-
-    eligible = [
-        m
-        for m in ranked
-        if best_rate - (_number(m.get("success_rate")) or 0.0)
-        <= medium_tolerance_pp / 100.0
-    ]
-    priced_eligible = sorted(
-        (m for m in eligible if _number(m.get("cost_per_task_usd")) is not None),
-        key=lambda m: (
-            _number(m.get("cost_per_task_usd")),
-            -(_number(m.get("success_rate")) or 0.0),
-            str(m.get("model")),
-        ),
-    )
-    if priced_eligible:
-        medium_model = str(priced_eligible[0]["model"])
-        medium_note = None
-    else:
-        medium_model = complex_model
-        medium_note = (
-            "no model within the tolerance carries a cost; falling back to "
-            "the strongest model (unknown cost is never treated as cheap)"
-        )
-
-    if priced:
-        cheap_model = str(priced[0]["model"])
-        cheap_note = None
-    else:
-        cheap_model = complex_model
-        cheap_note = "no model carries a cost; falling back to the strongest model"
-
-    local_models = [model for model in local_models if str(model).strip()]
-    local_model = str(local_models[0]) if local_models else None
-
-    stem_model: str | None = None
-    stem_note = "no MCQ picture declared; using the medium lane's model"
-    if mcq_order:
-        for model in mcq_order:
-            if any(str(m.get("model")) == str(model) for m in entries):
-                stem_model = str(model)
-                stem_note = "ordered by the declared MCQ picture"
-                break
-        if stem_model is None:
-            stem_note = (
-                "the MCQ picture names no profiled model; using the medium "
-                "lane's model"
-            )
-    if stem_model is None:
-        stem_model = medium_model
-
-    models = {
-        "complex": complex_model,
-        "medium": medium_model,
-        "cheap": cheap_model,
-        "stem": stem_model,
-        **({"local": local_model} if local_model else {}),
-    }
-    reasons: dict[str, Any] = {}
-    for lane, model in models.items():
-        reason: dict[str, Any] = {
-            "model": model,
-            "rule": _LANE_RULE_TEXT[lane],
+    return {
+        "model_split_stats": {
+            "calib": {
+                str(entry["model"]): {
+                    "total": {
+                        "accuracy": _number(entry.get("success_rate")),
+                        "cost_per_question": _number(entry.get("cost_per_task_usd")),
+                        "n": entry.get("tasks"),
+                    },
+                    "labels": {},
+                }
+                for entry in validate_profile(profile)
+            }
         }
-        if lane == "medium" and medium_note:
-            reason["note"] = medium_note
-        if lane == "cheap" and cheap_note:
-            reason["note"] = cheap_note
-        if lane == "stem":
-            reason["note"] = stem_note
-        reasons[lane] = reason
-    return {"models": models, "reasons": reasons}
+    }
+
+
+def _profile_models(profile: Mapping[str, Any]) -> list[Any]:
+    """The profiled models as selection candidates (name + capabilities).
+
+    The agentic profile carries no capability cards; the shared capability
+    filter sees an empty requirement for the agent recipe's decisions, so
+    every profiled model is eligible - the evidence-backed candidate set is
+    exactly the profiled one.
+    """
+    return [
+        SimpleNamespace(name=str(entry["model"]), capabilities=None)
+        for entry in validate_profile(profile)
+    ]
 
 
 def _set_lane_models(decision: dict[str, Any], model: str) -> None:
@@ -320,25 +245,22 @@ def bootstrap_agentic_config(
     profile: Mapping[str, Any],
     *,
     client: str,
-    medium_tolerance_pp: float = DEFAULT_MEDIUM_TOLERANCE_PP,
     local_models: Sequence[str] = (),
-    mcq_order: Sequence[str] = (),
+    lam: float = 0.0,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Rewrite the agent recipe template from the profile (pure function).
 
-    Returns (config, sidecar). The sidecar records every lane's choice
-    with its rule and evidence, the client identity contract and the
-    protection settings, so the candidate's provenance can answer "why is
-    this model on this lane" without re-deriving anything.
+    Returns (config, sidecar). The ranked lanes go through the shared
+    selection core (`bindings.plan_lane`, unmeasured-lane semantics); the
+    sidecar records every lane's choice with its basis and scores, the
+    client identity contract and the protection settings, so the
+    candidate's provenance can answer "why is this model on this lane"
+    without re-deriving anything.
     """
     if client not in CLIENTS:
         raise ValueError(f"client must be one of {list(CLIENTS)}, got {client!r}")
-    assignment = select_models(
-        profile,
-        medium_tolerance_pp=medium_tolerance_pp,
-        local_models=local_models,
-        mcq_order=mcq_order,
-    )
+    stats = _binding_stats(profile)
+    candidates = _profile_models(profile)
     config = copy.deepcopy(dict(template))
     decisions = config.get("decisions")
     if not isinstance(decisions, list):
@@ -353,12 +275,29 @@ def bootstrap_agentic_config(
         if lane is None:
             rewritten.append(decision)
             continue
-        model = assignment["models"].get(lane)
-        if model is None:
-            raise ValueError(
-                f"lane {lane!r} (decision {name!r}) has no model: declare "
-                "local_models for the privacy/security lanes"
+        if lane == "local":
+            model = _pin_local_model(local_models)
+            reason: dict[str, Any] = {
+                "model": model,
+                "basis": "contract-declared local model (privacy/security bypass)",
+            }
+        else:
+            plan = plan_lane(
+                lane=name,
+                template_lane={"immediate": False, "minimum_candidates": 1},
+                models=candidates,
+                profile=stats,
+                lam=lam,
+                min_lane_cases=1,
+                lane_counts={name: 0},
             )
+            model = plan["selected"][0]
+            reason = {
+                "model": model,
+                "basis": plan["basis"],
+                "untested": True,
+                "scores": plan["scores"],
+            }
         _set_lane_models(decision, model)
         if lane == "local":
             adaptations = decision.get("adaptations")
@@ -367,7 +306,7 @@ def bootstrap_agentic_config(
             adaptations["mode"] = "bypass"
             decision["adaptations"] = adaptations
         rewritten.append(decision)
-        reasons[name] = {"lane": lane, **assignment["reasons"][lane]}
+        reasons[name] = {"lane": lane, **reason}
     config["decisions"] = rewritten
 
     identity = CLIENT_IDENTITY_HEADERS[client]
@@ -421,7 +360,7 @@ def bootstrap_agentic_config(
         "lanes": [
             {"decision": name, **reason} for name, reason in sorted(reasons.items())
         ],
-        "medium_tolerance_pp": medium_tolerance_pp,
+        "lambda": lam,
         "local_models": [str(m) for m in local_models],
         "adaptation_enabled": False,
         "progress_gate": {"mode": "observe"},
@@ -433,3 +372,13 @@ def bootstrap_agentic_config(
         ),
     }
     return config, sidecar
+
+
+def _pin_local_model(local_models: Sequence[str]) -> str:
+    models = [model for model in local_models if str(model).strip()]
+    if not models:
+        raise ValueError(
+            "the privacy/security lanes need a contract-declared local model: "
+            "pass local_models (the traffic must never leave the deployment)"
+        )
+    return str(models[0])

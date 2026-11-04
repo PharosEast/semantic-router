@@ -51,7 +51,6 @@ from .adapters.router_replay import (
 )
 from .agentic_bootstrap import (
     CLIENTS,
-    DEFAULT_MEDIUM_TOLERANCE_PP,
     PROFILE_KIND,
     bootstrap_agentic_config,
     profile_from_reports,
@@ -392,15 +391,13 @@ def cmd_bootstrap_agentic(args: argparse.Namespace) -> int:
     local_models = list(spec.local_models)
     for raw in args.local_model or []:
         local_models.extend(m.strip() for m in raw.split(",") if m.strip())
-    mcq_order = [m.strip() for m in (args.mcq_order or "").split(",") if m.strip()]
     try:
         config, sidecar = bootstrap_agentic_config(
             template,
             profile_payload,
             client=args.client,
-            medium_tolerance_pp=args.medium_tolerance_pp,
             local_models=local_models,
-            mcq_order=mcq_order,
+            lam=args.lam,
         )
     except ValueError as exc:
         raise ContractError(str(exc)) from exc
@@ -3422,8 +3419,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_boot = sub.add_parser(
         "bootstrap-agentic",
         help="AG5: generate an agentic candidate from the agent recipe "
-        "template, the profile and the client identity contract (lane "
-        "assignment rules + per-lane evidence in a sidecar)",
+        "template, the profile and the client identity contract (the shared "
+        "unmeasured-lane selection + per-lane evidence in a sidecar)",
     )
     p_boot.add_argument(
         "--spec", required=True, help="experiment spec YAML (local_models)"
@@ -3444,11 +3441,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="client whose identity headers the session protection reads",
     )
     p_boot.add_argument(
-        "--medium-tolerance-pp",
+        "--lambda",
+        dest="lam",
         type=float,
-        default=DEFAULT_MEDIUM_TOLERANCE_PP,
-        help="medium lane: max success-rate gap to the best model in percentage points "
-        f"(default {DEFAULT_MEDIUM_TOLERANCE_PP})",
+        default=0.0,
+        help="cost weight in the shared ranking (accuracy - lambda * "
+        "normalized cost); 0 ranks by accuracy alone (default 0)",
     )
     p_boot.add_argument(
         "--local-model",
@@ -3456,12 +3454,6 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="local model for the privacy/security lanes (repeatable; defaults to "
         "the spec's local_models)",
-    )
-    p_boot.add_argument(
-        "--mcq-order",
-        default="",
-        help="comma-separated model order from the MCQ picture for the STEM and "
-        "legal-health lanes",
     )
     p_boot.add_argument("--out", required=True, help="output candidate directory")
     p_boot.add_argument(

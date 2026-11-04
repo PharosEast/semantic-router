@@ -255,20 +255,22 @@ proposals.
   in the model entry's `missing` - missing evidence is never counted as
   zero.
 - `recipe-lab bootstrap-agentic --spec S --profile P --template T --client
-  claude-code|openai-chat|generic --out D [--medium-tolerance-pp P]
-  [--local-model M] [--mcq-order M1,M2] [--validate [--validate-bin vllm-sr]]`
-  Rewrites the agent recipe template from the profile (lane assignment:
-  complex lanes take the strongest model, medium lanes the cheapest within
-  `medium_tolerance_pp` of the best, the simple lane and fallback the
-  cheapest, privacy/security the spec's `local_models` with adaptation
-  bypassed, legal-health and STEM the MCQ picture when declared). Session
+  claude-code|openai-chat|generic --out D [--lambda L]
+  [--local-model M] [--validate [--validate-bin vllm-sr]]`
+  Rewrites the agent recipe template from the profile (Z10: the ranked
+  lanes go through the shared selection core, `bindings.plan_lane`'s
+  unmeasured-lane branch - the agentic profile measures models, not lanes,
+  so every lane is capability-filtered, ranked by the lambda-adjusted
+  overall score and marked "default rule (unmeasured lane)" exactly like
+  the built-in template path; privacy/security are pinned to the spec's
+  `local_models` with adaptation bypassed, not ranked). Session
   protection is written per client: claude-code protects the whole session
   keyed by the verified headers (x-claude-code-session-id, agent:
   x-claude-code-agent-id, from AG0-W2); other clients protect one
   conversation keyed by the neutral headers. Adaptation is disabled, the
   progress gate starts in observe mode, and candidate requirements demand
   declared capabilities. Writes `agentic-config.yaml` and a sidecar
-  (`agentic-config.bootstrap.json`) carrying every lane's rule and
+  (`agentic-config.bootstrap.json`) carrying every lane's basis and
   evidence. `--validate` refuses an unvalidatable candidate (exit 2).
 
 ## Proposal and replay tier
