@@ -166,9 +166,7 @@ def test_cli_cases_from_replays_writes_provenance(tmp_path, capsys):
     assert payload["granularity"] == "session"
     loaded = load_route_cases(str(out))
     assert len(loaded) == 2
-    provenance = json.loads(
-        Path(payload["provenance"]).read_text(encoding="utf-8")
-    )
+    provenance = json.loads(Path(payload["provenance"]).read_text(encoding="utf-8"))
     assert provenance["dedup_rule"].startswith("one case per conversation")
 
 
@@ -186,12 +184,8 @@ def test_j3_records_rebuild_to_pilot_sessions_and_unique_prompts():
     # (12 SWE-bench tasks + 1 auxiliary session in the pilot capture)
     session_cases, session_prov = cases_from_replays(records, "session")
     assert session_prov["cases"] == 13
-    assert session_prov["duplicate_pct"] == pytest.approx(
-        (1 - 13 / 344) * 100, abs=0.1
-    )
-    multi = [
-        case for case in session_cases if len(case["requests"]) > 1
-    ]
+    assert session_prov["duplicate_pct"] == pytest.approx((1 - 13 / 344) * 100, abs=0.1)
+    multi = [case for case in session_cases if len(case["requests"]) > 1]
     assert len(multi) == 12  # one pilot session captured a single request
     # prompt granularity: the J3 rebuild's 14 unique prompts
     prompt_cases, prompt_prov = cases_from_replays(records, "prompt")
@@ -258,11 +252,15 @@ def test_evidence_counts_tool_loop_switches_and_resolves_gates():
     evidence = route_replay_evidence(
         records,
         phases_by_request_id=phases,
-        gates={"max_tool_loop_switches": 0, "max_mean_switches_per_task": 1.0},
+        gates={
+            "max_unprotected_tool_loop_switches": 0,
+            "max_mean_switches_per_task": 1.0,
+        },
     )
     summary = evidence["summary"]
     assert summary["sessions"] == 1
     assert summary["tool_loop_switches"] == 1
+    assert summary["decision_drift_switches"] == 0
     assert summary["mean_switches_per_session"] == 1.0
     assert summary["model_shares"] == {
         "local/model-a": pytest.approx(1 / 3),
@@ -270,7 +268,7 @@ def test_evidence_counts_tool_loop_switches_and_resolves_gates():
     }
     assert summary["first_turn_decisions"] == {"domain_code": 1}
     gates = {g.name: g for g in evidence["gate_results"]}
-    assert gates["max_tool_loop_switches"].passed is False
+    assert gates["max_unprotected_tool_loop_switches"].passed is False
     assert gates["max_mean_switches_per_task"].passed is True
 
     # a protected candidate keeps one model through the whole tool loop
@@ -280,11 +278,58 @@ def test_evidence_counts_tool_loop_switches_and_resolves_gates():
     protected = route_replay_evidence(
         protected_records,
         phases_by_request_id=phases,
-        gates={"max_tool_loop_switches": 0},
+        gates={"max_unprotected_tool_loop_switches": 0},
     )
     assert protected["summary"]["tool_loop_switches"] == 0
     protected_gates = {g.name: g for g in protected["gate_results"]}
-    assert protected_gates["max_tool_loop_switches"].passed is True
+    assert protected_gates["max_unprotected_tool_loop_switches"].passed is True
+
+
+def test_evidence_splits_drift_releases_from_unprotected():
+    # Z5: the arriving record's protection trace marks the drift releases -
+    # the continuity total minus them is what the zero ceiling judges, and
+    # the per-task drift rate has its own ceiling
+    records = [
+        {
+            "request_id": f"rl-rt-d-s{session}-{turn}",
+            "prompt": "tool follow",
+            "decision": "domain_code",
+            "selected_model": "local/model-a" if turn == 0 else "local/model-b",
+            "conversation_id": f"s{session}",
+            "turn_index": 0,
+            "timestamp": f"{session}{turn}",
+            "session_policy": {
+                "phase": "tool_loop",
+                "decision_drift": turn == 1,
+            },
+        }
+        for session in (1, 2)
+        for turn in (0, 1)
+    ]
+    phases = {
+        "rl-rt-d-s1-0": "user_turn",
+        "rl-rt-d-s1-1": TOOL_LOOP_PHASE,
+        "rl-rt-d-s2-0": "user_turn",
+        "rl-rt-d-s2-1": TOOL_LOOP_PHASE,
+    }
+    evidence = route_replay_evidence(
+        records,
+        phases_by_request_id=phases,
+        gates={
+            "max_unprotected_tool_loop_switches": 0,
+            "max_decision_drift_switches_per_task": 0.2,
+        },
+    )
+    summary = evidence["summary"]
+    # both switches were drift releases: the unprotected residual is clean,
+    # the per-task drift rate (2 / 2 = 1.0) exceeds 0.2
+    assert summary["tool_loop_switches"] == 2
+    assert summary["decision_drift_switches"] == 2
+    gates = {g.name: g for g in evidence["gate_results"]}
+    assert gates["max_unprotected_tool_loop_switches"].value == 0.0
+    assert gates["max_unprotected_tool_loop_switches"].passed is True
+    assert gates["max_decision_drift_switches_per_task"].value == pytest.approx(1.0)
+    assert gates["max_decision_drift_switches_per_task"].passed is False
 
 
 # ---- truth namespace: behavior labels never ground decision_mismatch ----
@@ -558,12 +603,14 @@ def test_route_replay_detects_tool_loop_switches(route_stack, tmp_path, mode):
         request_timeout=30.0,
         trial_timeout_s=60,
         request_id_prefix="rl-rt-test-",
-        gates={"max_tool_loop_switches": 0},
+        gates={"max_unprotected_tool_loop_switches": 0},
     )
     summary = result["summary"]
     assert summary["sessions"] == 1
     assert summary["records"] == 3
-    gate = {g.name: g for g in result["gate_results"]}["max_tool_loop_switches"]
+    gate = {g.name: g for g in result["gate_results"]}[
+        "max_unprotected_tool_loop_switches"
+    ]
     if mode == "protected":
         assert summary["tool_loop_switches"] == 0
         assert summary["model_shares"] == {"local/model-a": 1.0}

@@ -70,7 +70,7 @@ from .adapters.router_replay import (
     records_to_cases_by_request_id,
     records_to_rows,
 )
-from .agentic import agentic_gate_results
+from .agentic import SwitchEvidence, agentic_gate_results
 from .attribution import CaseInput, attribute, summarize
 from .bank import apply_bank
 from .contract import ContractError, OraclePolicy
@@ -685,6 +685,7 @@ def route_replay_evidence(
     rows = records_to_rows(records)
     analysis = analyze_sessions(rows)
     tool_loop_switches = 0
+    drift_releases = 0
     for requests in ordered_sessions(rows).values():
         routed = [row for row in requests if str(row.get("routed") or "")]
         for previous, current in zip(routed, routed[1:]):
@@ -693,6 +694,12 @@ def route_replay_evidence(
                 "routed"
             ):
                 tool_loop_switches += 1
+                # Z5: the arriving record's protection trace marks the
+                # in-design drift releases (#5567) the zero ceiling must
+                # not judge; untraced switches stay on the unprotected side
+                policy = current.get("session_policy")
+                if isinstance(policy, dict) and policy.get("decision_drift") is True:
+                    drift_releases += 1
     multi_request = [
         session for session in analysis["sessions"] if session["requests_recorded"] > 1
     ]
@@ -743,6 +750,7 @@ def route_replay_evidence(
         "sessions": len(analysis["sessions"]),
         "model_switches": analysis["event_counts"]["lane_flap"],
         "tool_loop_switches": tool_loop_switches,
+        "decision_drift_switches": drift_releases,
         "selection_rejected": analysis["event_counts"]["selection_failed"],
         "tool_loop_interrupted": analysis["event_counts"]["tool_loop_interrupted"],
         "mean_switches_per_session": mean_switches,
@@ -765,6 +773,13 @@ def route_replay_evidence(
         },
         candidate_events=analysis["event_counts"],
         baseline_events=baseline_events,
+        # Z5: the switch evidence this tier derives itself - the drift
+        # split from the records' protection traces, one session = one task
+        candidate_switches=SwitchEvidence(
+            tool_loop_switches=float(tool_loop_switches),
+            decision_drift=float(drift_releases),
+            sessions=len(analysis["sessions"]),
+        ),
     )
     return {
         "summary": summary,
