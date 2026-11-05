@@ -37,7 +37,7 @@ run_cli() {
 #    nothing at or above the stale 2.5 thresholds (BUG-3 appendix A)
 FIXTURE="$REPO/tools/recipe-lab/tests/fixtures/agent_recipe_min.yaml"
 ROWS="$WORK/rows.jsonl"
-"$PYBIN" - "$ROWS" <<'PY'
+if ! "$PYBIN" - "$ROWS" <<'PY'
 import sys
 
 from tests.fixtures import pilot_rows_jsonl
@@ -45,7 +45,9 @@ from tests.fixtures import pilot_rows_jsonl
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     fh.write(pilot_rows_jsonl())
 PY
-[ $? -eq 0 ] || { echo "FAIL: row generation"; exit 1; }
+then
+  echo "FAIL: row generation"; exit 1
+fi
 
 # 2. diagnose: dead lanes, compressed difficulty scale, unreachable gte 2.5
 run_cli diagnose \

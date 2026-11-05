@@ -23,7 +23,7 @@ MOCK_PID=$!
 sleep 1
 "$ROUTER_BIN" -config "$ASSETS/smoke-config.yaml" -gateway standalone > "$WORK/router.log" 2>&1 &
 ROUTER_PID=$!
-for i in $(seq 1 60); do
+for _ in $(seq 1 60); do
   sleep 5
   kill -0 $ROUTER_PID 2>/dev/null || { tail -20 "$WORK/router.log"; exit 1; }
   curl -sf http://127.0.0.1:8080/api/v1/inventory/model-runtime 2>/dev/null | grep -q '"ready":true' && break

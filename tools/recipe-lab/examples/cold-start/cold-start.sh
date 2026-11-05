@@ -145,6 +145,7 @@ if [ -z "${CASES:-}" ]; then
 fi
 CASES_HASH=$("$RL/recipe-lab" hash --file "$CASES" | "$PYBIN" -c "import json,sys; print(json.load(sys.stdin)['content_hash'])")
 echo "CASES_HASH=$CASES_HASH"
+# shellcheck disable=SC2086  # SPLIT_FLAGS carries whole CLI flags
 "$RL/recipe-lab" split --cases "$CASES" --output-dir "$WORK/splits" ${SPLIT_FLAGS:-} || exit 1
 
 # ---- phase B prep: the long-lived model endpoint ---------------------------
@@ -162,7 +163,7 @@ if [ "$DRIVER" = "model_eval" ]; then
   "$PYBIN" "$MOCK_BACKEND" --port "$MOCK_PORT" --cases "$CASES" \
     --answer-plan "$ANSWER_PLAN" &
   PIDS+=($!)
-  "$PYBIN" - "$MOCK_PORT" <<'EOF'
+  if ! "$PYBIN" - "$MOCK_PORT" <<'EOF'
 import sys, time, urllib.request
 deadline = time.time() + 30
 while time.time() < deadline:
@@ -173,7 +174,9 @@ while time.time() < deadline:
         time.sleep(0.2)
 sys.exit("long-lived mock backend not ready")
 EOF
-  [ $? -eq 0 ] || exit 1
+  then
+    exit 1
+  fi
 fi
 
 # ---- phase B: observe, profile, generate candidates, bank, replay ranking --
@@ -194,6 +197,7 @@ if [ "$DRIVER" = "model_eval" ]; then
 fi
 if [ "$MODE" = "template" ]; then
   for split in $OBSERVE_SPLITS; do
+    # shellcheck disable=SC2086  # OBSERVE_FLAGS carries whole CLI flags
     "$RL/recipe-lab" observe-lanes --spec "$SPEC" --split "$split" \
       --out "$WORK/observe-lanes" --vllm-sr-bin "$VLLM_SR_BIN" \
       --model-name "$MODEL_NAME" \
@@ -201,6 +205,7 @@ if [ "$MODE" = "template" ]; then
       --python-bin "$PYBIN" --hf-home "$HF_HOME" --backend-port "$BACKEND_PORT" \
       ${OBSERVE_FLAGS:-} || exit 1
   done
+  # shellcheck disable=SC2086  # PROFILE_FLAGS carries whole CLI flags
   "$RL/recipe-lab" profile --spec "$SPEC" --lanes "$WORK/observe-lanes" \
     --splits calib,dev --out "$WORK/profile" \
     --model-eval-dir "$MODEL_EVAL_DIR" --python-bin "$PYBIN" ${PROFILE_FLAGS:-} || exit 1
@@ -218,15 +223,18 @@ if [ "$MODE" = "template" ]; then
   PROPOSER="bindings"
 else
   for split in $OBSERVE_SPLITS; do
+    # shellcheck disable=SC2086  # OBSERVE_FLAGS carries whole CLI flags
     "$RL/recipe-lab" observe-labels --spec "$SPEC" --split "$split" \
       --out "$WORK/observe" --classification-config "$CLASSIFICATION_CONFIG" \
       --router-bin "$ROUTER_BIN" --mock-backend "$MOCK_BACKEND" \
       --python-bin "$PYBIN" --hf-home "$HF_HOME" --backend-port "$BACKEND_PORT" \
       ${OBSERVE_FLAGS:-} || exit 1
   done
+  # shellcheck disable=SC2086  # PROFILE_FLAGS carries whole CLI flags
   "$RL/recipe-lab" profile --spec "$SPEC" --labels "$WORK/observe" --splits calib,dev \
     --out "$WORK/profile" --model-eval-dir "$MODEL_EVAL_DIR" \
     --python-bin "$PYBIN" ${PROFILE_FLAGS:-} || exit 1
+  # shellcheck disable=SC2086  # BOOTSTRAP_FLAGS carries whole CLI flags
   "$RL/recipe-lab" bootstrap --legacy-domain-template --spec "$SPEC" \
     --profile "$WORK/profile" \
     --model-eval-dir "$MODEL_EVAL_DIR" --classification-config "$CLASSIFICATION_CONFIG" \
@@ -257,6 +265,7 @@ if [ -z "$RUN_CANDIDATES" ]; then
   echo "cold-start: bootstrap produced no candidate configs in $WORK/cands" >&2
   exit 1
 fi
+# shellcheck disable=SC2086  # RUN_FLAGS carries whole CLI flags
 "$RL/recipe-lab" run --tier replay --spec "$SPEC" --split dev \
   --cases "$WORK/splits/dev.jsonl" \
   --bank "${BANK_FILE:-$WORK/bank.jsonl}" \
@@ -338,18 +347,20 @@ if [ "$DRIVER" = "model_eval" ]; then
   BASELINE_PORT=$(free_port)
   CANDIDATE_PORT=$(free_port)
   patch_listener() { # $1 = src, $2 = dst, $3 = listener port
-    "$PYBIN" - "$1" "$2" "$3" <<'EOF'
+    if ! "$PYBIN" - "$1" "$2" "$3" <<'EOF'
 import sys, yaml
 config = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 config["listeners"][0]["port"] = int(sys.argv[3])
 with open(sys.argv[2], "w", encoding="utf-8") as fh:
     yaml.safe_dump(config, fh, sort_keys=False)
 EOF
-    return $?
+    then
+      return 1
+    fi
   }
   patch_listener "$BASELINE_SRC" "$VERIFY_DIR/baseline.yaml" \
     "$BASELINE_PORT" || exit 1
-  "$PYBIN" - "$VERIFY_DIR/baseline.yaml" "$MOCK_PORT" <<'EOF'
+  if ! "$PYBIN" - "$VERIFY_DIR/baseline.yaml" "$MOCK_PORT" <<'EOF'
 import sys, yaml
 config = yaml.safe_load(open(sys.argv[1], encoding="utf-8"))
 for model in config["providers"]["models"]:
@@ -358,7 +369,9 @@ for model in config["providers"]["models"]:
 with open(sys.argv[1], "w", encoding="utf-8") as fh:
     yaml.safe_dump(config, fh, sort_keys=False)
 EOF
-  [ $? -eq 0 ] || exit 1
+  then
+    exit 1
+  fi
   patch_listener "$BUNDLE_CONFIG" "$VERIFY_DIR/candidate.yaml" \
     "$CANDIDATE_PORT" || exit 1
   BUNDLE_CONFIG="$VERIFY_DIR/candidate.yaml"
@@ -375,6 +388,7 @@ EOF
   "$RL/recipe-lab" cases to-model-eval --source "$WORK/splits/frozen_test.jsonl" \
     --out "$VERIFY_DIR/tasks-frozen_test.jsonl" || exit 1
 
+  # shellcheck disable=SC2086  # VERIFY_FLAGS carries whole CLI flags
   "$RL/recipe-lab" verify --spec "$SPEC" --split frozen_test --final \
     --candidate "$VERIFY_CANDIDATE" --ledger "$WORK/ledger.jsonl" \
     --tasks "$VERIFY_DIR/tasks-frozen_test.jsonl" \
@@ -410,6 +424,7 @@ else
       exit 1
     fi
   fi
+  # shellcheck disable=SC2086  # VERIFY_FLAGS carries whole CLI flags
   "$RL/recipe-lab" verify --spec "$SPEC" --split frozen_test --final \
     --candidate "$VERIFY_CANDIDATE" --ledger "$WORK/ledger.jsonl" ${VERIFY_FLAGS:-} || exit 1
 fi

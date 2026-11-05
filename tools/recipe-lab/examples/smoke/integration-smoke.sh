@@ -47,6 +47,7 @@ command -v vllm-srun > /dev/null 2>&1 \
   || { echo "SMOKE-FAILED vllm-srun not on PATH (router model-runtime serve command)"; exit 1; }
 
 SRBENCH_PID=""
+# shellcheck disable=SC2329  # invoked via the EXIT trap
 cleanup() {
   if [ -n "$SRBENCH_PID" ]; then kill "$SRBENCH_PID" 2>/dev/null || true; fi
 }
