@@ -208,41 +208,40 @@ DRIFT_TASK = "What is the capital of France?"
 def _session_requests() -> list[dict]:
     """One recorded session: a code task whose loop is joined by two
     deliberately general requests (the drift pair)."""
+
+    def loop_turn(call_id: str) -> dict:
+        # OpenAI chat schema: type and arguments are required on tool calls
+        return {
+            "role": "assistant",
+            "tool_calls": [
+                {
+                    "id": call_id,
+                    "type": "function",
+                    "function": {"name": "read_file", "arguments": "{}"},
+                }
+            ],
+        }
+
     user = {"role": "user", "content": BASE_TASK}
     loop_a = [
         user,
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "t1", "function": {"name": "read_file"}}],
-        },
+        loop_turn("t1"),
         {"role": "tool", "tool_call_id": "t1", "content": "parser.py:41"},
     ]
     loop_b = [
         *loop_a,
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "t2", "function": {"name": "read_file"}}],
-        },
+        loop_turn("t2"),
         {"role": "tool", "tool_call_id": "t2", "content": "line 44"},
         {"role": "user", "content": DRIFT_TASK},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "t3", "function": {"name": "read_file"}}],
-        },
+        loop_turn("t3"),
         {"role": "tool", "tool_call_id": "t3", "content": "noted"},
     ]
     loop_c = [
         *loop_b,
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "t4", "function": {"name": "read_file"}}],
-        },
+        loop_turn("t4"),
         {"role": "tool", "tool_call_id": "t4", "content": "still noted"},
         {"role": "user", "content": DRIFT_TASK},
-        {
-            "role": "assistant",
-            "tool_calls": [{"id": "t5", "function": {"name": "read_file"}}],
-        },
+        loop_turn("t5"),
         {"role": "tool", "tool_call_id": "t5", "content": "done"},
     ]
     return [
