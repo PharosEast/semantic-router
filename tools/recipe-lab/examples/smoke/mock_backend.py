@@ -14,7 +14,10 @@ agentic_fixtures.json. When the first user message matches a task script,
 the completion is scripted: the model emits `tool_calls` on the fixture's
 configured assistant steps and a final answer otherwise, with per-model
 completion rates and per-step token budgets, and usage that carries the
-cache-read field (prompt_tokens_details.cached_tokens). Everything is
+cache-read field (prompt_tokens_details.cached_tokens). A model entry may
+declare `completion_rate_by_task` ({task prompt: rate}) to override the
+overall rate for specific tasks (V6: the cheap model completes simple
+tasks but abandons the complex ones). Everything is
 deterministic so the same fixture replays the same conversation twice.
 """
 
@@ -109,10 +112,20 @@ def _model_profile(model: str) -> dict:
 def _model_completes(model: str, task_prompt: str, profile: dict) -> bool:
     """Deterministic stand-in for sampling a per-model completion rate.
 
-    The task prompt hashes into [0, 1); a model completes the task when the
-    draw lands under its completion_rate. Same inputs always agree, so two
-    runs of the same fixture see the same completions.
+    A `completion_rate_by_task` entry overrides the overall rate for one
+    task. Otherwise the task prompt hashes into [0, 1); a model completes
+    the task when the draw lands under its completion_rate. Same inputs
+    always agree, so two runs of the same fixture see the same completions.
     """
+    by_task = profile.get("completion_rate_by_task")
+    if isinstance(by_task, dict) and task_prompt in by_task:
+        rate = float(by_task[task_prompt])
+        if rate >= 1.0:
+            return True
+        if rate <= 0.0:
+            return False
+        draw = hashlib.md5(f"{model}\x00{task_prompt}".encode()).digest()
+        return int.from_bytes(draw[:4], "big") % 10_000 / 10_000 < rate
     rate = float(profile["completion_rate"])
     if rate >= 1.0:
         return True

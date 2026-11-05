@@ -238,6 +238,7 @@ class AgentRunner:
         extra_headers: dict[str, str],
         max_tokens: int,
         max_steps: int,
+        model: str = "vllm-sr/auto",
     ) -> None:
         self.router = router
         self.mgmt = mgmt
@@ -248,6 +249,9 @@ class AgentRunner:
         self.extra_headers = extra_headers
         self.max_tokens = max_tokens
         self.max_steps = max_steps
+        # the model name sent on the wire: the router entrypoint (vllm-sr/auto)
+        # for MoM arms, or a concrete model for drives straight into a backend
+        self.model = model
         self.transcript: list[dict] = []
 
     def base_headers(self, fixture: str) -> dict[str, str]:
@@ -298,7 +302,7 @@ class AgentRunner:
                 f"{self.session_prefix}-{fixture}-{agent}-{step}-{self.run_tag}"
             )
             body: dict = {
-                "model": "vllm-sr/auto",
+                "model": self.model,
                 "max_tokens": self.max_tokens,
                 "messages": messages,
             }
