@@ -152,6 +152,15 @@ def _patch_ports(candidate_config: Path, work_dir: Path) -> tuple[Path, int, int
     """
     work_dir.mkdir(parents=True, exist_ok=True)
     config = yaml.safe_load(candidate_config.read_text(encoding="utf-8"))
+    # Evaluation guard: the mom-v1 bundle's runtime defaults enable the
+    # router replay store with backend postgres, which needs a postgres
+    # deployment the evaluation harness never provides. Force the in-memory
+    # backend at this single choke point every harness router boot shares,
+    # mirroring the response-cache guard in observe_lanes.
+    services = ((config.get("global") or {}).get("services") or {})
+    replay_cfg = services.get("router_replay")
+    if isinstance(replay_cfg, dict) and replay_cfg.get("store_backend") == "postgres":
+        replay_cfg["store_backend"] = "memory"
     router_port = 0
     for listener in config.get("listeners") or []:
         listener["port"] = _free_port()
