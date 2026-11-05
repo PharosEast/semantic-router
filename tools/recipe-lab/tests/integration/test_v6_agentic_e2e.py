@@ -966,6 +966,7 @@ def _verify(
         pricing=PRICING,
     )
     spec = ExperimentSpec.from_dict(_load(stack["spec_path"]))
+    work_dir.mkdir(parents=True, exist_ok=True)
     baseline_manifest = work_dir / "baseline-manifest.json"
     baseline_manifest.write_text(
         json.dumps(
@@ -1238,12 +1239,15 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     cold_start = stack["work"] / "cold-start.yaml"
     broken = copy.deepcopy(_load(cold_start))
     # the W1 shape: protection enabled but the conversation identity header
-    # maps to the empty string - the router resolves the conversation to
-    # nothing (an explicitly empty name does NOT fall back to the default
-    # header, which the client does send), the protection skips every
-    # request, and the switches land in the unprotected residual
+    # maps to a whitespace name - the router trims it to nothing, the
+    # conversation identity resolves missing and the protection skips every
+    # request. An explicitly EMPTY value is rejected by the router and an
+    # UNMAPPED header silently falls back to the default name (which the
+    # client does send), so the whitespace mapping is the only shape that
+    # skips the protection while the AG6 proposer still reads it as a
+    # missing header (its check strips the value).
     headers = _protection(broken)["identity"]["headers"]
-    headers["conversation"] = ""
+    headers["conversation"] = " "
     broken_path = _write_config(stack, broken, "broken")
 
     # route-replay tier: every in-loop switch lands in the unprotected
@@ -1413,7 +1417,7 @@ def test_v6_scenario_3_negative(stack, recipe_lab_bin, tmp_path):
     broken_path = stack["work"] / "broken.yaml"
     if not broken_path.exists():
         broken = copy.deepcopy(_load(cold_start))
-        _protection(broken)["identity"]["headers"]["conversation"] = ""
+        _protection(broken)["identity"]["headers"]["conversation"] = " "
         broken_path = _write_config(stack, broken, "broken")
 
     # eliminated: the route-replay tier records the violated stability gate
@@ -1463,10 +1467,14 @@ def test_v6_scenario_4_sub_agent(stack, recipe_lab_bin, tmp_path):
     sub-agents' identity as not separate, and the proposer answers with the
     agent-header candidate."""
     cold_start = stack["work"] / "cold-start.yaml"
-    arm = _arm(stack, "cold-start", cold_start)
+    # a DEDICATED arm: the Z9 join compares each sub-agent request's
+    # identity hash against the MOST COMMON identity among the other rows,
+    # so the store must carry only this run's traffic
+    arm = _arm(stack, "sub4", cold_start)
 
-    # one dedicated probe run of the sub-agent fixture, so the client-side
-    # request manifest names exactly this run's sub-agent requests
+    # one dedicated probe run of the sub-agent fixture session only - the
+    # manifest names this run's sub-agent requests, and the main turns of
+    # the same conversation provide the identity the sub turns must share
     from agentic_probe import AgentRunner, agent_request_manifest
 
     runner = AgentRunner(
