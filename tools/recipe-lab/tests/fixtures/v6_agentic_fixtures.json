@@ -9,9 +9,7 @@
     {
       "fixture": "long-loop",
       "task": "long-loop",
-      "user_correction_after_step": 1,
-      "correction_text": "Before you continue: what is the capital of France? One word is fine.",
-      "description": "four-step tool loop with a deliberately general mid-loop user note (drift prompt)"
+      "description": "four assistant turns inside one tool loop before completion - the drift-free complex task the strong model must hold and complete"
     },
     {
       "fixture": "sub-agent",

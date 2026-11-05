@@ -10,17 +10,18 @@ agent, mock OpenAI backend).
    S/W and the random mix R) through the real ``verify_live`` machinery ->
    PASS. The candidate routes complex tasks to the strong model and simple
    tasks to the cheap one, and its task success rate is strictly above R.
-2. tuning: the enforcement-opt-out config (protection on, but the
-   decision the mid-loop drift arrives at runs ``adaptations.mode:
-   observe`` - behaviorally protection-off for that path) is the baseline;
-   ``diagnose`` and ``attribute-session`` read its real replay records;
-   the route-replay summary triggers ``propose-session-policy``'s W1
-   handoff (re-enabling enforcement is a handoff, not a knob); the remedy
-   candidate's route-replay shows the unprotected tool-loop residual at
-   zero and it wins the live stability gate.
-3. negative: the same enforcement-opt-out candidate is gate-violated on
-   the route-replay tier and FAILs the live verdict through the agentic
-   stability gates (the Z4-fetched replay rows of its own arm router).
+2. tuning: the protection-disabled baseline (the doc's 'deliberately
+   disable protection') is the baseline; ``diagnose`` and
+   ``attribute-session`` read its real replay records (honestly empty of
+   session rows - a disabled protection resolves no identity);
+   ``propose-session-policy`` hands the unprotected switches back as the
+   W1-class cause (re-enabling enforcement is not a knob); the remedy's
+   route-replay shows the unprotected tool-loop residual at zero and it
+   wins the live stability gate.
+3. negative: the enforcement-opt-out candidate (the drifting decision on
+   ``adaptations.mode: observe``) is eliminated on the route-replay tier
+   under the DEFAULT drift ceiling and FAILs the live verdict through the
+   agentic gates fed from its own arm's Z4-fetched replay rows.
 4. sub agent: the generic-client config (no agent identity header) is
    diagnosed "sub-agents cannot keep a separate identity" from the AG8
    probe's client-side request manifest, and ``propose-session-policy``
@@ -47,14 +48,15 @@ Two documented divergences from §6 are load-bearing:
   config splits cheap/simple from strong/complex structurally.
 - AG6's proposer fixes broken identity by ADDING the missing header; it
   has no "enable protection" candidate (Z6 hands enforcement back as a
-  W1/W2-class cause, never a knob), and no config shape both skips the
-  protection and reads as identity-missing (an unmapped header falls back
-  to the default name the client sends; an empty name is rejected by the
-  loader - both proven on the real stack). The tuning baseline therefore
-  opts the drifting decision out of enforcement
-  (``adaptations.mode: observe``) - behaviorally protection-off for that
-  path while the identity and the replay rows stay intact - and the
-  scenario asserts the W1 handoff plus the remedy's zero residual.
+  W1/W2-class cause, never a knob). The tuning baseline therefore
+  disables the protection outright (the doc's letter) and the scenario
+  asserts the W1 handoff plus the remedy's zero unprotected residual.
+  Two real-stack findings shaped the design: an unmapped identity header
+  silently falls back to the default name the client sends (so the
+  protection engages anyway), an empty name is rejected by the loader,
+  and an observe-mode enforcement opt-out keeps its releases TRACED as
+  decision drift - the unprotected residual only exists when the
+  protection never runs.
 
 Determinism (criterion 5): the candidate arm's fixture set runs twice and
 the AG8 trajectory comparison must come back empty; ``diagnose`` is run
@@ -738,6 +740,11 @@ def stack(tmp_path_factory, router_bin):
                     "split_rule": "scripted AG8 sessions, one task each",
                     "agentic_gates": {
                         "max_decision_drift_switches_per_task": DRIFT_CEILING,
+                        # numeric ceiling: the tuning scenario's
+                        # protection-disabled baseline resolves no session
+                        # identity, so a "baseline" interruption pin could
+                        # never evaluate
+                        "max_tool_loop_interrupted": 0,
                     },
                     "splits": {
                         "frozen_test": {
@@ -761,6 +768,16 @@ def stack(tmp_path_factory, router_bin):
         }
         spec_path = work / "spec.yaml"
         spec_path.write_text(yaml.safe_dump(spec, sort_keys=False), encoding="utf-8")
+
+        # the default-gates variant for the negative scenario: without the
+        # workload's declared drift accommodation, the AG7 default ceiling
+        # (0.2) is the contract the switching candidate must satisfy
+        default_spec = copy.deepcopy(spec)
+        del default_spec["workloads"][0]["agentic_gates"]
+        spec_default_path = work / "spec-default-gates.yaml"
+        spec_default_path.write_text(
+            yaml.safe_dump(default_spec, sort_keys=False), encoding="utf-8"
+        )
 
         reports = {}
         for name, accuracy, spend, calls in (
@@ -802,6 +819,7 @@ def stack(tmp_path_factory, router_bin):
             "work": work,
             "cases_path": cases_path,
             "spec_path": spec_path,
+            "spec_default_path": spec_default_path,
             "fixtures": fixtures,
             "reports": reports,
             "arms": {},
@@ -848,26 +866,30 @@ def _protection(config: dict) -> dict:
     return config["global"]["router"]["learning"]["protection"]
 
 
-def _broken_config(stack: dict) -> Path:
-    """The tuning/negative baseline: the cold-start config with the
-    drifting decision opted out of learning enforcement.
+def _disabled_protection_config(stack: dict) -> Path:
+    """The tuning baseline: the cold-start config with protection disabled
+    (§7 V6 scenario 2's 'deliberately disable protection', the doc's
+    letter). Every in-loop switch lands in the unprotected residual; the
+    trade-off is that a disabled protection resolves no session identity,
+    so the arm's replay records carry no session fields."""
+    disabled = copy.deepcopy(_load(stack["work"] / "cold-start.yaml"))
+    _protection(disabled)["enabled"] = False
+    return _write_config(stack, disabled, "disabled-protection")
 
-    'deliberately disable protection' (§7 V6 scenario 2) realized through
-    the router's own mechanism - ``adaptations.mode: observe`` on the
-    decision the mid-loop drift arrives at. Behaviorally the protection
-    cannot hold there, so the in-loop switches land in the unprotected
-    residual; unlike a disabled protection the identity still resolves and
-    the replay records keep their session fields, which the Z4 rows and
-    the diagnosis need. A protection-disabled config produces no session
-    identity at all, and a missing/empty identity header mapping either
-    falls back to the default header (which the client sends) or is
-    rejected by the loader - both proven on the real stack.
-    """
+
+def _observe_opt_out_config(stack: dict) -> Path:
+    """The negative candidate: the cold-start config with the drifting
+    decision opted out of learning enforcement (``adaptations.mode:
+    observe`` on the decision the mid-loop drift arrives at). The identity
+    still resolves - so the Z4 rows keep their session evidence - and the
+    real stack proved the releases stay traced as decision drift, so the
+    candidate is eliminated through the DEFAULT drift ceiling (0.2), which
+    its 2-releases-per-5-sessions rate exceeds."""
     broken = copy.deepcopy(_load(stack["work"] / "cold-start.yaml"))
     for decision in broken["routing"]["decisions"]:
         if decision["name"] == "simple_general_local":
             decision["adaptations"] = {"mode": "observe"}
-    return _write_config(stack, broken, "broken")
+    return _write_config(stack, broken, "negative-observe")
 
 
 def _decision_models(config: dict) -> dict[str, str]:
@@ -917,14 +939,20 @@ def _run_recipe_lab(recipe_lab_bin: Path, argv: list[str], timeout: int = 1800) 
 
 
 def _run_route_replay(
-    stack: dict, recipe_lab_bin: Path, *, candidates: Path, ledger: Path, out: Path
+    stack: dict,
+    recipe_lab_bin: Path,
+    *,
+    candidates: Path,
+    ledger: Path,
+    out: Path,
+    spec_path: Path | None = None,
 ) -> list[dict]:
     argv = [
         "run",
         "--tier",
         "route-replay",
         "--spec",
-        str(stack["spec_path"]),
+        str(spec_path or stack["spec_path"]),
         "--cases",
         str(stack["cases_path"]),
         "--candidates",
@@ -973,6 +1001,7 @@ def _verify(
     candidate_target: str,
     baseline_target: str,
     work_dir: Path,
+    spec_path: Path | None = None,
 ) -> tuple[dict, LiveArmCli]:
     """The live four-arm comparison through the real verify_live.
 
@@ -993,7 +1022,7 @@ def _verify(
         fixture_file=V6_FIXTURES,
         pricing=PRICING,
     )
-    spec = ExperimentSpec.from_dict(_load(stack["spec_path"]))
+    spec = ExperimentSpec.from_dict(_load(spec_path or stack["spec_path"]))
     work_dir.mkdir(parents=True, exist_ok=True)
     baseline_manifest = work_dir / "baseline-manifest.json"
     baseline_manifest.write_text(
@@ -1261,40 +1290,40 @@ def _run_id_of(run: dict) -> str:
 
 
 def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
-    """The enforcement-opt-out baseline -> diagnose + attribute-session ->
-    propose-session-policy (the W1 handoff) -> the remedy candidate's
-    route-replay (unprotected residual 0) -> the live stability gate."""
+    """The protection-disabled baseline (the doc's 'deliberately disable
+    protection') -> diagnose + attribute-session -> propose-session-policy
+    (the W1 handoff) -> the remedy's route-replay (unprotected residual 0)
+    -> the live stability gate."""
     cold_start = stack["work"] / "cold-start.yaml"
-    broken_path = _broken_config(stack)
+    disabled_path = _disabled_protection_config(stack)
 
     # route-replay tier: every in-loop switch lands in the unprotected
-    # residual (the observe-mode arriving decision never holds and never
-    # traces a drift release)
-    ledger = stack["work"] / "ledger-broken.jsonl"
+    # residual - a disabled protection traces nothing
+    ledger = stack["work"] / "ledger-disabled.jsonl"
     records = _run_route_replay(
         stack,
         recipe_lab_bin,
-        candidates=broken_path,
+        candidates=disabled_path,
         ledger=ledger,
-        out=stack["work"] / "route-replay-broken",
+        out=stack["work"] / "route-replay-disabled",
     )
     record = _route_evidence(records)
     evidence = json.loads(record["notes"].split("routing-evidence=", 1)[1])
     assert evidence["tool_loop_switches"] >= 1
     assert evidence["decision_drift_switches"] == 0
-    summary_path = stack["work"] / "route-replay-broken-summary.json"
+    summary_path = stack["work"] / "route-replay-disabled-summary.json"
     summary_path.write_text(json.dumps(evidence, indent=1), encoding="utf-8")
 
-    # diagnose over the broken arm's real records (AG4 phase split), twice,
+    # diagnose over the disabled arm's real records (AG4 phase split), twice,
     # byte-identical (criterion 5). The arm is driven live first: the
     # route-replay tier uses its own ephemeral routers, so the arm's replay
     # store only carries what the probe sent it.
-    broken_arm = _arm(stack, "broken", broken_path)
+    disabled_arm = _arm(stack, "disabled", disabled_path)
     from agentic_probe import AgentRunner
 
     tune_runner = AgentRunner(
-        router=broken_arm.router_url,
-        mgmt=broken_arm.management_url,
+        router=disabled_arm.router_url,
+        mgmt=disabled_arm.management_url,
         fixtures=stack["fixtures"],
         run_tag="tune1",
         session_prefix="v6-tune",
@@ -1306,7 +1335,7 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     for session in stack["fixtures"]["sessions"]:
         tune_runner.run_session(session)
     rows_path = stack["work"] / "diag-rows.jsonl"
-    rows = records_to_rows(broken_arm.records())
+    rows = records_to_rows(disabled_arm.records())
     rows_path.write_text(
         "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows),
         encoding="utf-8",
@@ -1321,11 +1350,11 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
                 "--records",
                 str(rows_path),
                 "--config",
-                str(broken_path),
+                str(disabled_path),
                 "--output-dir",
                 str(out),
                 "--source",
-                "V6 tuning baseline (enforcement opt-out arm)",
+                "V6 tuning baseline (protection-disabled arm)",
             ],
         )
     assert (diag_a / "diagnosis.json").read_bytes() == (
@@ -1334,7 +1363,9 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     diagnosis = json.loads((diag_a / "diagnosis.json").read_text(encoding="utf-8"))
     assert "tool_loop" in json.dumps(diagnosis)
 
-    # attribute-session over the same records: the arm flap is the evidence
+    # attribute-session over the same records: a protection-disabled config
+    # resolves no session identity, so the session attribution honestly
+    # reports zero session rows - the W1 shape's own evidence
     sess_dir = stack["work"] / "session-report"
     _run_recipe_lab(
         recipe_lab_bin,
@@ -1349,19 +1380,20 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     session_summary = json.loads(
         (sess_dir / "session-events.json").read_text(encoding="utf-8")
     )
-    assert session_summary["events"]["lane_flap"] >= 1
+    assert session_summary["events"]["lane_flap"] == 0
 
-    # propose-session-policy over the broken config: Z6's cause model
-    # hands the unprotected switches back (re-enabling enforcement is not
-    # a protection knob), so no candidate file is written and the remedy
-    # is the handoff's own prescription - restore the enforced config
+    # propose-session-policy over the disabled config: Z6's cause model
+    # hands the unprotected switches back as the W1-class cause (re-enabling
+    # enforcement is not a protection knob), so no candidate file is
+    # written and the remedy is the handoff's own prescription - the
+    # enforced cold-start config
     spp_out = stack["work"] / "spp"
     spp_stdout = _run_recipe_lab(
         recipe_lab_bin,
         [
             "propose-session-policy",
             "--config",
-            str(broken_path),
+            str(disabled_path),
             "--replay-summary",
             str(summary_path),
             "--output-dir",
@@ -1371,17 +1403,16 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     spp = json.loads(spp_stdout)
     handoff_reasons = [h["reason"] for h in spp["handoffs"]]
     assert "unprotected_tool_loop_switches" in handoff_reasons, spp["handoffs"]
-    assert not spp["candidates"], "the enforcement opt-out became a knob"
+    assert not spp["candidates"], "re-enabling enforcement became a knob"
 
-    # the remedy candidate's route-replay: the protection engages, the
-    # in-loop switches are all traced drift releases, the unprotected
-    # residual is zero (criterion 2)
-    tuned_path = stack["work"] / "cold-start.yaml"
+    # the remedy's route-replay: the protection engages, the in-loop
+    # switches are all traced drift releases, the unprotected residual is
+    # zero (criterion 2)
     tuned_ledger = stack["work"] / "ledger-tuned.jsonl"
     tuned_records = _run_route_replay(
         stack,
         recipe_lab_bin,
-        candidates=tuned_path,
+        candidates=cold_start,
         ledger=tuned_ledger,
         out=stack["work"] / "route-replay-tuned",
     )
@@ -1392,13 +1423,12 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     )
     assert tuned_evidence["tool_loop_switches"] == tuned_evidence["decision_drift_switches"]
 
-    # live comparison: baseline (enforcement opt-out) vs the remedy. The two
+    # live comparison: baseline (protection disabled) vs the remedy. The two
     # arms complete the same tasks (protection changes stability, not
     # accuracy), so the verdict need not clear the accuracy bar - criterion
-    # 2 is the stability gate: the tuned arm's unprotected residual is zero
-    # while the broken baseline's rows carry the switches.
+    # 2 is the stability gate: the tuned arm's unprotected residual is zero.
     registry = {
-        "mom-broken": _mom_entry(stack, "mom-broken", broken_path),
+        "mom-disabled": _mom_entry(stack, "mom-disabled", disabled_path),
         "mom-tuned": {
             "kind": "mom",
             "mode": "live",
@@ -1413,14 +1443,15 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
         stack,
         registry=registry,
         candidate_target="mom-tuned",
-        baseline_target="mom-broken",
+        baseline_target="mom-disabled",
         work_dir=tmp_path / "verify-tuning",
     )
     gates = result["agentic"]["gates"]
     assert gates["max_unprotected_tool_loop_switches"] == "pass", result["reasons"]
-    # the gates judged the arms' own rows: the broken baseline produced them
+    # the disabled baseline resolves no session identity, so its Z4 rows
+    # are empty - the honest shape of a protection-disabled arm
     baseline_rows = result["agentic"]["replay_evidence"]["baseline"]
-    assert baseline_rows["rows"] and baseline_rows["rows"] >= 1
+    assert not baseline_rows["rows"]
     tuned_runs = [
         run
         for run in cli.runs.values()
@@ -1434,27 +1465,31 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
 
 def test_v6_scenario_3_negative(stack, recipe_lab_bin, tmp_path):
     """The enforcement-opt-out candidate is eliminated on the route-replay
-    tier (gate-violated) and FAILs the live verdict through the agentic
-    gates fed from its own arm's Z4-fetched replay rows."""
+    tier (the DEFAULT drift ceiling) and FAILs the live verdict through the
+    agentic gates fed from its own arm's Z4-fetched replay rows."""
     cold_start = stack["work"] / "cold-start.yaml"
     cold_arm = _arm(stack, "cold-start", cold_start)
-    broken_path = _broken_config(stack)
+    negative_path = _observe_opt_out_config(stack)
 
-    # eliminated: the route-replay tier records the violated stability gate
+    # eliminated: under the default AG7 contract (drift ceiling 0.2) the
+    # candidate's two traced drift releases over five sessions exceed the
+    # per-task rate, and the route-replay tier records the violation
     ledger = stack["work"] / "ledger-negative.jsonl"
     records = _run_route_replay(
         stack,
         recipe_lab_bin,
-        candidates=broken_path,
+        candidates=negative_path,
         ledger=ledger,
         out=stack["work"] / "route-replay-negative",
+        spec_path=stack["spec_default_path"],
     )
     record = _route_evidence(records)
     assert record.get("status") == "gate-violated", record["reasons"]
-    assert record["gates"]["max_unprotected_tool_loop_switches"] == "fail"
+    assert record["gates"]["max_decision_drift_switches_per_task"] == "fail"
 
     # live: the same candidate FAILs against the protected config - the
-    # candidate arm's own replay rows carry the unprotected switches
+    # candidate arm's own replay rows carry the drift releases, and the
+    # default contract's stability gate vetoes the verdict
     registry = {
         "mom-cold-start": {
             "kind": "mom",
@@ -1463,20 +1498,29 @@ def test_v6_scenario_3_negative(stack, recipe_lab_bin, tmp_path):
             "session_mode": "session_aware",
             "arm": cold_arm,
         },
-        "mom-broken": _mom_entry(stack, "mom-broken", broken_path),
+        "mom-negative": _mom_entry(stack, "mom-negative", negative_path),
         MODEL_A: {"kind": "single", "mode": "live"},
         MODEL_B: {"kind": "single", "mode": "live"},
     }
-    result, _ = _verify(
+    result, cli = _verify(
         stack,
         registry=registry,
-        candidate_target="mom-broken",
+        candidate_target="mom-negative",
         baseline_target="mom-cold-start",
         work_dir=tmp_path / "verify-negative",
+        spec_path=stack["spec_default_path"],
     )
     assert result["verdict"] == "FAIL", result["reasons"]
-    assert result["agentic"]["gates"]["max_unprotected_tool_loop_switches"] == "fail"
+    gates = result["agentic"]["gates"]
+    assert gates["max_decision_drift_switches_per_task"] == "fail"
     assert "agentic stability gate exceeded" in " ".join(result["reasons"])
+    # the verdict judged the candidate arm's own rows
+    negative_runs = [
+        run
+        for run in cli.runs.values()
+        if run["target_id"] == "mom-negative" and run["rows"]
+    ]
+    assert negative_runs, "the negative arm produced no replay rows"
 
 
 # ---- scenario 4: sub agent ----
