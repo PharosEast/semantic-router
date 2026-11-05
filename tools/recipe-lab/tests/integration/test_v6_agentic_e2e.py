@@ -1361,7 +1361,11 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
         diag_b / "diagnosis.json"
     ).read_bytes()
     diagnosis = json.loads((diag_a / "diagnosis.json").read_text(encoding="utf-8"))
-    assert "tool_loop" in json.dumps(diagnosis)
+    # a protection-disabled arm resolves no session identity, so the AG4
+    # agentic section (phase distributions, separation, failures) is
+    # honestly absent - the W1 shape's own evidence
+    assert "agentic" not in diagnosis
+    assert diagnosis["decision_coverage"]["total_decisions"] == 3
 
     # attribute-session over the same records: a protection-disabled config
     # resolves no session identity, so the session attribution honestly
@@ -1484,7 +1488,10 @@ def test_v6_scenario_3_negative(stack, recipe_lab_bin, tmp_path):
         spec_path=stack["spec_default_path"],
     )
     record = _route_evidence(records)
-    assert record.get("status") == "gate-violated", record["reasons"]
+    assert record.get("status") == "gate-violated", (
+        f"reasons={record['reasons']} gates={record['gates']} "
+        f"notes={record['notes']}"
+    )
     assert record["gates"]["max_decision_drift_switches_per_task"] == "fail"
 
     # live: the same candidate FAILs against the protected config - the
