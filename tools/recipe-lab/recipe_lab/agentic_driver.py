@@ -98,7 +98,7 @@ class HeaderForwardProxy:
             def _proxy(self) -> None:
                 length = int(self.headers.get("content-length") or 0)
                 body = self.rfile.read(length) if length else b""
-                task, request_id, record = outer._journal(
+                _task, request_id, record = outer._journal(
                     task=outer.current_task,
                     path=self.path,
                     headers=dict(self.headers.items()),
@@ -250,7 +250,12 @@ class HeaderForwardProxy:
 def _sh(cmd: list[str], cwd: str | None, timeout: int) -> tuple[int, str]:
     try:
         proc = subprocess.run(
-            cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout
+            cmd,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
         )
         return proc.returncode, (proc.stdout + "\n" + proc.stderr)[-4000:]
     except subprocess.TimeoutExpired:
@@ -340,7 +345,6 @@ def run_task(
     inst = str(task["instance_id"])
     out = Path(args.out)
     results_dir = out / "results"
-    journal_dir = out / "requests"
     results_dir.mkdir(parents=True, exist_ok=True)
     result_path = results_dir / f"{inst}.json"
     if result_path.exists():
@@ -392,6 +396,7 @@ def run_task(
             text=True,
             timeout=args.timeout_s,
             env=env,
+            check=False,
         )
         exit_code, stdout, stderr = proc.returncode, proc.stdout, proc.stderr[-4000:]
     except subprocess.TimeoutExpired as exc:

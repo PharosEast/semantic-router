@@ -469,12 +469,15 @@ def build_bundle(
                     f"{flag} hashes to {packaged}, but the bindings sidecar cites {cited}"
                 )
         sidecar_candidate = (sidecar.get("candidate") or {}).get("sha256")
-        if isinstance(sidecar_candidate, str) and sidecar_candidate:
-            if packaged_config_hash != sidecar_candidate:
-                raise ContractError(
-                    f"--config hashes to {packaged_config_hash}, but the "
-                    f"bindings sidecar's candidate names {sidecar_candidate}"
-                )
+        if (
+            isinstance(sidecar_candidate, str)
+            and sidecar_candidate
+            and packaged_config_hash != sidecar_candidate
+        ):
+            raise ContractError(
+                f"--config hashes to {packaged_config_hash}, but the "
+                f"bindings sidecar's candidate names {sidecar_candidate}"
+            )
     if not template_mode:
         # Y2 (legacy only): the packaged config must classify exactly like
         # the config the evidence was produced with - the bootstrap sidecar

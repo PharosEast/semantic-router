@@ -82,7 +82,9 @@ from .profile import (
     _read_jsonl,
     _run,
     load_labels,
+    load_lanes,
     rewrite_task_categories,
+    rewrite_task_lanes,
     wilson_interval,
 )
 from .verdict import (
@@ -623,8 +625,6 @@ def verify_live_model_eval(
         )
     label_merges: dict[str, Any] = {}
     if lane_mode:
-        from .profile import load_lanes, rewrite_task_lanes
-
         lanes = load_lanes(grouping_file)
         labeled_rows, uncovered = rewrite_task_lanes(task_rows, lanes)
     else:

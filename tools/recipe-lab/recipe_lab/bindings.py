@@ -140,7 +140,7 @@ def _normalize_costs(
         return None
     top = max(values.values())
     if top <= 0:
-        return {alias: 0.0 for alias in costs}
+        return dict.fromkeys(costs, 0.0)
     return {
         alias: (cost / top if cost is not None else None)
         for alias, cost in costs.items()
@@ -503,11 +503,12 @@ def run_bindings(
             "it (endpoints and credentials come only from there)"
         )
     providers_path = Path(spec.providers_config)
-    if not providers_path.is_file():
-        if spec.spec_dir is not None:
-            candidate = Path(spec.spec_dir) / providers_path
-            if candidate.is_file():
-                providers_path = candidate
+    if (
+        not providers_path.is_file()
+        and spec.spec_dir is not None
+        and (Path(spec.spec_dir) / providers_path).is_file()
+    ):
+        providers_path = Path(spec.spec_dir) / providers_path
     if not providers_path.is_file():
         raise ContractError(f"providers_config not found: {providers_path}")
 

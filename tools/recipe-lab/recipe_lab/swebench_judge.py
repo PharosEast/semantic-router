@@ -153,6 +153,7 @@ def judge_run(args: Any) -> int:
         capture_output=True,
         text=True,
         timeout=args.judge_timeout_s,
+        check=False,
     )
     if proc.returncode != 0:
         tail = (proc.stderr or proc.stdout or "")[-2000:]

@@ -12,7 +12,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from recipe_lab import bindings as bindings_mod
 from recipe_lab.contract import ContractError
 from recipe_lab.observe_lanes import (

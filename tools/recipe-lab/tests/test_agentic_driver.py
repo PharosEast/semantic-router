@@ -24,14 +24,10 @@ import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
-
-from recipe_lab.agentic_driver import (
-    HeaderForwardProxy,
-    agent_request_manifest,
-    task_result_rows,
-)
+from recipe_lab.agentic_driver import HeaderForwardProxy, task_result_rows
 from recipe_lab.cli import main
 from recipe_lab.swebench_judge import JudgeError, parse_report
 
@@ -104,13 +100,13 @@ print("fake harness done")
 
 class MockHandler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
-    received: list[dict] = []
+    received: ClassVar[list[dict]] = []
     lock = threading.Lock()
 
     def log_message(self, *args):  # quiet
         pass
 
-    def do_POST(self):  # noqa: N802
+    def do_POST(self):  # quiet
         length = int(self.headers.get("content-length") or 0)
         self.rfile.read(length)
         with MockHandler.lock:

@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
 from recipe_lab import observe_lanes as ol
 from recipe_lab.contract import ContractError
 

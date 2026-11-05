@@ -41,6 +41,7 @@ import random
 import statistics
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from itertools import pairwise
 from typing import Any
 
 from .session_attribution import (
@@ -219,7 +220,7 @@ def replay_switch_evidence(
             for row in sorted(sessions[conversation], key=_switch_order)
             if str(row.get("routed") or "")
         ]
-        for previous, arriving in zip(routed, routed[1:]):
+        for previous, arriving in pairwise(routed):
             if str(previous.get("routed") or "") == str(arriving.get("routed") or ""):
                 continue
             policy = _arriving_policy(arriving)

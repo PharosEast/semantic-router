@@ -61,7 +61,6 @@ from .agentic_bootstrap import (
     profile_from_reports,
 )
 from .agentic_driver import run_driver
-from .swebench_judge import DEFAULT_JUDGE_COMMAND, judge_run
 from .attribution import (
     attribute,
     load_records,
@@ -154,6 +153,7 @@ from .splitting import (
     write_splits,
 )
 from .srbench import SrbenchCli, cases_to_srbench_rows
+from .swebench_judge import DEFAULT_JUDGE_COMMAND, judge_run
 
 
 def _print_json(value: object) -> None:

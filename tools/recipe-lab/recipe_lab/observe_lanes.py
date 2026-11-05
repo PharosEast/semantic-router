@@ -45,6 +45,7 @@ from typing import Any
 import yaml
 
 from .contract import LONG_CONTEXT_MIN_TOKENS, ContractError, dataset_content_hash
+from .observe_labels import labels_from_records
 from .runner import RunnerEnv, probe_records
 
 OBSERVE_SCHEMA = "recipe-lab-observe-lanes-v1"
@@ -177,12 +178,13 @@ def capability_satisfied(requirement: dict[str, Any], capabilities: Any) -> bool
         if not getattr(capabilities, name, False):
             return False
     window = requirement.get("min_context_window")
-    if window is not None:
-        if capabilities.context_window is None or (
-            capabilities.context_window < window
-        ):
-            return False
-    return True
+    return not (
+        window is not None
+        and (
+            capabilities.context_window is None
+            or capabilities.context_window < window
+        )
+    )
 
 
 def placeholder_models(count: int, backend_endpoint: str) -> list[dict[str, Any]]:
@@ -385,7 +387,6 @@ def lane_rows_from_records(
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     """Join replay records to cases by request id; the lane is the record's
     matched decision name (identity mapping, see observe_labels)."""
-    from .observe_labels import labels_from_records
 
     rows, stats = labels_from_records(
         records, cases, label_of=lane_for_decision, request_id_prefix=REQUEST_ID_PREFIX
