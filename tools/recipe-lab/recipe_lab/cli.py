@@ -574,8 +574,21 @@ def cmd_observe_lanes(args: argparse.Namespace) -> int:
             "observation config from a built-in recipe template (sub-issue-8 "
             "§2.1; the legacy path is observe-labels)"
         )
-    workload = spec.require_tunable_workload(getattr(args, "workload", None))
-    split_name = _select_split(spec, args.split, workload)
+    # M5/Y1: observe-lanes is labeling, never tuning. A transfer workload may
+    # be observed only on frozen_test (the final verify's grouping source);
+    # the profile/bank/run commands keep their tunable guards, so no tuning
+    # feedback path opens. frozen_test is allowed for the same reason
+    # observe-labels allows it: the model_eval verify driver rewrites the
+    # frozen split's task categories from the C2 lanes file, and the profile
+    # only ever consumes calib/dev lanes.
+    workload = spec.select_workload(getattr(args, "workload", None))
+    if workload.role == "transfer" and args.split != "frozen_test":
+        raise ContractError(
+            f"workload {workload.name!r} has role 'transfer': observe-lanes "
+            "accepts it only on --split frozen_test (the final verify's "
+            "grouping source)"
+        )
+    split_name = _select_split(spec, args.split, workload, allow_frozen_test=True)
     spec.verify_workload(split=split_name, workload=workload.name)
     if spec.spec_dir is None:
         raise ContractError("spec must be loaded from a file to resolve its manifest")
