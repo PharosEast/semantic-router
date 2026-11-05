@@ -232,11 +232,10 @@ def plan(tmp_path, *, profile_dir, lam, exclude=(), spec_path=None):
     from recipe_lab.contract import ExperimentSpec
 
     spec = ExperimentSpec.from_yaml(spec_path)
+    profile = json.loads((profile_dir / "profile.json").read_text(encoding="utf-8"))
     return bindings_mod.plan_bindings(
         spec=spec,
-        profile=__import__("json").loads(
-            (profile_dir / "profile.json").read_text(encoding="utf-8")
-        ),
+        profile=profile,
         template=fake_template(),
         lam=lam,
         exclude=exclude,
