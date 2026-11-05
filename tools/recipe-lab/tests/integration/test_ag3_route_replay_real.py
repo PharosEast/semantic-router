@@ -296,6 +296,7 @@ def _run_tier(
     candidates_dir: Path,
     cases_path: Path,
     ledger_path: Path,
+    backend_port: int,
     hf_home: str | None,
 ) -> None:
     argv = [
@@ -316,8 +317,10 @@ def _run_tier(
         str(RECIPE_LAB_ROOT / "examples" / "smoke" / "mock_backend.py"),
         "--python-bin",
         sys.executable,
+        # the mock keeps an explicit port; every candidate's backend_refs
+        # must reference this same one or the router dials a dead endpoint
         "--backend-port",
-        str(_free_port()),
+        str(backend_port),
         "--ready-timeout",
         "600",
         "--output-dir",
@@ -351,9 +354,10 @@ def test_route_replay_real_judges_the_causes(
     hf_home: str | None,
     tmp_path: Path,
 ) -> None:
-    protected = _candidate_config(tmp_path, _free_port(), "protected", protection=True)
+    backend_port = _free_port()
+    protected = _candidate_config(tmp_path, backend_port, "protected", protection=True)
     unprotected = _candidate_config(
-        tmp_path, _free_port(), "unprotected", protection=False
+        tmp_path, backend_port, "unprotected", protection=False
     )
     candidates = tmp_path / "cands"
     candidates.mkdir()
@@ -370,6 +374,7 @@ def test_route_replay_real_judges_the_causes(
         candidates_dir=candidates,
         cases_path=cases,
         ledger_path=ledger,
+        backend_port=backend_port,
         hf_home=hf_home,
     )
     gates = _gates_by_candidate(ledger)
@@ -393,7 +398,8 @@ def test_route_replay_real_missing_conversation_header_fails(
     hf_home: str | None,
     tmp_path: Path,
 ) -> None:
-    protected = _candidate_config(tmp_path, _free_port(), "protected", protection=True)
+    backend_port = _free_port()
+    protected = _candidate_config(tmp_path, backend_port, "protected", protection=True)
     candidates = tmp_path / "cands"
     candidates.mkdir()
     protected.rename(candidates / "a-protected.yaml")
@@ -408,6 +414,7 @@ def test_route_replay_real_missing_conversation_header_fails(
         candidates_dir=candidates,
         cases_path=cases,
         ledger_path=ledger,
+        backend_port=backend_port,
         hf_home=hf_home,
     )
     gates = _gates_by_candidate(ledger)["a-protected"]
