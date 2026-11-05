@@ -11,12 +11,12 @@ agent, mock OpenAI backend).
    PASS. The candidate routes complex tasks to the strong model and simple
    tasks to the cheap one, and its task success rate is strictly above R.
 2. tuning: the identity-broken config (protection on, the conversation
-   identity header un mapped - behaviorally protection-off, the W1 shape
-   Z7 proved equivalent) is the baseline; ``diagnose`` and
+   identity header mapped to the empty string - behaviorally
+   protection-off, the W1 shape) is the baseline; ``diagnose`` and
    ``attribute-session`` read its real replay records; the route-replay
    summary triggers ``propose-session-policy``; the identity candidate's
    route-replay shows the unprotected tool-loop residual at zero and it
-   wins the live comparison.
+   wins the live stability gate.
 3. negative: the same identity-broken candidate is gate-violated on the
    route-replay tier and FAILs the live verdict through the agentic
    stability gates (the Z4-fetched replay rows of its own arm router).
@@ -46,10 +46,11 @@ Two documented divergences from §6 are load-bearing:
   config splits cheap/simple from strong/complex structurally.
 - AG6's proposer fixes broken identity by ADDING the missing header; it
   has no "enable protection" candidate. The tuning baseline therefore
-  keeps protection enabled with the conversation header unmapped instead
-  of ``enabled: false`` - the router skips the request entirely either way
-  (Z7's missing-conversation-header test), and the proposer's cause model
-  sees exactly the W1 failure it was built to fix.
+  keeps protection enabled but maps the conversation identity header to
+  the empty string - the router resolves the conversation to nothing and
+  skips every request (behaviorally protection-off), an unmapped header
+  would silently fall back to the default name the client sends, and the
+  proposer's cause model sees exactly the W1 failure it was built to fix.
 
 Determinism (criterion 5): the candidate arm's fixture set runs twice and
 the AG8 trajectory comparison must come back empty; ``diagnose`` is run
@@ -311,7 +312,8 @@ class RouterArm:
                 )
             try:
                 with urllib.request.urlopen(
-                    self.management_url + "/api/v1/inventory/model-runtime", 2.0
+                    self.management_url + "/api/v1/inventory/model-runtime",
+                    timeout=2.0,
                 ) as response:
                     # match the raw text (the conftest's probe): re-serializing
                     # would inject separators the router never emits
@@ -1114,7 +1116,7 @@ def test_v6_scenario_1_cold_start(stack, recipe_lab_bin, tmp_path):
         out=stack["work"] / "route-replay-cold-start",
     )
     record = _route_evidence(records)
-    assert record["status"] is None, (
+    assert record.get("status") is None, (
         f"reasons={record['reasons']} gates={record['gates']} "
         f"notes={record['notes']}"
     )
@@ -1236,9 +1238,12 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     cold_start = stack["work"] / "cold-start.yaml"
     broken = copy.deepcopy(_load(cold_start))
     # the W1 shape: protection enabled but the conversation identity header
-    # unmapped - the router skips every request (Z7 proved the equivalence)
+    # maps to the empty string - the router resolves the conversation to
+    # nothing (an explicitly empty name does NOT fall back to the default
+    # header, which the client does send), the protection skips every
+    # request, and the switches land in the unprotected residual
     headers = _protection(broken)["identity"]["headers"]
-    headers.pop("conversation")
+    headers["conversation"] = ""
     broken_path = _write_config(stack, broken, "broken")
 
     # route-replay tier: every in-loop switch lands in the unprotected
@@ -1359,7 +1364,7 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
         out=stack["work"] / "route-replay-tuned",
     )
     tuned_record = _route_evidence(tuned_records)
-    assert tuned_record["status"] is None, tuned_record["reasons"]
+    assert tuned_record.get("status") is None, tuned_record["reasons"]
     tuned_evidence = json.loads(
         tuned_record["notes"].split("routing-evidence=", 1)[1]
     )
@@ -1408,7 +1413,7 @@ def test_v6_scenario_3_negative(stack, recipe_lab_bin, tmp_path):
     broken_path = stack["work"] / "broken.yaml"
     if not broken_path.exists():
         broken = copy.deepcopy(_load(cold_start))
-        _protection(broken)["identity"]["headers"].pop("conversation")
+        _protection(broken)["identity"]["headers"]["conversation"] = ""
         broken_path = _write_config(stack, broken, "broken")
 
     # eliminated: the route-replay tier records the violated stability gate
@@ -1421,7 +1426,7 @@ def test_v6_scenario_3_negative(stack, recipe_lab_bin, tmp_path):
         out=stack["work"] / "route-replay-negative",
     )
     record = _route_evidence(records)
-    assert record["status"] == "gate-violated", record["reasons"]
+    assert record.get("status") == "gate-violated", record["reasons"]
     assert record["gates"]["max_unprotected_tool_loop_switches"] == "fail"
 
     # live: the same candidate FAILs against the protected config - the
