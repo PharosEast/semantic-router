@@ -432,6 +432,7 @@ def plan_bindings(
     bindings = {
         lane: [{"model": name} for name in plan["selected"]]
         for lane, plan in sorted(plans.items())
+        if not plan.get("excluded")
     }
     return {
         "plans": plans,
