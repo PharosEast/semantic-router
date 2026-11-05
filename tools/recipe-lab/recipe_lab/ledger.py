@@ -230,9 +230,21 @@ def validate_record(raw: dict) -> None:
         # hot-reload replay pull lost or duplicated records for the candidate's
         # request ids. Neither carries a metric and both are excluded from
         # top_replay, so a broken capture can never rank as a worse recipe.
-        if raw["status"] not in ("timeout", "incomplete"):
+        # route_replay additionally records "gate-violated" when routing
+        # evidence clears the run but exceeds a stability gate; best_replay
+        # only ranks replay-tier records, so it can never rank either.
+        allowed = ("timeout", "incomplete")
+        if tier == "route_replay":
+            allowed += ("gate-violated",)
+        if raw["status"] not in allowed:
+            suffix = (
+                " or 'gate-violated' (route_replay)"
+                if tier == "route_replay"
+                else ""
+            )
             raise ContractError(
-                f"status must be 'timeout' or 'incomplete', got {raw['status']!r}"
+                f"status must be 'timeout' or 'incomplete'{suffix}, "
+                f"got {raw['status']!r}"
             )
     if "constraint_warning" in raw and not isinstance(raw["constraint_warning"], bool):
         raise ContractError("constraint_warning must be a boolean")

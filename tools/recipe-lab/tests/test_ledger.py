@@ -225,6 +225,44 @@ def test_incomplete_record_roundtrip_and_never_ranks(tmp_path):
     assert best is not None and best["metrics"]["capability.score"] == 0.81
 
 
+# ---- route_replay: gate-violated routing evidence never ranks ----
+
+
+def route_replay_record(**overrides) -> dict:
+    record = base_record(
+        tier="route_replay",
+        metrics={},
+        gates={"agentic-tool-loop-coverage": "fail"},
+    )
+    record.update(overrides)
+    return record
+
+
+def test_gate_violated_route_replay_record_roundtrip_and_never_ranks(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    stored = ledger.append(
+        route_replay_record(
+            reasons=[
+                "agentic stability gate exceeded "
+                "(agentic-tool-loop-coverage: 1 > bound 0)"
+            ],
+            coverage_warning=True,
+            status="gate-violated",
+        )
+    )
+    assert stored["status"] == "gate-violated"
+    ledger.append(base_record(metrics={"capability.score": 0.9}))
+    best = ledger.top_replay("capability.score")
+    assert best is not None and best["tier"] == "replay"
+    assert best["metrics"]["capability.score"] == 0.9
+
+
+def test_route_replay_rejects_unknown_status(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.jsonl")
+    with pytest.raises(ContractError, match="status must be"):
+        ledger.append(route_replay_record(status="crashed"))
+
+
 # ---- B: split field on ledger records ----
 
 
