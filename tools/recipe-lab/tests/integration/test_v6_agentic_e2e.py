@@ -10,15 +10,16 @@ agent, mock OpenAI backend).
    S/W and the random mix R) through the real ``verify_live`` machinery ->
    PASS. The candidate routes complex tasks to the strong model and simple
    tasks to the cheap one, and its task success rate is strictly above R.
-2. tuning: the identity-broken config (protection on, the conversation
-   identity header mapped to the empty string - behaviorally
-   protection-off, the W1 shape) is the baseline; ``diagnose`` and
-   ``attribute-session`` read its real replay records; the route-replay
-   summary triggers ``propose-session-policy``; the identity candidate's
-   route-replay shows the unprotected tool-loop residual at zero and it
-   wins the live stability gate.
-3. negative: the same identity-broken candidate is gate-violated on the
-   route-replay tier and FAILs the live verdict through the agentic
+2. tuning: the enforcement-opt-out config (protection on, but the
+   decision the mid-loop drift arrives at runs ``adaptations.mode:
+   observe`` - behaviorally protection-off for that path) is the baseline;
+   ``diagnose`` and ``attribute-session`` read its real replay records;
+   the route-replay summary triggers ``propose-session-policy``'s W1
+   handoff (re-enabling enforcement is a handoff, not a knob); the remedy
+   candidate's route-replay shows the unprotected tool-loop residual at
+   zero and it wins the live stability gate.
+3. negative: the same enforcement-opt-out candidate is gate-violated on
+   the route-replay tier and FAILs the live verdict through the agentic
    stability gates (the Z4-fetched replay rows of its own arm router).
 4. sub agent: the generic-client config (no agent identity header) is
    diagnosed "sub-agents cannot keep a separate identity" from the AG8
@@ -45,12 +46,15 @@ Two documented divergences from §6 are load-bearing:
   set (bootstrap preserves non-lane decisions verbatim), so the cold-start
   config splits cheap/simple from strong/complex structurally.
 - AG6's proposer fixes broken identity by ADDING the missing header; it
-  has no "enable protection" candidate. The tuning baseline therefore
-  keeps protection enabled but maps the conversation identity header to
-  the empty string - the router resolves the conversation to nothing and
-  skips every request (behaviorally protection-off), an unmapped header
-  would silently fall back to the default name the client sends, and the
-  proposer's cause model sees exactly the W1 failure it was built to fix.
+  has no "enable protection" candidate (Z6 hands enforcement back as a
+  W1/W2-class cause, never a knob), and no config shape both skips the
+  protection and reads as identity-missing (an unmapped header falls back
+  to the default name the client sends; an empty name is rejected by the
+  loader - both proven on the real stack). The tuning baseline therefore
+  opts the drifting decision out of enforcement
+  (``adaptations.mode: observe``) - behaviorally protection-off for that
+  path while the identity and the replay rows stay intact - and the
+  scenario asserts the W1 handoff plus the remedy's zero residual.
 
 Determinism (criterion 5): the candidate arm's fixture set runs twice and
 the AG8 trajectory comparison must come back empty; ``diagnose`` is run
@@ -441,6 +445,7 @@ class LiveArmCli:
                 "total_spend_usd": run["spend"],
                 "output_diagnostics": {
                     "planned_cases": len(names),
+                    "result_cases": len(names),
                     "output_limit_cases": 0,
                     "no_answer_cases": 0,
                 },
@@ -471,6 +476,7 @@ class LiveArmCli:
             "latency_p50_s": 0.5,
             "output_diagnostics": {
                 "planned_cases": len(run["task_scores"]),
+                "result_cases": len(run["task_scores"]),
                 "output_limit_cases": 0,
                 "no_answer_cases": 0,
                 "subject_calls": {"total": run["subject_calls"]},
@@ -840,6 +846,28 @@ def _bind_mock_and_return(stack: dict, config: dict) -> dict:
 
 def _protection(config: dict) -> dict:
     return config["global"]["router"]["learning"]["protection"]
+
+
+def _broken_config(stack: dict) -> Path:
+    """The tuning/negative baseline: the cold-start config with the
+    drifting decision opted out of learning enforcement.
+
+    'deliberately disable protection' (§7 V6 scenario 2) realized through
+    the router's own mechanism - ``adaptations.mode: observe`` on the
+    decision the mid-loop drift arrives at. Behaviorally the protection
+    cannot hold there, so the in-loop switches land in the unprotected
+    residual; unlike a disabled protection the identity still resolves and
+    the replay records keep their session fields, which the Z4 rows and
+    the diagnosis need. A protection-disabled config produces no session
+    identity at all, and a missing/empty identity header mapping either
+    falls back to the default header (which the client sends) or is
+    rejected by the loader - both proven on the real stack.
+    """
+    broken = copy.deepcopy(_load(stack["work"] / "cold-start.yaml"))
+    for decision in broken["routing"]["decisions"]:
+        if decision["name"] == "simple_general_local":
+            decision["adaptations"] = {"mode": "observe"}
+    return _write_config(stack, broken, "broken")
 
 
 def _decision_models(config: dict) -> dict[str, str]:
@@ -1233,25 +1261,15 @@ def _run_id_of(run: dict) -> str:
 
 
 def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
-    """The identity-broken baseline -> diagnose + attribute-session ->
-    propose-session-policy -> route-replay (unprotected residual 0) ->
-    live comparison PASS."""
+    """The enforcement-opt-out baseline -> diagnose + attribute-session ->
+    propose-session-policy (the W1 handoff) -> the remedy candidate's
+    route-replay (unprotected residual 0) -> the live stability gate."""
     cold_start = stack["work"] / "cold-start.yaml"
-    broken = copy.deepcopy(_load(cold_start))
-    # the W1 shape: protection enabled but the conversation identity header
-    # maps to a whitespace name - the router trims it to nothing, the
-    # conversation identity resolves missing and the protection skips every
-    # request. An explicitly EMPTY value is rejected by the router and an
-    # UNMAPPED header silently falls back to the default name (which the
-    # client does send), so the whitespace mapping is the only shape that
-    # skips the protection while the AG6 proposer still reads it as a
-    # missing header (its check strips the value).
-    headers = _protection(broken)["identity"]["headers"]
-    headers["conversation"] = " "
-    broken_path = _write_config(stack, broken, "broken")
+    broken_path = _broken_config(stack)
 
     # route-replay tier: every in-loop switch lands in the unprotected
-    # residual (no traces ride the records)
+    # residual (the observe-mode arriving decision never holds and never
+    # traces a drift release)
     ledger = stack["work"] / "ledger-broken.jsonl"
     records = _run_route_replay(
         stack,
@@ -1307,7 +1325,7 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
                 "--output-dir",
                 str(out),
                 "--source",
-                "V6 tuning baseline (identity-broken arm)",
+                "V6 tuning baseline (enforcement opt-out arm)",
             ],
         )
     assert (diag_a / "diagnosis.json").read_bytes() == (
@@ -1333,10 +1351,12 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     )
     assert session_summary["events"]["lane_flap"] >= 1
 
-    # propose-session-policy: the unprotected switches + the missing
-    # conversation header ask for the identity candidate
+    # propose-session-policy over the broken config: Z6's cause model
+    # hands the unprotected switches back (re-enabling enforcement is not
+    # a protection knob), so no candidate file is written and the remedy
+    # is the handoff's own prescription - restore the enforced config
     spp_out = stack["work"] / "spp"
-    _run_recipe_lab(
+    spp_stdout = _run_recipe_lab(
         recipe_lab_bin,
         [
             "propose-session-policy",
@@ -1348,17 +1368,15 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
             str(spp_out),
         ],
     )
-    candidates = sorted(spp_out.glob("candidate-*.yaml"))
-    assert candidates, "no session-policy candidate proposed"
-    tuned = _load(candidates[0])
-    tuned_headers = _protection(tuned)["identity"]["headers"]
-    assert tuned_headers.get("conversation") == "x-conversation-id"
-    assert tuned_headers.get("session") == "x-session-id"
+    spp = json.loads(spp_stdout)
+    handoff_reasons = [h["reason"] for h in spp["handoffs"]]
+    assert "unprotected_tool_loop_switches" in handoff_reasons, spp["handoffs"]
+    assert not spp["candidates"], "the enforcement opt-out became a knob"
 
-    # the tuned candidate's route-replay: the protection engages, the
+    # the remedy candidate's route-replay: the protection engages, the
     # in-loop switches are all traced drift releases, the unprotected
     # residual is zero (criterion 2)
-    tuned_path = _write_config(stack, tuned, "tuned")
+    tuned_path = stack["work"] / "cold-start.yaml"
     tuned_ledger = stack["work"] / "ledger-tuned.jsonl"
     tuned_records = _run_route_replay(
         stack,
@@ -1374,14 +1392,20 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     )
     assert tuned_evidence["tool_loop_switches"] == tuned_evidence["decision_drift_switches"]
 
-    # live comparison: baseline (identity-broken) vs tuned. The two arms
-    # complete the same tasks (protection changes stability, not accuracy),
-    # so the verdict need not clear the accuracy bar - criterion 2 is the
-    # stability gate: the tuned arm's unprotected residual is zero while the
-    # broken baseline's rows carry the switches.
+    # live comparison: baseline (enforcement opt-out) vs the remedy. The two
+    # arms complete the same tasks (protection changes stability, not
+    # accuracy), so the verdict need not clear the accuracy bar - criterion
+    # 2 is the stability gate: the tuned arm's unprotected residual is zero
+    # while the broken baseline's rows carry the switches.
     registry = {
         "mom-broken": _mom_entry(stack, "mom-broken", broken_path),
-        "mom-tuned": _mom_entry(stack, "mom-tuned", tuned_path),
+        "mom-tuned": {
+            "kind": "mom",
+            "mode": "live",
+            "config_hash": stack["arms"]["cold-start"].config_hash,
+            "session_mode": "session_aware",
+            "arm": stack["arms"]["cold-start"],
+        },
         MODEL_A: {"kind": "single", "mode": "live"},
         MODEL_B: {"kind": "single", "mode": "live"},
     }
@@ -1409,16 +1433,12 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
 
 
 def test_v6_scenario_3_negative(stack, recipe_lab_bin, tmp_path):
-    """The identity-broken candidate is eliminated on the route-replay tier
-    (gate-violated) and FAILs the live verdict through the agentic gates
-    fed from its own arm's Z4-fetched replay rows."""
+    """The enforcement-opt-out candidate is eliminated on the route-replay
+    tier (gate-violated) and FAILs the live verdict through the agentic
+    gates fed from its own arm's Z4-fetched replay rows."""
     cold_start = stack["work"] / "cold-start.yaml"
     cold_arm = _arm(stack, "cold-start", cold_start)
-    broken_path = stack["work"] / "broken.yaml"
-    if not broken_path.exists():
-        broken = copy.deepcopy(_load(cold_start))
-        _protection(broken)["identity"]["headers"]["conversation"] = " "
-        broken_path = _write_config(stack, broken, "broken")
+    broken_path = _broken_config(stack)
 
     # eliminated: the route-replay tier records the violated stability gate
     ledger = stack["work"] / "ledger-negative.jsonl"
