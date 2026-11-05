@@ -521,10 +521,13 @@ class Handler(BaseHTTPRequestHandler):
                 model = conv["model"]
             else:
                 model = "local/model-strong"
-            if identity:
-                conv["model"] = model
-                if not conv["decision"]:
-                    conv["decision"] = decision
+            # the router's per-conversation lane state persists even when the
+            # protection (and its traces) never engages - "after the baseline
+            # turn" needs a remembered baseline; only the traces below stay
+            # identity-gated
+            conv["model"] = model
+            if identity and not conv["decision"]:
+                conv["decision"] = decision
             record = {
                 "request_id": self.headers.get("x-request-id", ""),
                 "prompt": prompt,
