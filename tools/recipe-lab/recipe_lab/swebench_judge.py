@@ -38,7 +38,7 @@ DEFAULT_JUDGE_COMMAND = (
 
 
 class JudgeError(ContractError):
-    """The judge command failed or produced an unparseable report."""
+    """The judge command failed or produced an unparsable report."""
 
 
 def build_predictions(run_dir: str | Path, path: Path) -> int:
