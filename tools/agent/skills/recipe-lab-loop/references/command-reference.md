@@ -278,6 +278,50 @@ proposals.
   (`agentic-config.bootstrap.json`) carrying every lane's basis and
   evidence. `--validate` refuses an unvalidatable candidate (exit 2).
 
+## Agentic driver (AG2)
+
+- `recipe-lab run-agentic --driver claude-code --tasks TASKS.jsonl --target
+  URL --out D [--only INSTANCE_ID] [--claude-bin BIN] [--model M]
+  [--small-fast-model M] [--api-key K] [--max-turns N] [--timeout-s S]
+  [--max-output-tokens N] [--clone-url-template T] [--env KEY=VALUE]`
+  Drives a real agent client (headless Claude Code) over a task file -
+  SWE-bench rows (`instance_id`/`repo`/`base_commit`/`problem_statement`) -
+  through one routing target (the Router's Anthropic endpoint, or a
+  single-model endpoint). One independent working directory and session per
+  task; resumable (existing results are kept). A local header forwarding
+  proxy sits between the client and the target: it journals every request's
+  native identity headers (W2: `x-claude-code-session-id` always,
+  `x-claude-code-agent-id` on sub-agent requests only - the driver injects
+  no identity) and injects a deterministic per-request `x-request-id` when
+  the client sent none (the Z9 join key; the Router does not log agent
+  headers into replays). Every endpoint, path, binary and environment knob
+  is a parameter - the AG0 pilot's hard-coded values are only defaults.
+  Artifacts: `tasks/<instance_id>/` checkouts, `results/<instance_id>.json`
+  (client JSON, `model_patch` from `git diff HEAD`, observed session ids),
+  `requests/<instance_id>.jsonl` journals, `agent-requests.json` (the
+  sub-agent manifest `diagnose --agent-requests` consumes, probe-compatible),
+  and `task-results.json` (sr-bench-shaped per-task rows - `case_id`/binary
+  `correct`/0-or-1 `score`/`cost_usd`/`call_count`/`latency_s`; `correct`
+  stays null until judged, never guessed).
+
+- `recipe-lab judge-agentic --run-dir D [--judge-command T]
+  [--dataset-name princeton-nlp/SWE-bench_Verified] [--run-id R]
+  [--max-workers N] [--judge-timeout-s S] [--predictions-path P]
+  [--rebuild-predictions] [--report-path P]`
+  Judges a run directory with the SWE-bench official harness (the AG0-W4
+  verified environment: docker, the `swebench` package, per-task evaluation
+  images). The command template carries placeholders `{predictions_path}`,
+  `{dataset_name}`, `{run_id}`, `{max_workers}`, `{log_dir}`, `{report_path}`;
+  predictions are built from `results/` (`instance_id`, `model_patch`).
+  Output: `judge-results.jsonl` - the driver's per-task rows with
+  `correct`/`score` filled from the harness report (shapes accepted:
+  `{id: {"resolved": b}}`, `{id: bool}`, `resolved_ids`/`unresolved_ids`, or
+  a list of `{instance_id, resolved}`) - and `judge-summary.json` (resolved
+  count, accuracy). A task the report does not name stays `correct: null`
+  and is counted unjudged - missing evidence is never graded as zero.
+  Judging is a separate batch step so it can run apart from generation
+  (image pulls and qemu-speed evaluation are expensive; AG0-W4).
+
 ## Proposal and replay tier
 
 - `recipe-lab propose-session-policy --config C [--diagnosis D]

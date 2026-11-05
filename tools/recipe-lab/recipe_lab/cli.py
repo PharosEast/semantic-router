@@ -27,6 +27,11 @@ Subcommands:
                           preview routing + repetitions of AB/BA pairs (fresh
                           baseline manifest run vs fresh candidate-plan) -> per-pair
                           compare -> medians/ranges -> PASS/FAIL/INCONCLUSIVE
+  run-agentic             drive a real agent client (headless Claude Code) over a
+                          task file through one target, one session per task;
+                          journals identity headers and per-request ids (AG2)
+  judge-agentic           judge a run-agentic directory with the SWE-bench official
+                          harness -> sr-bench-shaped per-task results (AG2)
 """
 
 from __future__ import annotations
@@ -55,6 +60,8 @@ from .agentic_bootstrap import (
     bootstrap_agentic_config,
     profile_from_reports,
 )
+from .agentic_driver import run_driver
+from .swebench_judge import DEFAULT_JUDGE_COMMAND, judge_run
 from .attribution import (
     attribute,
     load_records,
@@ -2463,6 +2470,26 @@ def cmd_verify(args: argparse.Namespace) -> int:
     return verdict_exit_code(result["verdict"])
 
 
+def cmd_run_agentic(args: argparse.Namespace) -> int:
+    """Drive a real agent client over a task file through one target (AG2).
+
+    One independent working directory and session per task; a local header
+    forwarding proxy journals every request's native identity headers (W2)
+    and injects the per-request ``x-request-id`` the Z9 join needs. Judging
+    is a separate batch step: ``judge-agentic`` on the same run directory.
+    """
+    return run_driver(args)
+
+
+def cmd_judge_agentic(args: argparse.Namespace) -> int:
+    """Judge a run-agentic directory with the SWE-bench official harness.
+
+    Emits sr-bench-shaped per-task rows (``judge-results.jsonl``) so the M2
+    paired machinery and the AG7 gates consume the run like an sr-bench run.
+    """
+    return judge_run(args)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="recipe-lab",
@@ -3827,6 +3854,150 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_verify.add_argument("--round", type=int, default=1)
     p_verify.set_defaults(func=cmd_verify)
+
+    p_run_agentic = sub.add_parser(
+        "run-agentic",
+        help="drive a real agent client over a task file through one target (AG2)",
+    )
+    p_run_agentic.add_argument(
+        "--driver",
+        choices=["claude-code"],
+        default="claude-code",
+        help="agent client driver (AG2 ships the headless claude-code driver)",
+    )
+    p_run_agentic.add_argument(
+        "--tasks",
+        required=True,
+        help="task JSONL (SWE-bench rows: instance_id/repo/base_commit/"
+        "problem_statement)",
+    )
+    p_run_agentic.add_argument(
+        "--target",
+        required=True,
+        help="routing target URL: the Router's Anthropic endpoint, or a "
+        "single-model endpoint",
+    )
+    p_run_agentic.add_argument(
+        "--out",
+        required=True,
+        help="run directory: tasks/, results/, requests/, agent-requests.json, "
+        "task-results.json",
+    )
+    p_run_agentic.add_argument(
+        "--only",
+        default=None,
+        help="run a single instance_id (resume: existing results are kept)",
+    )
+    p_run_agentic.add_argument(
+        "--claude-bin",
+        default="claude",
+        help="the claude executable (pilot default: ~/.local/bin/claude)",
+    )
+    p_run_agentic.add_argument(
+        "--model",
+        default=None,
+        help="ANTHROPIC_MODEL alias (the target's entry-model name)",
+    )
+    p_run_agentic.add_argument(
+        "--small-fast-model",
+        default=None,
+        help="ANTHROPIC_SMALL_FAST_MODEL alias",
+    )
+    p_run_agentic.add_argument(
+        "--api-key",
+        default="recipe-lab-dummy",
+        help="ANTHROPIC_API_KEY value handed to the client",
+    )
+    p_run_agentic.add_argument(
+        "--max-turns",
+        type=int,
+        default=60,
+        help="headless client turn budget per task",
+    )
+    p_run_agentic.add_argument(
+        "--timeout-s",
+        type=int,
+        default=1800,
+        help="per-task wall-clock limit in seconds",
+    )
+    p_run_agentic.add_argument(
+        "--max-output-tokens",
+        type=int,
+        default=8192,
+        help="CLAUDE_CODE_MAX_OUTPUT_TOKENS (vLLM 400s when context+output "
+        "exceeds max-model-len; AG0 F0c)",
+    )
+    p_run_agentic.add_argument(
+        "--clone-url-template",
+        default="https://github.com/{repo}.git",
+        help="task repo clone URL template ({repo} substituted)",
+    )
+    p_run_agentic.add_argument(
+        "--env",
+        action="append",
+        default=[],
+        metavar="KEY=VALUE",
+        help="extra client environment variable (repeatable)",
+    )
+    p_run_agentic.set_defaults(func=cmd_run_agentic)
+
+    p_judge_agentic = sub.add_parser(
+        "judge-agentic",
+        help="judge a run-agentic directory with the SWE-bench official "
+        "harness -> sr-bench-shaped per-task results (AG2)",
+    )
+    p_judge_agentic.add_argument(
+        "--run-dir",
+        required=True,
+        help="a run-agentic output directory (results/ + requests/)",
+    )
+    p_judge_agentic.add_argument(
+        "--judge-command",
+        default=DEFAULT_JUDGE_COMMAND,
+        help="judge command template; placeholders {predictions_path}, "
+        "{dataset_name}, {run_id}, {max_workers}, {log_dir}, {report_path} "
+        "(default: the swebench official harness)",
+    )
+    p_judge_agentic.add_argument(
+        "--dataset-name",
+        default="princeton-nlp/SWE-bench_Verified",
+        help="the harness dataset name",
+    )
+    p_judge_agentic.add_argument(
+        "--run-id",
+        default="recipe-lab-agentic",
+        help="harness run id (also the report's directory name)",
+    )
+    p_judge_agentic.add_argument(
+        "--max-workers",
+        type=int,
+        default=4,
+        help="harness evaluation parallelism",
+    )
+    p_judge_agentic.add_argument(
+        "--judge-timeout-s",
+        type=int,
+        default=14400,
+        help="judge wall-clock limit in seconds",
+    )
+    p_judge_agentic.add_argument(
+        "--predictions-path",
+        default=None,
+        help="existing harness predictions JSONL to use (default: build "
+        "predictions.jsonl under <run-dir>/judge/ from results/)",
+    )
+    p_judge_agentic.add_argument(
+        "--rebuild-predictions",
+        action="store_true",
+        help="rebuild predictions even when --predictions-path was given",
+    )
+    p_judge_agentic.add_argument(
+        "--report-path",
+        default=None,
+        help="explicit report.json to parse (default: the single report.json "
+        "under <run-dir>/judge/)",
+    )
+    p_judge_agentic.set_defaults(func=cmd_judge_agentic)
 
     p_ledger = sub.add_parser("ledger", help="inspect or append to the evidence ledger")
     ledger_sub = p_ledger.add_subparsers(dest="ledger_action", required=True)
