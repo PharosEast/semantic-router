@@ -24,6 +24,10 @@ listeners:
 global:
   router:
     learning:
+      # the shipped recipe carries this; without it the protection below is
+      # dead configuration (the preflight sees learning disabled and never
+      # engages - the V6 route-replay caught exactly that)
+      enabled: true
       adaptation:
         enabled: false
       protection:

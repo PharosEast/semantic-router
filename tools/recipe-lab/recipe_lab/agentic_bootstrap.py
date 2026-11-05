@@ -325,6 +325,9 @@ def bootstrap_agentic_config(
     learning = router.get("learning")
     if not isinstance(learning, dict):
         raise ValueError("template carries no global.router.learning section")
+    # the protection below is dead configuration under a learning-disabled
+    # template (the preflight sees learning disabled and never engages)
+    learning["enabled"] = True
     adaptation = learning.get("adaptation")
     if not isinstance(adaptation, dict):
         adaptation = {}

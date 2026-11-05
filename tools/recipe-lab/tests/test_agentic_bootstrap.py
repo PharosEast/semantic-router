@@ -184,6 +184,9 @@ def test_bootstrap_consumes_the_canonical_layout(three_model_profile):
     assert config["routing"]["decisions"][0]["modelRefs"][0]["model"] == "local/strong"
     assert "decisions" not in config
     assert sidecar["decision_model"] == {"deployment": "primary"}
+    # the protection bootstrap enables is dead under a learning-disabled
+    # template - the rewrite forces learning on
+    assert config["global"]["router"]["learning"]["enabled"] is True
 
 
 @pytest.fixture()
