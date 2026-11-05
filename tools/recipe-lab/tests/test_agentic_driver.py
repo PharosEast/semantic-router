@@ -114,12 +114,7 @@ class MockHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("content-length") or 0)
         self.rfile.read(length)
         with MockHandler.lock:
-            MockHandler.received.append(
-                {
-                    k.lower(): v
-                    for k, v in self.headers.items()
-                }
-            )
+            MockHandler.received.append({k.lower(): v for k, v in self.headers.items()})
         payload = json.dumps(MOCK_MESSAGE).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -185,8 +180,10 @@ def _fake_claude_launcher(tmp_path: Path) -> str:
 def task_run(mock_backend, tmp_path):
     """Two driven tasks through the real CLI, fake claude in between."""
     out = tmp_path / "run"
-    shas = {inst: _prepare_task_repo(out, inst)
-            for inst in ("local__task-a", "local__task-b")}
+    shas = {
+        inst: _prepare_task_repo(out, inst)
+        for inst in ("local__task-a", "local__task-b")
+    }
     tasks_path = tmp_path / "tasks.jsonl"
     tasks_path.write_text(
         "".join(
@@ -206,12 +203,18 @@ def task_run(mock_backend, tmp_path):
     code = main(
         [
             "run-agentic",
-            "--tasks", str(tasks_path),
-            "--target", mock_backend,
-            "--out", str(out),
-            "--claude-bin", _fake_claude_launcher(tmp_path),
-            "--model", "mock-model",
-            "--timeout-s", "120",
+            "--tasks",
+            str(tasks_path),
+            "--target",
+            mock_backend,
+            "--out",
+            str(out),
+            "--claude-bin",
+            _fake_claude_launcher(tmp_path),
+            "--model",
+            "mock-model",
+            "--timeout-s",
+            "120",
         ]
     )
     assert code == 0
@@ -248,8 +251,11 @@ def test_driver_end_to_end(task_run):
         assert main_rows and sub_rows
         assert all(r["request_id_injected"] for r in rows)
         assert any(r["request_id"] == f"{inst}-0001" for r in main_rows)
-        assert all(r.get("response_status") == 200 for r in rows if "ts" in r
-                   and r.get("response_status") is not None)
+        assert all(
+            r.get("response_status") == 200
+            for r in rows
+            if "ts" in r and r.get("response_status") is not None
+        )
 
     manifest = json.loads(
         (task_run / "agent-requests.json").read_text(encoding="utf-8")
@@ -289,16 +295,24 @@ def test_proxy_forwards_identity_and_injects_request_id(task_run):
 def test_resume_keeps_existing_results(task_run, mock_backend, tmp_path):
     before = len(MockHandler.received)
     tasks_path = tmp_path / "tasks.jsonl"  # the fixture's task file
-    assert main(
-        [
-            "run-agentic",
-            "--tasks", str(tasks_path),
-            "--target", mock_backend,
-            "--out", str(task_run),
-            "--claude-bin", "claude-should-never-run",
-            "--timeout-s", "60",
-        ]
-    ) == 0
+    assert (
+        main(
+            [
+                "run-agentic",
+                "--tasks",
+                str(tasks_path),
+                "--target",
+                mock_backend,
+                "--out",
+                str(task_run),
+                "--claude-bin",
+                "claude-should-never-run",
+                "--timeout-s",
+                "60",
+            ]
+        )
+        == 0
+    )
     assert len(MockHandler.received) == before  # everything resumed, none re-run
 
 
@@ -313,20 +327,23 @@ def test_judge_end_to_end(task_run, tmp_path):
     (task_run / "results" / "local__task-b.json").write_text(
         json.dumps(result), encoding="utf-8"
     )
-    assert main(
-        [
-            "judge-agentic",
-            "--run-dir", str(task_run),
-            "--judge-command",
-            f'"{sys.executable}" "{judge}" --predictions {{predictions_path}}'
-            ' --report {report_path}',
-            "--run-id", "rl-test",
-        ]
-    ) == 0
-
-    summary = json.loads(
-        (task_run / "judge-summary.json").read_text(encoding="utf-8")
+    assert (
+        main(
+            [
+                "judge-agentic",
+                "--run-dir",
+                str(task_run),
+                "--judge-command",
+                f'"{sys.executable}" "{judge}" --predictions {{predictions_path}}'
+                " --report {report_path}",
+                "--run-id",
+                "rl-test",
+            ]
+        )
+        == 0
     )
+
+    summary = json.loads((task_run / "judge-summary.json").read_text(encoding="utf-8"))
     assert summary["total"] == 2
     assert summary["judged"] == 2
     assert summary["resolved"] == 1
@@ -352,20 +369,24 @@ def test_unreported_task_stays_unjudged(task_run, tmp_path):
     judge.write_text(FAKE_JUDGE, encoding="utf-8")
     # the judge sees only task-a's prediction: task-b is missing from the
     # report and must stay correct=None, counted unjudged
-    assert main(
-        [
-            "judge-agentic",
-            "--run-dir", str(task_run),
-            "--judge-command",
-            f'"{sys.executable}" "{judge}" --predictions {{predictions_path}}'
-            ' --report {report_path}',
-            "--predictions-path", str(_only_a_predictions(task_run)),
-            "--run-id", "rl-test",
-        ]
-    ) == 0
-    summary = json.loads(
-        (task_run / "judge-summary.json").read_text(encoding="utf-8")
+    assert (
+        main(
+            [
+                "judge-agentic",
+                "--run-dir",
+                str(task_run),
+                "--judge-command",
+                f'"{sys.executable}" "{judge}" --predictions {{predictions_path}}'
+                " --report {report_path}",
+                "--predictions-path",
+                str(_only_a_predictions(task_run)),
+                "--run-id",
+                "rl-test",
+            ]
+        )
+        == 0
     )
+    summary = json.loads((task_run / "judge-summary.json").read_text(encoding="utf-8"))
     assert summary["unjudged"] == 1
     rows = {
         json.loads(line)["case_id"]: json.loads(line)
@@ -386,25 +407,22 @@ def _only_a_predictions(task_run: Path) -> Path:
     ]
     path = task_run / "judge" / "predictions-a.jsonl"
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
-        "".join(json.dumps(row) + "\n" for row in only_a), encoding="utf-8"
-    )
+    path.write_text("".join(json.dumps(row) + "\n" for row in only_a), encoding="utf-8")
     return path
 
 
 def test_parse_report_shapes():
-    assert parse_report(
-        {"psf__x-1": {"resolved": True, "report": {}}}
-    ) == {"psf__x-1": {"resolved": True, "report": {"resolved": True, "report": {}}}}
-    assert parse_report({"psf__x-1": False}) == {
-        "psf__x-1": {"resolved": False}
+    assert parse_report({"psf__x-1": {"resolved": True, "report": {}}}) == {
+        "psf__x-1": {"resolved": True, "report": {"resolved": True, "report": {}}}
     }
-    assert parse_report(
-        {"resolved_ids": ["a"], "unresolved_ids": ["b", ""]}
-    ) == {"a": {"resolved": True}, "b": {"resolved": False}}
-    assert parse_report(
-        [{"instance_id": "a", "resolved": True}]
-    ) == {"a": {"resolved": True}}
+    assert parse_report({"psf__x-1": False}) == {"psf__x-1": {"resolved": False}}
+    assert parse_report({"resolved_ids": ["a"], "unresolved_ids": ["b", ""]}) == {
+        "a": {"resolved": True},
+        "b": {"resolved": False},
+    }
+    assert parse_report([{"instance_id": "a", "resolved": True}]) == {
+        "a": {"resolved": True}
+    }
     with pytest.raises(JudgeError):
         parse_report({"nonsense": "shape"})
     with pytest.raises(JudgeError):

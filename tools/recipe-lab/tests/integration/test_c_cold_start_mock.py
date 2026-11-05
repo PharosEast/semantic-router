@@ -550,7 +550,9 @@ def test_cold_start_template_chain_end_to_end(
         },
     }
     providers_path = tmp_path / "providers.yaml"
-    providers_path.write_text(yaml.safe_dump(providers, sort_keys=False), encoding="utf-8")
+    providers_path.write_text(
+        yaml.safe_dump(providers, sort_keys=False), encoding="utf-8"
+    )
 
     spec = {
         "api_version": API_VERSION,
@@ -588,7 +590,11 @@ def test_cold_start_template_chain_end_to_end(
                 "name": ALIAS_A,
                 "endpoint": f"http://127.0.0.1:{mock_port}/v1",
                 "served_name": ALIAS_A,
-                "capabilities": {"vision": True, "tools": True, "context_window": 131072},
+                "capabilities": {
+                    "vision": True,
+                    "tools": True,
+                    "context_window": 131072,
+                },
             },
             {
                 "name": ALIAS_B,
@@ -627,9 +633,11 @@ def test_cold_start_template_chain_end_to_end(
     all_weak_bindings.write_text(
         yaml.safe_dump(
             {
-                lane: [{"model": ALIAS_A}, {"model": ALIAS_B, "lora_name": "alt"}]
-                if lane == "frontier"
-                else [{"model": ALIAS_A}]
+                lane: (
+                    [{"model": ALIAS_A}, {"model": ALIAS_B, "lora_name": "alt"}]
+                    if lane == "frontier"
+                    else [{"model": ALIAS_A}]
+                )
                 for lane in lanes
             }
         ),

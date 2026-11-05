@@ -2708,8 +2708,10 @@ def build_parser() -> argparse.ArgumentParser:
         "decides; writes lanes-<split>.jsonl with case_id/lane/confidence)",
     )
     p_observe_lanes.add_argument(
-        "--spec", required=True, help="experiment spec YAML (template section "
-        "selects the built-in bundle/recipe; selects the split)"
+        "--spec",
+        required=True,
+        help="experiment spec YAML (template section "
+        "selects the built-in bundle/recipe; selects the split)",
     )
     p_observe_lanes.add_argument(
         "--split",

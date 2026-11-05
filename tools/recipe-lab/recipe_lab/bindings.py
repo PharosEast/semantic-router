@@ -142,7 +142,8 @@ def _normalize_costs(
     if top <= 0:
         return {alias: 0.0 for alias in costs}
     return {
-        alias: (cost / top if cost is not None else None) for alias, cost in costs.items()
+        alias: (cost / top if cost is not None else None)
+        for alias, cost in costs.items()
     }
 
 
@@ -170,9 +171,9 @@ def check_routing_space(
                 cost_union[alias] = min(cost_union.get(alias, cost), cost)
     if cost_union:
         floor = min(cost_union.values())
-        cheapest = sorted(
-            alias for alias, cost in cost_union.items() if cost == floor
-        )[0]
+        cheapest = sorted(alias for alias, cost in cost_union.items() if cost == floor)[
+            0
+        ]
 
     if cheapest is None or not measured_lanes:
         return {
@@ -212,7 +213,8 @@ def check_routing_space(
             ),
             "cheapest_model": cheapest,
             "lane_advantages": {
-                lane: round(advantage, 6) for lane, advantage in sorted(lane_advantages.items())
+                lane: round(advantage, 6)
+                for lane, advantage in sorted(lane_advantages.items())
             },
         }
     if len(first_places) == 1:
@@ -336,7 +338,9 @@ def plan_lane(
             norm = (normalized or {}).get(model.name)
             return acc - lam * (norm if norm is not None else 0.0), model.name
 
-        ranked = sorted(eligible, key=lambda model: (-oscore(model)[0], oscore(model)[1]))
+        ranked = sorted(
+            eligible, key=lambda model: (-oscore(model)[0], oscore(model)[1])
+        )
         basis_scores = {
             model.name: {
                 "overall_accuracy": _overall_stat(profile, model.name, "accuracy"),
@@ -382,9 +386,7 @@ def plan_bindings(
         )
     counts = lane_case_counts(profile)
     min_lane_cases = spec.bootstrap_config.min_lane_cases
-    measured_lanes = [
-        lane for lane, n in sorted(counts.items()) if n >= min_lane_cases
-    ]
+    measured_lanes = [lane for lane, n in sorted(counts.items()) if n >= min_lane_cases]
     accuracies = {
         lane: {
             model.name: _lane_stat(profile, model.name, lane, "accuracy")
@@ -541,9 +543,7 @@ def run_bindings(
             "profile": str(profile_path),
             "routing_space": space_probe,
             "candidates": [],
-            "report": (
-                "No benefit to routing: " + space_probe["reason"]
-            ),
+            "report": ("No benefit to routing: " + space_probe["reason"]),
         }
 
     out = Path(out_dir)
@@ -625,7 +625,9 @@ def run_bindings(
                 "eval_copy": str(eval_providers_path),
                 "eval_copy_sha256": dataset_content_hash(eval_providers_path),
                 "cache_disabled": cache_disabled,
-                "cache_disabled_reason": CACHE_DISABLED_REASON if cache_disabled else None,
+                "cache_disabled_reason": (
+                    CACHE_DISABLED_REASON if cache_disabled else None
+                ),
             },
             "bindings": {
                 "path": str(bindings_path),

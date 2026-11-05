@@ -109,9 +109,7 @@ class HeaderForwardProxy:
                     for name, value in self.headers.items()
                     if name.lower() not in HOP_BY_HOP
                 }
-                if not any(
-                    name.lower() == REQUEST_ID_HEADER for name in headers
-                ):
+                if not any(name.lower() == REQUEST_ID_HEADER for name in headers):
                     headers[REQUEST_ID_HEADER] = request_id
                 request = urllib.request.Request(
                     outer.target + self.path,
@@ -185,9 +183,7 @@ class HeaderForwardProxy:
             self._seq = 0
             self._records = []
             self.journal_dir.mkdir(parents=True, exist_ok=True)
-            (self.journal_dir / f"{instance_id}.jsonl").write_text(
-                "", encoding="utf-8"
-            )
+            (self.journal_dir / f"{instance_id}.jsonl").write_text("", encoding="utf-8")
 
     def end_task(self) -> list[dict[str, Any]]:
         with self._lock:
@@ -350,9 +346,7 @@ def run_task(
     if result_path.exists():
         return json.loads(result_path.read_text(encoding="utf-8"))
 
-    status, prep_log = prepare_repo(
-        task, out / "tasks", args.clone_url_template
-    )
+    status, prep_log = prepare_repo(task, out / "tasks", args.clone_url_template)
     if status != "ready":
         result = {
             "instance_id": inst,
@@ -415,13 +409,7 @@ def run_task(
             claude = {"raw": str(claude)[-4000:]}
     except json.JSONDecodeError:
         claude = {"raw": stdout[-4000:]}
-    sessions = sorted(
-        {
-            r["session_header"]
-            for r in journal
-            if r.get("session_header")
-        }
-    )
+    sessions = sorted({r["session_header"] for r in journal if r.get("session_header")})
     result = {
         "instance_id": inst,
         "status": "done",
@@ -466,11 +454,7 @@ def agent_request_manifest(run_dir: str | Path) -> dict[str, Any]:
                 continue
             row = json.loads(line)
             request_id = str(row.get("request_id") or "")
-            if (
-                row.get("agent") == "sub"
-                and request_id
-                and request_id not in seen
-            ):
+            if row.get("agent") == "sub" and request_id and request_id not in seen:
                 seen.add(request_id)
                 entries.append(
                     {
@@ -508,9 +492,7 @@ def task_result_rows(run_dir: str | Path) -> list[dict[str, Any]]:
         claude = claude if isinstance(claude, dict) else {}
         cost = claude.get("total_cost_usd")
         usage = claude.get("usage")
-        completed = (
-            result.get("status") == "done" and result.get("exit_code") == 0
-        )
+        completed = result.get("status") == "done" and result.get("exit_code") == 0
         rows.append(
             {
                 "case_id": inst,

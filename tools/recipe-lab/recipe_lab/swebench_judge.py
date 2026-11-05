@@ -78,9 +78,7 @@ def parse_report(payload: Any) -> dict[str, dict[str, Any]]:
     if isinstance(payload, dict):
         if isinstance(payload.get("resolved_ids"), list):
             resolved = {str(i) for i in payload["resolved_ids"]}
-            unresolved = {
-                str(i) for i in payload.get("unresolved_ids") or [] if i
-            }
+            unresolved = {str(i) for i in payload.get("unresolved_ids") or [] if i}
             for inst in resolved | unresolved:
                 verdicts[inst] = {"resolved": inst in resolved}
             return verdicts
@@ -131,7 +129,9 @@ def judge_run(args: Any) -> int:
     log_dir = run_dir / "judge"
     log_dir.mkdir(parents=True, exist_ok=True)
     predictions_path = (
-        Path(args.predictions_path) if args.predictions_path else log_dir / "predictions.jsonl"
+        Path(args.predictions_path)
+        if args.predictions_path
+        else log_dir / "predictions.jsonl"
     )
     if args.predictions_path is None or args.rebuild_predictions:
         count = build_predictions(run_dir, predictions_path)
@@ -147,10 +147,7 @@ def judge_run(args: Any) -> int:
     )
     print(f"judge: {command}", flush=True)
     # Windows paths carry backslashes: split without POSIX escape rules.
-    tokens = [
-        token.strip('"')
-        for token in shlex.split(command, posix=os.name != "nt")
-    ]
+    tokens = [token.strip('"') for token in shlex.split(command, posix=os.name != "nt")]
     proc = subprocess.run(
         tokens,
         capture_output=True,

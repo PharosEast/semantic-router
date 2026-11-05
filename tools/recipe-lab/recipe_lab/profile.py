@@ -549,9 +549,7 @@ def run_profile(
     tasks_hashes: dict[str, str] = {}
     source_name = "lanes" if lane_mode else "labels"
     labels_hashes = {
-        split: dataset_content_hash(
-            grouping_dir / f"{source_name}-{split}.jsonl"
-        )
+        split: dataset_content_hash(grouping_dir / f"{source_name}-{split}.jsonl")
         for split in splits
     }
 

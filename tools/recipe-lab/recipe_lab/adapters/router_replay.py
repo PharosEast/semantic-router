@@ -307,11 +307,8 @@ def session_rows_for_run(
             continue
         session_policy = _record_field(record, "session_policy", "SessionPolicy")
         row: dict[str, Any] = {
-            "routed": _record_field(record, "selected_model", "SelectedModel")
-            or "",
-            "request_id": str(
-                _record_field(record, "request_id", "RequestID") or ""
-            ),
+            "routed": _record_field(record, "selected_model", "SelectedModel") or "",
+            "request_id": str(_record_field(record, "request_id", "RequestID") or ""),
             **_record_evidence(record),
         }
         if isinstance(session_policy, dict):

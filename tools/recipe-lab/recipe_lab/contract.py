@@ -1541,9 +1541,7 @@ class ModelCapabilities:
 
     @classmethod
     def from_dict(cls, raw: dict) -> ModelCapabilities:
-        unknown = sorted(
-            set(raw) - {"vision", "tools", "reasoning", "context_window"}
-        )
+        unknown = sorted(set(raw) - {"vision", "tools", "reasoning", "context_window"})
         _require(not unknown, f"capabilities has unknown keys: {', '.join(unknown)}")
         for key in ("vision", "tools", "reasoning"):
             if key in raw:
@@ -1624,9 +1622,7 @@ class BootstrapConfig:
 
     @classmethod
     def from_dict(cls, raw: dict) -> BootstrapConfig:
-        unknown = sorted(
-            set(raw) - {"min_lane_cases", "min_advantage_pp", "lambdas"}
-        )
+        unknown = sorted(set(raw) - {"min_lane_cases", "min_advantage_pp", "lambdas"})
         _require(not unknown, f"bootstrap has unknown keys: {', '.join(unknown)}")
         min_cases = raw.get("min_lane_cases", DEFAULT_MIN_LANE_CASES)
         _require(
@@ -1759,9 +1755,7 @@ class ModelEntry:
         capabilities_raw = raw.get("capabilities")
         capabilities = (
             ModelCapabilities.from_dict(
-                _require_mapping(
-                    capabilities_raw, f"model {name!r} capabilities"
-                )
+                _require_mapping(capabilities_raw, f"model {name!r} capabilities")
             )
             if capabilities_raw is not None
             else ModelCapabilities()

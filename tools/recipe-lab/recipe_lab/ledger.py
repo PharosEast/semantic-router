@@ -238,9 +238,7 @@ def validate_record(raw: dict) -> None:
             allowed += ("gate-violated",)
         if raw["status"] not in allowed:
             suffix = (
-                " or 'gate-violated' (route_replay)"
-                if tier == "route_replay"
-                else ""
+                " or 'gate-violated' (route_replay)" if tier == "route_replay" else ""
             )
             raise ContractError(
                 f"status must be 'timeout' or 'incomplete'{suffix}, "

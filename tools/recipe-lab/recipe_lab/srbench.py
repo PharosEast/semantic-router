@@ -227,7 +227,11 @@ class SrbenchCli:
         reviewed = self.run_command(args)
         manifest = reviewed.get("manifest") if isinstance(reviewed, dict) else None
         plan_sha = reviewed.get("plan_sha256") if isinstance(reviewed, dict) else None
-        if not isinstance(manifest, dict) or not isinstance(plan_sha, str) or not plan_sha:
+        if (
+            not isinstance(manifest, dict)
+            or not isinstance(plan_sha, str)
+            or not plan_sha
+        ):
             raise SrbenchError(
                 f"sr-bench candidate-plan did not return a reviewed plan for "
                 f"{baseline_run_id}: {reviewed!r}"
@@ -238,7 +242,9 @@ class SrbenchCli:
             json.dump(manifest, handle)
             plan_path = Path(handle.name)
         try:
-            payload = self.run_command(["run", "--manifest", str(plan_path), "--detach"])
+            payload = self.run_command(
+                ["run", "--manifest", str(plan_path), "--detach"]
+            )
         finally:
             plan_path.unlink(missing_ok=True)
         return self._submit_and_wait(payload, f"candidate-plan {baseline_run_id}")

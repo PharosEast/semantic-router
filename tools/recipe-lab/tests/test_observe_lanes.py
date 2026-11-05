@@ -50,7 +50,11 @@ def fake_list_document():
                                 "algorithm": "multi_factor",
                                 "minimum_candidates": 1,
                             },
-                            {"name": "fast", "algorithm": None, "minimum_candidates": 0},
+                            {
+                                "name": "fast",
+                                "algorithm": None,
+                                "minimum_candidates": 0,
+                            },
                         ],
                     }
                 ],
@@ -99,9 +103,7 @@ def test_observation_bindings_allocate_distinct_placeholders():
     assert count == 2
     # Lanes are processed in sorted order: the first sorted backend lane
     # takes placeholder-1.
-    first_backend = min(
-        lane for lane, refs in bindings.items() if refs
-    )
+    first_backend = min(lane for lane, refs in bindings.items() if refs)
     assert bindings[first_backend][0]["model"] == f"{ol.PLACEHOLDER_PREFIX}-1"
 
 
@@ -168,9 +170,7 @@ def test_build_observation_config_invokes_init_and_disables_cache(tmp_path):
     )
     assert bindings_doc["frontier"][0]["model"]
     # The generated config's cache was forced off.
-    config = yaml.safe_load(
-        Path(result["config"]).read_text(encoding="utf-8")
-    )
+    config = yaml.safe_load(Path(result["config"]).read_text(encoding="utf-8"))
     assert config["global"]["stores"]["response_cache"]["enabled"] is False
     assert result["cache_disabled"] is True
     assert result["bundle_sha256"] == "sha256:bundle"
@@ -216,6 +216,6 @@ def test_write_lanes_is_byte_stable(tmp_path):
     text1 = ol.write_lanes(rows, tmp_path / "lanes-1.jsonl")
     text2 = ol.write_lanes(list(reversed(rows)), tmp_path / "lanes-2.jsonl")
     assert text1.read_bytes() == text2.read_bytes()
-    assert text1.read_text(encoding="utf-8").splitlines()[0].startswith(
-        '{"case_id": "a"'
+    assert (
+        text1.read_text(encoding="utf-8").splitlines()[0].startswith('{"case_id": "a"')
     )

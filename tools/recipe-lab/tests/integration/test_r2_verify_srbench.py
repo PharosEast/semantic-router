@@ -217,7 +217,10 @@ def _register_targets(srbench_bin: str, srbench_store: str, registry: Path) -> N
 
 
 def _mom_only_manifest(
-    path: Path, dataset: Path, router_a: dict, limits: dict,
+    path: Path,
+    dataset: Path,
+    router_a: dict,
+    limits: dict,
     sampling: dict | None = None,
 ) -> Path:
     """A plain MoM-router baseline manifest: no single target (the S arm
@@ -296,7 +299,9 @@ def _verify_argv(
     ]
 
 
-def _run_verify(capsys: pytest.CaptureFixture[str], argv: list[str]) -> tuple[int, dict]:
+def _run_verify(
+    capsys: pytest.CaptureFixture[str], argv: list[str]
+) -> tuple[int, dict]:
     """Run verify in-process; any of the three verdict exit codes is valid.
 
     The result document is pretty-printed (``indent=2``), so stdout must be
@@ -351,7 +356,9 @@ def registered_targets(
     )
     registry = tmp_path_factory.mktemp("r2-registry") / "targets.json"
     _register_targets(
-        srbench_bin, srbench_store, _write_registry(registry, router_a, router_b, strong, weak)
+        srbench_bin,
+        srbench_store,
+        _write_registry(registry, router_a, router_b, strong, weak),
     )
 
 
@@ -405,9 +412,7 @@ def test_verify_srbench_end_to_end(
     )
 
     # the frozen baseline manifest carries the injected registry S arm first
-    frozen = json.loads(
-        (work / "baseline-manifest.submitted.json").read_text("utf-8")
-    )
+    frozen = json.loads((work / "baseline-manifest.submitted.json").read_text("utf-8"))
     assert frozen["targets"][0]["id"] == "rl-single-strong"
     assert frozen["targets"][1]["id"] == "rl-mom-baseline"
 
@@ -509,7 +514,9 @@ def test_verify_fault_injection_is_inconclusive(
         # X8/1398: per-request mock latency keeps the arms observable, so
         # the dataset only needs duplicating when the delay is off
         dataset = _long_dataset(
-            tmp_path / "dataset.jsonl", workload["cases"], 2 if mock_delay_ms >= 250 else 16
+            tmp_path / "dataset.jsonl",
+            workload["cases"],
+            2 if mock_delay_ms >= 250 else 16,
         )
     else:
         # the real smoke set at real model latency keeps every arm in
@@ -625,9 +632,7 @@ def test_verify_dataset_mismatch_rejected_before_submission(
     work.mkdir()
 
     with pytest.raises(SystemExit, match="binds dataset"):
-        main(
-            _verify_argv(spec_path, manifest_path, candidate_path, work, srbench_url)
-        )
+        main(_verify_argv(spec_path, manifest_path, candidate_path, work, srbench_url))
     # zero-cost rejection: the submission snapshot was never written, so no
     # sr-bench run was spent on a dataset the contract cannot verify
     assert not (work / "baseline-manifest.submitted.json").exists()

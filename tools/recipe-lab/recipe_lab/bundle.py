@@ -223,9 +223,7 @@ def render_bundle_report(
         unmeasured = lanes.get("unmeasured_lanes") or []
         excluded = lanes.get("excluded_lanes") or []
         lines += ["", "### Lane coverage", ""]
-        lines.append(
-            f"- measured lanes: {', '.join(measured) if measured else 'none'}"
-        )
+        lines.append(f"- measured lanes: {', '.join(measured) if measured else 'none'}")
         lines.append(
             "- unmeasured lanes (assigned by the default rule, untested): "
             + (", ".join(unmeasured) if unmeasured else "none")
@@ -578,9 +576,9 @@ def build_bundle(
         # hash pins the routing structure); classification is null there.
         "classification": {
             "projection_sha256": sidecar_projection if not template_mode else None,
-            "source_sha256": sidecar_classification.get("sha256")
-            if not template_mode
-            else None,
+            "source_sha256": (
+                sidecar_classification.get("sha256") if not template_mode else None
+            ),
         },
         # Template mode (sub-issue-8 §2.2 step 10): the template identity and
         # the per-lane measured/unmeasured/excluded lists the report cites.
@@ -641,8 +639,14 @@ def build_bundle(
     (out / "profile.json").write_bytes(profile_bytes)
     if template_mode:
         (out / "bindings.yaml").write_bytes(bindings_file.read_bytes())
-    written = ["validate.txt", "report.md", "ledger.jsonl", "provenance.json",
-               "PROMOTION.md", "REVIEW.md"]
+    written = [
+        "validate.txt",
+        "report.md",
+        "ledger.jsonl",
+        "provenance.json",
+        "PROMOTION.md",
+        "REVIEW.md",
+    ]
     if not template_mode:
         written.append("config.diff")
     for name in written:

@@ -124,9 +124,7 @@ def template_info(
         timeout_s=timeout_s,
         what="recipe builtin list",
     )
-    bundles = {
-        entry["name"]: entry for entry in document.get("bundles") or []
-    }
+    bundles = {entry["name"]: entry for entry in document.get("bundles") or []}
     if bundle not in bundles:
         known = ", ".join(sorted(bundles)) or "none"
         raise ContractError(
@@ -357,7 +355,7 @@ def build_observation_config(
     config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
     if not isinstance(config, dict):
         raise ContractError(f"{config_path} is not a YAML mapping")
-    stores = ((config.get("global") or {}).get("stores") or {})
+    stores = (config.get("global") or {}).get("stores") or {}
     cache = stores.get("response_cache")
     cache_disabled = False
     if isinstance(cache, dict) and cache.get("enabled"):

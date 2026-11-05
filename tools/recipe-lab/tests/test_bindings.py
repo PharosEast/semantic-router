@@ -33,8 +33,16 @@ TEMPLATE_LANES = {
     "frontier": {"algorithm": "decision", "minimum_candidates": 2, "immediate": False},
     "vision": {"algorithm": "static", "minimum_candidates": 1, "immediate": False},
     "agentic": {"algorithm": "static", "minimum_candidates": 1, "immediate": False},
-    "standard": {"algorithm": "multi_factor", "minimum_candidates": 1, "immediate": False},
-    "long_context": {"algorithm": "static", "minimum_candidates": 1, "immediate": False},
+    "standard": {
+        "algorithm": "multi_factor",
+        "minimum_candidates": 1,
+        "immediate": False,
+    },
+    "long_context": {
+        "algorithm": "static",
+        "minimum_candidates": 1,
+        "immediate": False,
+    },
     "recovery": {"algorithm": "static", "minimum_candidates": 1, "immediate": False},
 }
 
@@ -115,7 +123,12 @@ def write_spec(
             {
                 "version": "v0.3",
                 "listeners": [
-                    {"name": "gw", "address": "0.0.0.0", "port": 8899, "timeout": "300s"}
+                    {
+                        "name": "gw",
+                        "address": "0.0.0.0",
+                        "port": 8899,
+                        "timeout": "300s",
+                    }
                 ],
                 "providers": {
                     "defaults": {"model": "local/model-a"},
@@ -208,9 +221,7 @@ def write_profile(
     }
     profile_dir = tmp_path / "profile"
     profile_dir.mkdir(parents=True, exist_ok=True)
-    (profile_dir / "profile.json").write_text(
-        json.dumps(profile), encoding="utf-8"
-    )
+    (profile_dir / "profile.json").write_text(json.dumps(profile), encoding="utf-8")
     return profile_dir
 
 
@@ -220,7 +231,9 @@ def fake_run_json_factory(outputs: dict[str, str]):
     def run_json(argv, *, timeout_s, what):
         if "init" in argv:
             out = argv[argv.index("--output") + 1]
-            Path(out).write_text(outputs.get("init", "version: v0.3\n"), encoding="utf-8")
+            Path(out).write_text(
+                outputs.get("init", "version: v0.3\n"), encoding="utf-8"
+            )
             return {"valid": True}
         return {"bundles": []}
 
@@ -246,6 +259,7 @@ def plan(tmp_path, *, profile_dir, lam, exclude=(), spec_path=None):
 # Golden scenario (sub-issue-8 §2.7): model A is fine on facts/fast, model B
 # is clearly better on code/hard and 4x pricier.
 # --------------------------------------------------------------------------
+
 
 def golden_profile(tmp_path):
     n = {"code": 50, "hard": 50, "facts": 50, "fast": 50, "frontier": 0}
@@ -348,9 +362,7 @@ def test_long_context_requires_declared_window(tmp_path):
     assert not capability_satisfied(
         requirement, ModelCapabilities(context_window=131072)
     )
-    assert capability_satisfied(
-        requirement, ModelCapabilities(context_window=262144)
-    )
+    assert capability_satisfied(requirement, ModelCapabilities(context_window=262144))
     # Unlisted lanes carry no requirement.
     assert lane_requirements("fast") == {
         "capabilities": (),
@@ -378,9 +390,7 @@ def test_no_routing_space_report_and_no_candidates(tmp_path, monkeypatch):
     from recipe_lab.contract import ExperimentSpec
 
     spec = ExperimentSpec.from_yaml(spec_path)
-    monkeypatch.setattr(
-        bindings_mod, "template_info", lambda **kwargs: fake_template()
-    )
+    monkeypatch.setattr(bindings_mod, "template_info", lambda **kwargs: fake_template())
     result = bindings_mod.run_bindings(
         spec=spec,
         profile_dir=profile_dir,
@@ -411,9 +421,7 @@ def test_run_bindings_generates_and_validates_candidates(tmp_path, monkeypatch):
     from recipe_lab.contract import ExperimentSpec
 
     spec = ExperimentSpec.from_yaml(spec_path)
-    monkeypatch.setattr(
-        bindings_mod, "template_info", lambda **kwargs: fake_template()
-    )
+    monkeypatch.setattr(bindings_mod, "template_info", lambda **kwargs: fake_template())
     captured: list[list[str]] = []
 
     def run_json(argv, *, timeout_s, what):
@@ -424,9 +432,7 @@ def test_run_bindings_generates_and_validates_candidates(tmp_path, monkeypatch):
             return {"valid": True}
         return {"bundles": []}
 
-    monkeypatch.setattr(
-        bindings_mod, "validate_config", lambda path, bin: None
-    )
+    monkeypatch.setattr(bindings_mod, "validate_config", lambda path, bin: None)
     result = bindings_mod.run_bindings(
         spec=spec,
         profile_dir=profile_dir,
@@ -447,9 +453,7 @@ def test_run_bindings_generates_and_validates_candidates(tmp_path, monkeypatch):
     )
     assert eval_copy["global"]["stores"]["response_cache"]["enabled"] is False
     # The input provider config is untouched (endpoints come only from there).
-    original = yaml.safe_load(
-        (tmp_path / "providers.yaml").read_text(encoding="utf-8")
-    )
+    original = yaml.safe_load((tmp_path / "providers.yaml").read_text(encoding="utf-8"))
     assert original["global"]["stores"]["response_cache"]["enabled"] is True
     # Bindings are the raw {lane: refs} mapping init consumes.
     bindings_doc = yaml.safe_load(
@@ -564,9 +568,7 @@ def test_bindings_output_is_byte_stable(tmp_path, monkeypatch):
     from recipe_lab.contract import ExperimentSpec
 
     spec = ExperimentSpec.from_yaml(spec_path)
-    monkeypatch.setattr(
-        bindings_mod, "template_info", lambda **kwargs: fake_template()
-    )
+    monkeypatch.setattr(bindings_mod, "template_info", lambda **kwargs: fake_template())
     monkeypatch.setattr(bindings_mod, "validate_config", lambda path, bin: None)
 
     def run_json(argv, *, timeout_s, what):

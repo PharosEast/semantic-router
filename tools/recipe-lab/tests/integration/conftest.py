@@ -359,7 +359,10 @@ def srbench_bin() -> str:
 
 @pytest.fixture(scope="session")
 def router_a(
-    router_bin: str, smoke_dir: Path, backends: dict[str, str], hf_home: str | None,
+    router_bin: str,
+    smoke_dir: Path,
+    backends: dict[str, str],
+    hf_home: str | None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> dict:
     """Baseline router: the smoke config's own behavior (depth >= 0.6)."""
@@ -372,14 +375,21 @@ def router_a(
 
 @pytest.fixture(scope="session")
 def router_b(
-    router_bin: str, smoke_dir: Path, backends: dict[str, str], hf_home: str | None,
+    router_bin: str,
+    smoke_dir: Path,
+    backends: dict[str, str],
+    hf_home: str | None,
     tmp_path_factory: pytest.TempPathFactory,
 ) -> dict:
     """Candidate router: the depth gate lowered to 0.15 routes far more
     traffic to the frontier lane, so the AB comparison has real movement."""
     stack = _start_router(
-        router_bin, smoke_dir, backends, hf_home,
-        tmp_path_factory.mktemp("router-b"), depth_threshold="0.15",
+        router_bin,
+        smoke_dir,
+        backends,
+        hf_home,
+        tmp_path_factory.mktemp("router-b"),
+        depth_threshold="0.15",
     )
     yield stack
     _stop_router(stack)
