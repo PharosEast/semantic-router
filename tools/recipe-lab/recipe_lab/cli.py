@@ -1401,7 +1401,13 @@ def cmd_run_route_replay(args: argparse.Namespace) -> int:
             status="gate-violated" if violated else None,
         )
         ledger.append(record)
-        appended.append(entry["name"] if isinstance(entry, dict) else str(entry))
+        # the bare-path candidate form carries no name; fall back to the
+        # config file's stem for the recorded-candidates summary
+        appended.append(
+            entry.get("name") or Path(entry["ref"]).stem
+            if isinstance(entry, dict)
+            else str(entry)
+        )
         marker = "GATE-VIOLATED" if violated else "RANKED"
         print(f"[run] {candidate_path.name}: {marker} -> ledger", file=sys.stderr)
     _print_json(
