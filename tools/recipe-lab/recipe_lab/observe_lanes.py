@@ -181,8 +181,7 @@ def capability_satisfied(requirement: dict[str, Any], capabilities: Any) -> bool
     return not (
         window is not None
         and (
-            capabilities.context_window is None
-            or capabilities.context_window < window
+            capabilities.context_window is None or capabilities.context_window < window
         )
     )
 
