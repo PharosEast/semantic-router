@@ -1390,9 +1390,10 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     session_events = json.loads(
         (sess_dir / "session-events.json").read_text(encoding="utf-8")
     )
-    # the events file lists the session events themselves: a
-    # protection-disabled arm resolves no session identity, so it is empty
-    assert session_events == []
+    # the session attribution still reads the wire identity: the disabled
+    # arm's records carry the conversation fields, and the drift-loop's
+    # unprotected switch shows up as the lane flap event
+    assert any(event["class"] == "lane_flap" for event in session_events)
 
     # propose-session-policy over the disabled config: Z6's cause model
     # hands the unprotected switches back as the W1-class cause (re-enabling
@@ -1460,10 +1461,11 @@ def test_v6_scenario_2_tuning(stack, recipe_lab_bin, tmp_path):
     )
     gates = result["agentic"]["gates"]
     assert gates["max_unprotected_tool_loop_switches"] == "pass", result["reasons"]
-    # the disabled baseline resolves no session identity, so its Z4 rows
-    # are empty - the honest shape of a protection-disabled arm
+    # the gates judged the arms' own rows: the disabled baseline's rows
+    # carry its switches (the wire identity rides the records even with the
+    # protection off - only the traces are gone)
     baseline_rows = result["agentic"]["replay_evidence"]["baseline"]
-    assert not baseline_rows["rows"]
+    assert baseline_rows["rows"] and baseline_rows["rows"] >= 1
     tuned_runs = [
         run
         for run in cli.runs.values()
