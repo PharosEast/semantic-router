@@ -158,6 +158,34 @@ def test_unpriced_models_rank_as_free_only_at_lambda_zero(three_model_profile):
 # ---- golden test: template rewrite ----
 
 
+def test_bootstrap_consumes_the_canonical_layout(three_model_profile):
+    # the shipped agent recipe carries routing.decisions and
+    # global.model_catalog; the rewrite must consume that layout, not only
+    # the synthetic top-level one (V6's cold-start caught this)
+    canonical = {
+        "version": "v0.3",
+        "global": {
+            "router": {"learning": {"adaptation": {"enabled": True}}},
+            "model_catalog": {"system": {"decision_model": {"deployment": "primary"}}},
+        },
+        "routing": {
+            "modelCards": [],
+            "decisions": [
+                {
+                    "name": "domain_code_complex",
+                    "modelRefs": [{"model": "template/a"}],
+                }
+            ],
+        },
+    }
+    config, sidecar = bootstrap_agentic_config(
+        canonical, three_model_profile, client="generic"
+    )
+    assert config["routing"]["decisions"][0]["modelRefs"][0]["model"] == "local/strong"
+    assert "decisions" not in config
+    assert sidecar["decision_model"] == {"deployment": "primary"}
+
+
 @pytest.fixture()
 def agent_template():
     return {

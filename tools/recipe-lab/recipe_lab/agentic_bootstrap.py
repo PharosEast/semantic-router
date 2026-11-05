@@ -262,7 +262,7 @@ def bootstrap_agentic_config(
     stats = _binding_stats(profile)
     candidates = _profile_models(profile)
     config = copy.deepcopy(dict(template))
-    decisions = config.get("decisions")
+    decisions, decisions_parent = _decisions_of(config)
     if not isinstance(decisions, list):
         raise ValueError("template carries no decisions list")
     reasons: dict[str, Any] = {}
@@ -307,7 +307,7 @@ def bootstrap_agentic_config(
             decision["adaptations"] = adaptations
         rewritten.append(decision)
         reasons[name] = {"lane": lane, **reason}
-    config["decisions"] = rewritten
+    decisions_parent["decisions"] = rewritten
 
     identity = CLIENT_IDENTITY_HEADERS[client]
     headers: dict[str, str] = {"session": identity["session"]}
@@ -365,13 +365,40 @@ def bootstrap_agentic_config(
         "adaptation_enabled": False,
         "progress_gate": {"mode": "observe"},
         "candidate_requirements": {"capabilities": "declared"},
-        "decision_model": (
-            (config.get("model_catalog") or {}).get("system", {}).get("decision_model")
-            if isinstance(config.get("model_catalog"), dict)
-            else None
-        ),
+        "decision_model": _decision_model_of(config),
     }
     return config, sidecar
+
+
+def _decision_model_of(config: dict[str, Any]) -> Any:
+    """The template's pinned decision model, top-level or canonical layout."""
+    for holder in (
+        config.get("model_catalog"),
+        config.get("global", {}).get("model_catalog"),
+    ):
+        if isinstance(holder, dict):
+            system = holder.get("system")
+            if isinstance(system, dict):
+                return system.get("decision_model")
+    return None
+
+
+def _decisions_of(config: dict[str, Any]) -> tuple[Any, dict[str, Any]]:
+    """The template's decisions list and the mapping that owns it.
+
+    The canonical layout carries ``routing.decisions`` (the shipped agent
+    recipe); the synthetic test templates carry a top-level ``decisions``.
+    The rewrite mutates the owning mapping so either layout round-trips.
+    """
+    decisions = config.get("decisions")
+    if isinstance(decisions, list):
+        return decisions, config
+    routing = config.get("routing")
+    if isinstance(routing, dict):
+        decisions = routing.get("decisions")
+        if isinstance(decisions, list):
+            return decisions, routing
+    return None, config
 
 
 def _pin_local_model(local_models: Sequence[str]) -> str:

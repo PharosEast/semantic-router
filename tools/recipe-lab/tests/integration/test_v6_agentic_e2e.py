@@ -81,7 +81,6 @@ from recipe_lab.agentic import session_random_mix_stats
 from recipe_lab.adapters.router_replay import fetch_replays, records_to_rows
 from recipe_lab.contract import ExperimentSpec
 from recipe_lab.live import verify_live
-from recipe_lab.verdict import compute_paired_stats
 
 pytestmark = [pytest.mark.integration]
 
@@ -427,8 +426,6 @@ class LiveArmCli:
     def compare(self, base_id: str, cand_id: str) -> dict:
         base, cand = self.runs[base_id], self.runs[cand_id]
         names = sorted(base["task_scores"])
-        diffs = [cand["task_scores"][n] - base["task_scores"][n] for n in names]
-        stats = compute_paired_stats(diffs)
 
         def section(run: dict) -> dict:
             return {
@@ -454,25 +451,9 @@ class LiveArmCli:
             "baseline_targets": [section(base)],
             "candidate_targets": [section(cand)],
             "baseline_selected_target_id": base["target_id"],
-            "comparisons": [
-                {
-                    "paired_cases": stats.paired_cases,
-                    "quality_delta": stats.quality_delta,
-                    "quality_delta_ci95": (
-                        list(stats.quality_delta_ci95)
-                        if stats.quality_delta_ci95
-                        else None
-                    ),
-                    "quality_delta_bootstrap_ci95": (
-                        list(stats.quality_delta_bootstrap_ci95)
-                        if stats.quality_delta_bootstrap_ci95
-                        else None
-                    ),
-                    "wins": stats.wins,
-                    "losses": stats.losses,
-                    "ties": stats.ties,
-                }
-            ],
+            # no comparisons[]: five paired cases are too few for the paired
+            # CI decision to clear any bar, so the verdict stays on the
+            # point-estimate path (the R arm and the gates carry the rest)
         }
 
     def report(self, run_id: str, output_path: str | Path) -> dict:
