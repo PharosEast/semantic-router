@@ -24,7 +24,7 @@ Facts this module encodes (verified against upstream main ``718845ddc``):
   postgres, async off), so the observation config captures one replay record
   per request; the record's ``decision`` field IS the lane name.
 - The recipe's ``candidate_requirements`` demand declared capabilities and
-  known context limits, so every placeholder model gets an explicit
+  known context and output limits, so every placeholder model declares
   modelCard (the final bindings generation repeats this for real models).
 
 Lane capability requirements are read from the template's lane descriptions
@@ -245,6 +245,7 @@ def observation_providers_config(
                 {
                     "name": model["name"],
                     "context_window_size": 32768,
+                    "max_output_tokens": 8192,
                     "description": (
                         "Lane observation placeholder; answers are irrelevant."
                     ),
