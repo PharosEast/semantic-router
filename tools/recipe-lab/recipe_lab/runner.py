@@ -233,6 +233,30 @@ def _wait_model_runtime_ready(
     raise RunnerError(f"model runtime not ready within {timeout_s}s")
 
 
+def _wait_gateway_ready(router_url: str, timeout_s: float) -> None:
+    """Wait for the router's gateway listener to accept connections.
+
+    The startup-status probe only covers the model runtime; a mom-v1 config
+    initializes many signals and decisions before the gateway binds, so a
+    caller that starts posting completions right after the runtime reports
+    ready can hit ECONNREFUSED even though the router process is alive.
+    """
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(
+                router_url + "/v1/models", timeout=5.0
+            ) as response:
+                if response.status == 200:
+                    return
+        except urllib.error.HTTPError:
+            return  # the gateway is bound; a 4xx still proves it
+        except (urllib.error.URLError, TimeoutError, OSError):
+            pass
+        time.sleep(0.5)
+    raise RunnerError(f"gateway listener not ready within {timeout_s}s")
+
+
 def _send_prompt(
     router_url: str,
     model: str,
@@ -609,6 +633,7 @@ def probe_route_replay(
         _wait_model_runtime_ready(
             management_url, env.ready_timeout_s, router, status_file=status_file
         )
+        _wait_gateway_ready(router_url, env.ready_timeout_s)
         timings["switch_s"] = time.monotonic() - switch_started
 
         statuses: dict[str, int] = {}
