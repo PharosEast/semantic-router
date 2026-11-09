@@ -422,6 +422,12 @@ def probe_records(
                     f"trial exceeded {trial_timeout_s:.0f}s budget waiting for model-runtime readiness"
                 ) from exc
             raise
+        # The gateway listener binds only after the router finishes wiring
+        # its services, which on slow stacks trails the model-runtime
+        # readiness probe by minutes; posting the first completion before
+        # the bind fails with ECONNREFUSED. Wait like the hot-reload
+        # session does (same budget the readiness wait used).
+        _wait_gateway_ready(router_url, ready_budget)
         timings["switch_s"] = time.monotonic() - switch_started
 
         statuses: dict[str, int] = {}
@@ -1110,6 +1116,11 @@ class HotReloadSession:
                 env.ready_timeout_s,
                 router,
                 status_file=self.status_file,
+            )
+            # Same slow-stack guard as probe_records: the gateway binds
+            # after the services finish wiring, behind the readiness probe.
+            _wait_gateway_ready(
+                f"http://127.0.0.1:{router_port}", env.ready_timeout_s
             )
         except RunnerError:
             self.stop()
