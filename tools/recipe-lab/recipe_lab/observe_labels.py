@@ -251,12 +251,17 @@ def labels_from_records(
     into `other` - a lost record is not a routing observation.
 
     ``label_of`` maps the record's matched decision name to the reported
-    label; the default folds non-domain decisions into `other`. The lane
-    observer (observe_lanes) passes the identity mapping: in a template
-    config every decision IS a lane.
+    label; the default reads the record's ``category`` (the classifier's
+    selected domain) and falls back to the decision name only when the
+    category is absent or not a routing domain. The lane observer
+    (observe_lanes) passes the identity mapping: in a template config every
+    decision IS a lane.
     """
-    if label_of is None:
-        label_of = label_for_decision
+    # label_of stays None for the default projection. Reassigning it to
+    # label_for_decision here would make the in-loop category branch dead
+    # code: every label would come from the decision name, which folds
+    # bootstrap candidates' route-<model> decisions into `other` and breaks
+    # the Y2 seed-vs-candidate agreement the bootstrap gate checks.
     by_request_id: dict[str, dict[str, Any]] = {}
     seen_case_ids: set[str] = set()
     for case in cases:
