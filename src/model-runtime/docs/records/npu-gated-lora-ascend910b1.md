@@ -85,6 +85,36 @@ adapter into the base weights (`W' = W + scaling * B @ A`) removes the
 remaining 1.6% but costs one weight copy per live adapter and an accuracy
 record.
 
+## Interaction with the fla-npu chunk (`npu-fla-chunk-ascend910b1.md`)
+
+The two changes touch different layers (this one the readout's row split,
+that one the GDN chunk's kernel) and share no file, but their **gains are
+not independent**. The same three-question request on one card:
+
+| kernel | readout | median |
+| --- | --- | --- |
+| reference | whole-batch (before) | 9,308 ms |
+| reference | row-split (this change) | 3,216 ms |
+| fla-npu | whole-batch | **437.7 ms** |
+| fla-npu | row-split | 463.1 ms |
+
+Row-split is 2.89x under the reference kernels and **0.95x under the fla
+kernels**: the chunk is 21.27x there, and that win already removes the
+re-padding the whole-batch pass paid, so splitting the rows only adds small
+forwards. All four arms answer the same labels; max |dp| against the
+reference/whole-batch arm is 5.6e-5.
+
+So this change pays on a **D3 deployment without the fla slot** (another
+SoC, or the default `FLA_NPU_APPROXIMATE`-off path) and is neutral-to-slightly
+negative where the chunk runs.
+
+A concurrent-load arm (16 clients, 60 three-question requests, served) confirms
+it for larger batches: with the fla chunk both readouts are within noise of
+each other (1.24 vs 1.19 rps, p50 11,909 vs 12,420 ms, p99 17,066 vs
+18,410 ms -- the whole-batch arm ahead on throughput and p99). The chunk
+already removed the row-length cost the row split was recovering, so batch
+size does not reopen it.
+
 ## Reproduction
 
 Scripts and data on the 910B1 host under
