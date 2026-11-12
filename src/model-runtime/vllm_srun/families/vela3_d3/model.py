@@ -369,7 +369,16 @@ class GatedDecisions(Vela3D3Model):
         adapter: AdapterGate | None = None,
         noncausal: bool = False,
     ) -> list[list[float] | None]:
-        """The base's readout, once per adapter its rows name; a gate the caller sets runs as set."""
+        """The base's readout, once per adapter its rows name; a gate the caller sets runs as set.
+
+        A pass runs only the rows it answers: the base rows ride the first
+        adapter's pass, whose gate leaves them on the base's values, and every
+        later pass runs its own rows alone. Running a pass over the whole batch
+        per adapter re-read every other adapter's rows to discard their results
+        -- on the Ascend 910B1 the whole-batch passes measured 3.0x the work of
+        the per-adapter passes at three adapters (docs/records/
+        npu-gated-lora-ascend910b1.md).
+        """
         adapters = [adapter_of(item) for item in items]
         order = Gates.pass_order(adapters)
         if not order or adapter is not None or noncausal:
@@ -378,21 +387,36 @@ class GatedDecisions(Vela3D3Model):
             )
         if images is not None or packed:
             raise RuntimeError("rows with a gated adapter run text-only and unpacked")
-        out: list[list[float] | None] | None = None
-        for name in order:
-            rows = tuple(adapter == name for adapter in adapters)
+
+        by_adapter: dict[str, list[int]] = {name: [] for name in order}
+        base_rows: list[int] = []
+        for index, name in enumerate(adapters):
+            if name is None:
+                base_rows.append(index)
+            else:
+                by_adapter[name].append(index)
+
+        out: list[list[float] | None] = [None] * len(items)
+        for position, name in enumerate(order):
+            mine = by_adapter[name]
+            rows = base_rows + mine if position == 0 else mine
+            if position == 0 and base_rows:
+                covered = set(mine)
+                gate = AdapterGate(name, tuple(i in covered for i in rows))
+            else:
+                gate = AdapterGate(name, None)
             probabilities = super()._readout(
-                items, ids, mask, last, None, states, adapter=AdapterGate(name, rows)
+                [items[i] for i in rows],
+                ids[rows],
+                mask[rows],
+                last[rows],
+                None,
+                None if states is None else [states[i] for i in rows],
+                adapter=gate,
             )
-            out = (
-                probabilities
-                if out is None
-                else [
-                    new if mine else old
-                    for new, old, mine in zip(probabilities, out, rows, strict=True)
-                ]
-            )
-        assert out is not None
+            for slot, row in enumerate(rows):
+                out[row] = probabilities[slot]
+        assert all(entry is not None for entry in out)
         return out
 
 

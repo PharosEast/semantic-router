@@ -174,18 +174,21 @@ def test_router_rows_take_their_adapter_and_other_rows_the_base(runtimes) -> Non
     for row, item in enumerate(items):
         if item.adapter is None:
             continue
-        rows = tuple(other.adapter == item.adapter for other in items)
+        # A gated row runs alone in its adapter's pass (the row-split readout),
+        # so its answer is the one-row forward's: the whole-batch pass this
+        # replaces re-read every other adapter's rows to discard their results.
+        one = [row]
         output = model.engine_model.forward(
             ForwardBatch(
-                input_ids=ids,
-                attention_mask=mask,
-                gather=last[:, None],
-                query=last,
-                lengths=[len(i.ids) for i in items],
-                adapter=AdapterGate(item.adapter, rows),
+                input_ids=ids[one],
+                attention_mask=mask[one],
+                gather=last[one][:, None],
+                query=last[one],
+                lengths=[len(item.ids)],
+                adapter=AdapterGate(item.adapter, None),
             )
         )
-        assert probabilities[row] == model._probabilities(items, output.query)[row]
+        assert probabilities[row] == model._probabilities([item], output.query)[0]
 
 
 def test_a_pass_without_router_rows_is_one_plain_forward(runtimes, monkeypatch) -> None:
@@ -207,7 +210,10 @@ def test_a_pass_without_router_rows_is_one_plain_forward(runtimes, monkeypatch) 
     )
     model.run(mixed)
     assert [gate.name for gate in seen] == ["decision", "decision_df"]
-    assert seen[0].rows == (False, True, False)
+    # The first pass carries the base row and its adapter's row; the second
+    # runs its own row alone, so its gate covers every row it was given.
+    assert seen[0].rows == (False, True)
+    assert seen[1].rows is None
 
 
 def test_rows_with_an_adapter_never_pack(runtimes, monkeypatch) -> None:
