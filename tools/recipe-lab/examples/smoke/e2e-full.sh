@@ -242,7 +242,7 @@ cat "$WORK/live-verdict.json"
 
 # ---------------- Stage 4: report / next / provenance (Sub-4) ----------------
 "$RL/recipe-lab" report --ledger "$WORK/ledger.jsonl" --output "$WORK/report.md" > "$WORK/report.json" 2>&1
-"$RL/recipe-lab" next --ledger "$WORK/ledger.jsonl" --output "$WORK/next-context.md" > "$WORK/next.json" 2>&1
+"$RL/recipe-lab" next --spec "$WORK/spec.yaml" --ledger "$WORK/ledger.jsonl" --output "$WORK/next-context.md" > "$WORK/next.json" 2>&1
 "$RL/recipe-lab" provenance --ledger "$WORK/ledger.jsonl" --output "$WORK/manifest.json" > "$WORK/prov.json" 2>&1
 "$RL/recipe-lab" record-draft --ledger "$WORK/ledger.jsonl" --output "$WORK/promotion-draft.md" > "$WORK/draft.json" 2>"$WORK/draft.err"
 echo ====REPORT====
